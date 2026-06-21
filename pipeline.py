@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""jawn-voice pipeline: wake word -> speech-to-text -> claude brain -> text-to-speech.
+"""computah pipeline: wake word -> speech-to-text -> brain -> text-to-speech.
 
 The load-bearing core of a local voice assistant, built to run mic-free by
 feeding it audio files. No microphone, no network LLM API, no PyTorch.
@@ -7,11 +7,15 @@ feeding it audio files. No microphone, no network LLM API, no PyTorch.
 Stages:
   detect_wake(wav)  openWakeWord (ONNX) — is the wake phrase present?
   transcribe(wav)   faster-whisper (CTranslate2, int8) — what was said?
-  brain(text)       the `claude` CLI as a subprocess — what to reply?
+  brain(text)       dispatches to a persistent assistant session (the bridge)
+                    or, as a dev fallback, the local `claude` CLI subprocess.
   speak(text, out)  Piper TTS (ONNX) — render the reply to a WAV.
 
 All four are CPU-only and fit in the Pi's RAM. The wake word is changeable
-through config.json (see set_wake_word / available_wake_models).
+through config.json (see set_wake_word / available_wake_models). The brain
+backend is selected by the brain_backend config key; deployment-specific and
+sensitive bridge settings live in config.local.json (gitignored), which
+overrides config.json.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ import warnings
 from math import gcd
 from pathlib import Path
 
+import brain_bridge
+
 # Silence onnxruntime's CUDA-provider chatter before it imports. There is no GPU
 # on the Pi; CPU fallback is expected and correct.
 os.environ.setdefault("ORT_LOGGING_LEVEL", "3")
@@ -38,6 +44,9 @@ from scipy.signal import resample_poly  # noqa: E402
 
 PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.json"
+# Gitignored overrides for this deployment (persona, ssh host, reply path).
+# Keeps infra names and paths out of the published config.json.
+LOCAL_CONFIG_PATH = PROJECT_DIR / "config.local.json"
 VOICES_DIR = PROJECT_DIR / "voices"
 WHISPER_DIR = PROJECT_DIR / "whisper_models"
 # Prefer the claude binary on PATH; fall back to the common per-user install path.
@@ -59,8 +68,21 @@ DEFAULTS = {
     "whisper_model": "tiny.en",
     "whisper_compute": "int8",
     "voice_model": "en_US-lessac-medium",
+    # Brain backend: "cli" (the claude -p dev fallback, default so a fresh clone
+    # runs standalone) or "bridge" (a persistent assistant session).
+    "brain_backend": "cli",
     "claude_model": "haiku",
     "claude_timeout_s": 60,
+    # Bridge settings (used when brain_backend == "bridge"). Put real values in
+    # config.local.json — persona/host/path are deployment-specific and stay out
+    # of the published config.json.
+    "brain_persona": "assistant",
+    "brain_transport": "local",   # "local" (this host) or "ssh" (another host)
+    "brain_host": "",             # ssh host alias, required for transport "ssh"
+    "brain_bot_spren_bin": "bot-spren",
+    "brain_reply_path": "",       # path to the persona's FileOutbound reply file
+    "brain_timeout_s": 120,
+    "brain_poll_s": 0.5,
 }
 
 VOICE_SYSTEM_PROMPT = (
@@ -77,13 +99,20 @@ _whisper_cache: dict[tuple[str, str], object] = {}
 # Config + wake-word library
 # --------------------------------------------------------------------------- #
 def load_config() -> dict:
-    """Read config.json, filling any missing key from DEFAULTS."""
+    """Read config, filling any missing key from DEFAULTS.
+
+    Layering, lowest to highest precedence: DEFAULTS, then config.json (committed,
+    non-sensitive), then config.local.json (gitignored deployment overrides).
+    """
     cfg = dict(DEFAULTS)
-    if CONFIG_PATH.exists():
+    for path, label in ((CONFIG_PATH, "config.json"),
+                        (LOCAL_CONFIG_PATH, "config.local.json")):
+        if not path.exists():
+            continue
         try:
-            cfg.update(json.loads(CONFIG_PATH.read_text()))
+            cfg.update(json.loads(path.read_text()))
         except json.JSONDecodeError as e:
-            print(f"warning: config.json is not valid JSON ({e}); using defaults",
+            print(f"warning: {label} is not valid JSON ({e}); ignoring it",
                   file=sys.stderr)
     return cfg
 
@@ -124,13 +153,29 @@ def _resolve_wake_path(name: str) -> str:
     return lib[name]
 
 
+def _read_base_config() -> dict:
+    """Read only config.json — no DEFAULTS, no config.local.json overlay.
+
+    set_wake_word writes back to config.json, so it must round-trip the committed
+    base alone. Writing the merged dict (load_config) would persist DEFAULTS and,
+    worse, the gitignored config.local.json overlay (persona, ssh host, reply
+    path) into the tracked file, defeating the committed/local split.
+    """
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text())
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
 def set_wake_word(name: str) -> dict:
-    """Change the active wake word in config.json and return the new config."""
+    """Change the active wake word in config.json and return the effective config."""
     _resolve_wake_path(name)  # validate before writing
-    cfg = load_config()
-    cfg["wake_word"] = name
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
-    return cfg
+    base = _read_base_config()
+    base["wake_word"] = name
+    CONFIG_PATH.write_text(json.dumps(base, indent=2) + "\n")
+    return load_config()
 
 
 # --------------------------------------------------------------------------- #
@@ -209,18 +254,63 @@ def transcribe(wav_path: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Stage 3: the brain (claude CLI subprocess — never an HTTP LLM API)
+# Stage 3: the brain (persistent session via the bridge, or the claude CLI)
 # --------------------------------------------------------------------------- #
 def brain(text: str, model: str | None = None,
           timeout_s: int | None = None) -> str:
-    """Send transcribed text to the local `claude` CLI and return its reply.
+    """Answer transcribed text using the configured brain backend.
+
+    brain_backend == "bridge" routes to a persistent assistant session (so voice
+    and the user's text assistant are one session with shared memory); anything
+    else uses the local `claude` CLI fallback. Either way the reply is short
+    spoken text, and no network LLM API is called. Never raises for an expected
+    failure — the caller is a voice loop, so it returns a spoken error instead.
+    """
+    cfg = load_config()
+    if cfg["brain_backend"] == "bridge":
+        return _brain_bridge(text, cfg)
+    return _brain_cli(text, cfg, model=model, timeout_s=timeout_s)
+
+
+def _brain_bridge(text: str, cfg: dict) -> str:
+    """Route the transcript to a persistent assistant session over the bridge.
+
+    Transport is built from config: "local" talks to bot-spren on this host,
+    "ssh" to bot-spren on another host (pipeline here, assistant elsewhere). A
+    missing required setting degrades to a spoken error, never a crash.
+    """
+    reply_path = cfg["brain_reply_path"]
+    if not reply_path:
+        return "Sorry, the brain reply path is not configured."
+
+    persona = cfg["brain_persona"]
+    bot_spren_bin = cfg["brain_bot_spren_bin"]
+    if cfg["brain_transport"] == "ssh":
+        host = cfg["brain_host"]
+        if not host:
+            return "Sorry, the brain host is not configured."
+        send = brain_bridge.ssh_cli_send(host, bot_spren_bin)
+        read_reply = brain_bridge.ssh_reply_reader(host, reply_path)
+    else:
+        send = brain_bridge.cli_send(bot_spren_bin)
+        read_reply = brain_bridge.file_reply_reader(reply_path)
+
+    return brain_bridge.brain_via_bridge(
+        text, persona=persona, send=send, read_reply=read_reply,
+        system_prompt=VOICE_SYSTEM_PROMPT,
+        timeout_s=cfg["brain_timeout_s"], poll_s=cfg["brain_poll_s"],
+    )
+
+
+def _brain_cli(text: str, cfg: dict, model: str | None = None,
+               timeout_s: int | None = None) -> str:
+    """Dev fallback: send the transcript to the local `claude` CLI.
 
     Uses the host Claude Code subscription via subprocess. Tools are disabled so
     untrusted spoken input cannot drive local actions; session persistence is
-    off so audio transcripts are not written to disk. This is the only LLM call
-    in the pipeline and it is a CLI call, not a network API request.
+    off so audio transcripts are not written to disk. A CLI call, not a network
+    API request, and stateless — no shared memory with the text assistant.
     """
-    cfg = load_config()
     model = model or cfg["claude_model"]
     timeout_s = cfg["claude_timeout_s"] if timeout_s is None else timeout_s
 

@@ -58,17 +58,26 @@ The transport is injected in `brain_bridge.py`:
 
 The bridge snapshots the last reply block, sends the new transcript, then polls for the next block. That keeps the production path simple while preserving the same contract in tests.
 
+By default a fresh clone runs standalone: `brain_backend` is `cli`, a one-shot
+`claude` CLI call, so there is no session to wire up first. Set `brain_backend` to
+`bridge` to use a persistent session, and put the deployment-specific values
+(persona, transport, ssh host, reply-file path) in `config.local.json` — gitignored,
+overrides `config.json`. Copy `config.local.example.json` to start.
+
 ## Repository layout
 
-| Path | Purpose |
-| --- | --- |
-| `pipeline.py` | The wake-word, transcription, brain, speech, and CLI pipeline. |
-| `brain_bridge.py` | File-based bridge and local, ssh, and simulated transports. |
-| `sim_persona.py` | Test assistant that tails an inbox and writes replies in the production reply format. |
-| `config.json` | Active wake word, thresholds, model names, and paths. |
-| `test_brain_bridge.py` | Fast bridge round-trip test with no speech models. |
-| `test_pipeline.py` | End-to-end pipeline test using the fallback CLI brain. |
-| `test_pipeline_bridge.py` | End-to-end pipeline test using the bridge and simulated persona. |
+| File | What it is |
+|------|-----------|
+| `pipeline.py` | The four stages, the end-to-end chain, and the CLI. |
+| `brain_bridge.py` | Routes the transcript to a persistent assistant session; injected transports (local / ssh / sim). |
+| `sim_persona.py` | A stand-in assistant for tests — tails an inbox, writes canned replies in the real reply format. |
+| `test_brain_bridge.py` | Bridge round-trip test (no models, no session, no mic). |
+| `test_brain_dispatch.py` | Config selects the brain backend, without leaking local config (no models). |
+| `test_pipeline_bridge.py` | Full chain with real models plus the bridge brain, mic-free. |
+| `test_pipeline.py` | Full chain with the fallback CLI brain. |
+| `config.json` | Active wake word, thresholds, model choices, and the brain backend toggle. |
+| `config.local.example.json` | Template for the gitignored `config.local.json` deployment overrides. |
+| `requirements.txt` | Pinned dependencies — CPU-only, no PyTorch. |
 | `assets/og-image.html` | Source document for the repository social preview image. |
 | `docs/` | GitHub Pages site. |
 
