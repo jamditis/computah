@@ -26,6 +26,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import warnings
 from math import gcd
@@ -206,8 +207,33 @@ def _get_oww_model(model_path: str):
     if model_path not in _oww_cache:
         from openwakeword.model import Model
 
-        _oww_cache[model_path] = Model(wakeword_model_paths=[model_path])
+        model = Model(wakeword_model_paths=[model_path])
+        # A fresh model's preprocessor holds blank audio/feature buffers. Snapshot
+        # them now so _reset_oww can restore a true clean slate cheaply (see there).
+        pp = model.preprocessor
+        model._blank_buffers = (
+            pp.melspectrogram_buffer.copy(), pp.feature_buffer.copy())
+        _oww_cache[model_path] = model
     return _oww_cache[model_path]
+
+
+def _reset_oww(model) -> None:
+    """Reset an openWakeWord model to a clean slate between independent streams.
+
+    Model.reset() clears only the prediction (score) buffer; the preprocessor's
+    raw-audio, melspectrogram, and feature buffers (~10 s of history) survive. A
+    warm model reused across turns therefore carries the previous turn's audio
+    forward and can false-fire on the next stream. This restores the pristine
+    buffers snapshotted at model creation — a clean slate without rebuilding the
+    feature buffer (~0.6 s of embedding compute) on every turn.
+    """
+    model.reset()
+    pp = model.preprocessor
+    pp.raw_data_buffer.clear()
+    pp.accumulated_samples = 0
+    mel, feat = model._blank_buffers
+    pp.melspectrogram_buffer = mel.copy()
+    pp.feature_buffer = feat.copy()
 
 
 def detect_wake(wav_path: str, model_name: str | None = None,
@@ -224,7 +250,7 @@ def detect_wake(wav_path: str, model_name: str | None = None,
     path = _resolve_wake_path(model_name)
 
     model = _get_oww_model(path)
-    model.reset()  # clear streaming buffers between independent clips
+    _reset_oww(model)  # full clean slate between independent clips
     pcm = _load_pcm16(wav_path)
     # A one-shot clip file must fill the detector's ~2s context window; live audio
     # fills it naturally. The wake word can sit at the very start of a clip of any
@@ -244,6 +270,87 @@ def detect_wake(wav_path: str, model_name: str | None = None,
         for score in preds.values():
             peak = max(peak, float(score))
     return peak >= threshold, model_name, peak
+
+
+# --------------------------------------------------------------------------- #
+# Stage 1b: live streaming — continuous detection + request capture
+# --------------------------------------------------------------------------- #
+# These drive a turn from a frame stream instead of a whole file. A live mic and
+# iter_wav_frames yield the same thing — consecutive 80 ms int16 frames — so the
+# detection and capture logic is identical and testable with no hardware. The
+# physical mic and speaker adapters land with the microphone (issues #9, #11).
+FRAME_SIZE = 1280  # 80 ms at 16 kHz — openWakeWord's frame size
+_SILENCE_RMS = 250.0           # int16 RMS below this is room tone, not speech
+_ENDPOINT_SILENCE_FRAMES = 10  # ~0.8 s of trailing quiet ends a captured request
+_NO_SPEECH_ONSET_FRAMES = 20   # ~1.6 s; abandon a wake that no speech follows
+_MAX_REQUEST_FRAMES = 100      # ~8 s cap so a stuck stream cannot record forever
+
+
+def iter_wav_frames(wav_path: str):
+    """Yield consecutive 80 ms int16 frames from a WAV: a file-backed stand-in for
+    a live mic. A microphone source yields frames of the same size and dtype, so
+    everything downstream is identical."""
+    pcm = _load_pcm16(wav_path)
+    for i in range(0, len(pcm) - FRAME_SIZE + 1, FRAME_SIZE):
+        yield pcm[i:i + FRAME_SIZE]
+
+
+def _frame_rms(frame: np.ndarray) -> float:
+    return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+
+
+def stream_detect_wake(frames, model, threshold: float) -> float | None:
+    """Watch a continuous frame stream for the wake word.
+
+    detect_wake handles a one-shot file by resetting the model and padding the clip
+    so its ~2 s context window fills. A live stream fills that window naturally, so
+    here the model is reset ONCE and fed frame by frame with no padding. Stops at
+    and consumes the first frame whose score crosses threshold, returning the peak
+    score so far; returns None if the stream ends with no detection. Leaves the
+    iterator positioned right after the wake word so the caller can capture the
+    request that follows.
+    """
+    _reset_oww(model)
+    peak = 0.0
+    for frame in frames:
+        score = max(float(s) for s in model.predict(frame).values())
+        peak = max(peak, score)
+        if score >= threshold:
+            return peak
+    return None
+
+
+def capture_request(frames) -> np.ndarray:
+    """Collect request frames after a wake fire until a trailing-silence endpoint.
+
+    Energy-based endpointing: once speech has been seen, stop after
+    _ENDPOINT_SILENCE_FRAMES consecutive quiet frames. If no speech ever starts,
+    stop after the shorter _NO_SPEECH_ONSET_FRAMES window so a false or abandoned
+    wake frees the listener in ~1.6 s instead of holding it for the full
+    _MAX_REQUEST_FRAMES cap. Returns the captured int16 PCM, or an empty array if
+    no speech followed the wake word. Transcribing that silence would feed whisper
+    room tone, which it tends to hallucinate words for, so the empty return lets
+    the caller ignore the turn instead.
+    """
+    captured: list[np.ndarray] = []
+    quiet = 0
+    speech_seen = False
+    for frame in frames:
+        captured.append(frame)
+        if _frame_rms(frame) < _SILENCE_RMS:
+            quiet += 1
+        else:
+            quiet = 0
+            speech_seen = True
+        if speech_seen and quiet >= _ENDPOINT_SILENCE_FRAMES:
+            break
+        if not speech_seen and quiet >= _NO_SPEECH_ONSET_FRAMES:
+            break  # nothing said after the wake — abandon fast, don't wait the cap
+        if len(captured) >= _MAX_REQUEST_FRAMES:
+            break
+    if not speech_seen:
+        return np.zeros(0, dtype=np.int16)
+    return np.concatenate(captured)
 
 
 # --------------------------------------------------------------------------- #
@@ -415,6 +522,55 @@ def run_pipeline(wav_path: str, out_wav_path: str | None = None,
 
     timings["total"] = time.time() - t0
     return result
+
+
+def run_turn(frames, model_name: str | None = None,
+             threshold: float | None = None,
+             out_wav_path: str | None = None) -> dict | None:
+    """One live turn over a frame stream: wait for the wake word, capture the
+    request to its endpoint, then transcribe -> brain -> speak.
+
+    `frames` is any iterator of 80 ms int16 frames (iter_wav_frames for tests, a
+    mic source on hardware). Returns a result dict, or None if the stream ended
+    before the wake word fired, or the wake fired but no speech followed it (a
+    false or abandoned wake — nothing to act on). This is the unit an always-on
+    loop calls repeatedly; the loop wrapper and mic/speaker I/O land with the
+    microphone (issues #10, #11).
+    """
+    cfg = load_config()
+    model_name = model_name or cfg["wake_word"]
+    threshold = cfg["wake_threshold"] if threshold is None else threshold
+    model = _get_oww_model(_resolve_wake_path(model_name))
+
+    frames = iter(frames)
+    score = stream_detect_wake(frames, model, threshold)
+    if score is None:
+        return None
+
+    request_pcm = capture_request(frames)
+    if request_pcm.size == 0:
+        return None  # wake fired but only silence followed — ignore the turn
+
+    # whisper's wrapper takes a path, so stage the captured request to a temp WAV.
+    fd, req_wav = tempfile.mkstemp(suffix=".wav")
+    os.close(fd)
+    try:
+        sf.write(req_wav, request_pcm, 16000, subtype="PCM_16")
+        transcript = transcribe(req_wav)
+    finally:
+        os.unlink(req_wav)
+
+    reply = brain(transcript)
+    if out_wav_path is None:
+        out_wav_path = str(PROJECT_DIR / "test_audio" / "reply.wav")
+    speak(reply, out_wav_path)
+    return {
+        "wake_word": model_name,
+        "wake_score": round(score, 4),
+        "transcript": transcript,
+        "reply": reply,
+        "output_wav": out_wav_path,
+    }
 
 
 def _cli() -> int:
