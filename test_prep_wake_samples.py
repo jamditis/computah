@@ -121,6 +121,14 @@ def test_explicit_files_only(d: Path) -> None:
     check(total_all == 9, f"a folder still globs all files (total={total_all}, want 9)")
 
 
+def test_empty_input_no_crash(d: Path) -> None:
+    """An input with no audio reports cleanly and returns 0, not raise."""
+    empty = d / "nothing"
+    empty.mkdir()
+    total = prep.process([empty], d / "out_empty", "positive", 0.3, 0.2, 3.0)
+    check(total == 0, f"empty input returns 0 without crashing (got {total})")
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -129,6 +137,7 @@ def main() -> int:
         test_resample_to_16k_mono(d)
         test_background_kept_whole(d)
         test_explicit_files_only(d)
+        test_empty_input_no_crash(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

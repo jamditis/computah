@@ -198,7 +198,8 @@ def process(inputs: list[Path], out_dir: Path, label: str,
     """Process every input file; return the total clip count written."""
     files = _inputs(inputs)
     if not files:
-        print(f"no audio files found at {input_path}", file=sys.stderr)
+        joined = ", ".join(str(p) for p in inputs)
+        print(f"no audio files found at {joined}", file=sys.stderr)
         return 0
 
     total = 0
