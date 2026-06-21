@@ -1,0 +1,11 @@
+{
+  "_comment": "Copy to config.local.json (gitignored) to enable the persistent-session brain. config.local.json overrides config.json. Keep deployment-specific names and paths here, not in config.json.",
+  "brain_backend": "bridge",
+  "brain_persona": "assistant",
+  "brain_transport": "local",
+  "brain_host": "",
+  "brain_bot_spren_bin": "bot-spren",
+  "brain_reply_path": "/path/to/persona/reply-file.txt",
+  "brain_timeout_s": 120,
+  "brain_poll_s": 0.5
+}

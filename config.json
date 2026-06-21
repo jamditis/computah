@@ -4,6 +4,7 @@
   "whisper_model": "tiny.en",
   "whisper_compute": "int8",
   "voice_model": "en_US-lessac-medium",
+  "brain_backend": "cli",
   "claude_model": "haiku",
   "claude_timeout_s": 60
 }

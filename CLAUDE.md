@@ -40,11 +40,18 @@ Deployment-specific values — the persona name, the transport host, the reply-f
 path — belong in configuration or environment, not hardcoded, and anything sensitive
 stays out of version control.
 
+`brain()` in `pipeline.py` dispatches on the `brain_backend` config key: `cli` (the
+`claude -p` fallback, the default so a fresh clone runs standalone) or `bridge`.
+Bridge settings live in `config.local.json`, which is gitignored and overrides
+`config.json`. `load_config` returns the merged view; `set_wake_word` writes only the
+committed base, so persisting the wake word never copies local overrides into
+`config.json`.
+
 ## Invariants
 
 - The production brain is a persistent assistant session via the bridge, not a
-  one-shot `claude -p` call. The CLI path in `pipeline.brain()` is a development
-  fallback only.
+  one-shot `claude -p` call. `pipeline.brain()` dispatches on `brain_backend`; the
+  CLI path (`_brain_cli`) is a development fallback only.
 - The assistant session is a shared, long-running resource (the user also talks to
   it by text). Treat any change to its configuration as deliberate and tested; do not
   break its existing function.
@@ -77,6 +84,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 
 # tests
 .venv/bin/python test_brain_bridge.py      # bridge logic — fast, no models
+.venv/bin/python test_brain_dispatch.py    # config selects the backend — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
 .venv/bin/python test_pipeline.py          # full chain + fallback CLI brain
 
@@ -110,4 +118,5 @@ bug.
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.
 - `test_*.py` — see Dev commands.
-- `config.json` — wake word, thresholds, model choices.
+- `config.json` — wake word, thresholds, model choices, brain backend toggle.
+- `config.local.json` (gitignored) / `config.local.example.json` — deployment bridge settings.

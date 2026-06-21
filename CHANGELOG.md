@@ -6,6 +6,25 @@ All notable changes to computah are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Config-selectable brain backend: the `brain_backend` key chooses `cli` (the
+  `claude -p` fallback, default) or `bridge` (a persistent assistant session), so the
+  bridge is reachable from a real run, not only from tests.
+- `config.local.json` overlay (gitignored) for deployment-specific bridge settings —
+  persona, transport, ssh host, reply path — overriding the committed `config.json`.
+  `config.local.example.json` is a template.
+- `test_brain_dispatch.py`: proves config alone selects the backend and that
+  persisting the wake word does not leak local config into `config.json`.
+
+### Changed
+- `brain()` now dispatches on `brain_backend`; the `claude` CLI path moved to
+  `_brain_cli`. `load_config()` merges `config.local.json` over `config.json`.
+
+### Fixed
+- `set_wake_word()` wrote the merged config (defaults plus the local overlay) back to
+  `config.json`. It now round-trips only the committed base, so the gitignored bridge
+  settings can no longer leak into the tracked file.
+
 ## [0.1.0] - 2026-06-21
 
 First working core. The full voice chain runs mic-free, driven by audio files.
