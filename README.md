@@ -1,153 +1,193 @@
-# COMPUTAH
+# computah
 
-<img width="1213" height="667" alt="image" src="https://github.com/user-attachments/assets/7fbd1b26-35bf-490f-8fac-edb73c74b7b6" />
+A local voice assistant for people who want the assistant they already talk to by text to also answer by voice.
 
-A local, self-hosted voice assistant with a wake word you set and change yourself.
-Speak to it and it answers in a spoken voice with your own assistant — the same
-one you already talk to by text, with the same memory. No cloud speech API, no
-PyTorch, runs CPU-only on a Raspberry Pi.
+computah listens for a wake word, transcribes the request, sends it to a persistent assistant session, and speaks the answer back. The speech stack is local and CPU-only: openWakeWord, faster-whisper, and Piper. The brain can live on the same machine or across the network behind a small file-based bridge.
 
-The name is the wake word: "computah," said the way you say it. The point is that
-the wake word is yours and retrainable, not a fixed brand phrase.
+<img width="1213" height="667" alt="computah screenshot" src="https://github.com/user-attachments/assets/7fbd1b26-35bf-490f-8fac-edb73c74b7b6" />
 
-## Status
+## why this exists
 
-v0.1.0 — the mic-free core works end to end. Wake-word detection, speech-to-text,
-the brain (via a bridge to a persistent assistant session), and text-to-speech all
-run and are tested by feeding audio files in, with no microphone required yet. Live
-microphone capture and the custom "computah" wake-word model are the next
-milestones (see [Roadmap](#roadmap)).
+Most voice assistants make you pick a fixed wake phrase and route every request through a stateless cloud turn. computah is built around a different shape:
 
-## How it works
+- the wake word is yours and can be swapped from configuration today.
+- the voice turn reaches the same long-running assistant session you already use by text.
+- speech recognition and speech synthesis stay local.
+- the pipeline can be tested without a microphone by feeding audio files through the same stages.
+- each stage is small enough to replace without rewriting the rest of the project.
 
-Four stages, each swappable on its own:
+The project name is also the intended wake word: “computah,” said the way you say it. A custom trained wake-word model is on the roadmap; the current release can already switch between installed openWakeWord models.
 
+## project status
+
+v0.1.0 is the mic-free core. The end-to-end path works with audio files:
+
+1. wake-word detection reads a wav file.
+2. speech-to-text turns the spoken request into text.
+3. the brain bridge sends the transcript to a persistent assistant session or a test stand-in.
+4. text-to-speech writes the spoken reply to a wav file.
+
+Live microphone capture, a custom “computah” wake-word model, and lower-latency resident text-to-speech are next.
+
+## how it works
+
+```text
+audio in ──▶ wake word ──▶ speech-to-text ──▶ brain bridge ──▶ text-to-speech ──▶ audio out
+            openWakeWord   faster-whisper     persistent       Piper
+            (ONNX)         (CTranslate2 int8) assistant        (ONNX)
 ```
-audio in ──▶ wake word ──▶ speech-to-text ──▶ brain ──▶ text-to-speech ──▶ audio out
-            openWakeWord   faster-whisper     bridge    Piper
-            (ONNX)         (CTranslate2 int8)           (ONNX)
-```
 
-1. Wake word — openWakeWord (ONNX, CPU). Scans audio in 80 ms frames for the active
-   wake phrase. The phrase is changeable from config and can be custom-trained.
-2. Speech-to-text — faster-whisper on CTranslate2, int8 quantized (tiny.en by
-   default). No PyTorch; fits in a few hundred MB.
-3. Brain — the transcript is handed to a persistent assistant session over a
-   file-based bridge (see below), not a one-shot API call. The reply is short, plain
-   text meant to be spoken.
-4. Text-to-speech — Piper (ONNX), a natural local voice.
+| stage | default implementation | why it is here |
+| --- | --- | --- |
+| wake word | openWakeWord | Scans 80 ms frames locally using ONNX models. |
+| speech-to-text | faster-whisper | Runs Whisper through CTranslate2 with int8 weights. |
+| brain | file bridge | Talks to a long-running assistant session instead of creating one stateless request per turn. |
+| text-to-speech | Piper | Produces local spoken replies through an ONNX voice model. |
 
-All four are CPU-only and fit in the RAM of an 8 GB Pi.
+All speech stages run CPU-only and are intended to fit on an 8 GB Raspberry Pi.
 
-### The brain bridge
+## the brain bridge
 
-Most voice assistants make a fresh, stateless request to an LLM for every utterance.
-computah instead routes the transcript to a long-running assistant session, so the
-voice and the existing text chat are the same assistant with the same memory.
+The bridge is the project’s main design choice. A normal voice assistant sends one request and gets one response. computah sends the transcript into a persistent assistant session so the voice assistant and the text assistant can share memory, tone, and context.
 
-The bridge is message-passing over files, matching the bot-spren framework's
-contract:
+The transport is injected in `brain_bridge.py`:
 
-- send — append the transcript as one event to the session's inbox.
-- reply — the session writes its answer to a reply file as a delimited block; the
-  bridge polls for the next new block.
+- local transport appends a turn to an inbox file and reads a reply file.
+- ssh transport does the same work on another host.
+- simulated transport uses `sim_persona.py` so tests can exercise the bridge without a real assistant session.
 
-The transport is injected (`brain_bridge.py`), so the same logic runs three ways:
-the assistant on the same host, on another host over ssh, or a simulated stand-in
-for tests. Moving where the brain lives changes two functions, not the pipeline.
+The bridge snapshots the last reply block, sends the new transcript, then polls for the next block. That keeps the production path simple while preserving the same contract in tests.
 
-## Repository layout
+## repository layout
 
-| File | What it is |
-|------|-----------|
-| `pipeline.py` | The four stages, the end-to-end chain, and the CLI. |
-| `brain_bridge.py` | Routes the transcript to a persistent assistant session; injected transports (local / ssh / sim). |
-| `sim_persona.py` | A stand-in assistant for tests — tails an inbox, writes canned replies in the real reply format. |
-| `test_brain_bridge.py` | Bridge round-trip test (no models, no session, no mic). |
-| `test_pipeline_bridge.py` | Full chain with real models plus the bridge brain, mic-free. |
-| `test_pipeline.py` | Full chain with the fallback CLI brain. |
-| `config.json` | Active wake word, thresholds, model choices. |
-| `requirements.txt` | Pinned dependencies — CPU-only, no PyTorch. |
+| path | purpose |
+| --- | --- |
+| `pipeline.py` | The wake-word, transcription, brain, speech, and CLI pipeline. |
+| `brain_bridge.py` | File-based bridge and local, ssh, and simulated transports. |
+| `sim_persona.py` | Test assistant that tails an inbox and writes replies in the production reply format. |
+| `config.json` | Active wake word, thresholds, model names, and paths. |
+| `test_brain_bridge.py` | Fast bridge round-trip test with no speech models. |
+| `test_pipeline.py` | End-to-end pipeline test using the fallback CLI brain. |
+| `test_pipeline_bridge.py` | End-to-end pipeline test using the bridge and simulated persona. |
+| `assets/og-image.html` | Source document for the repository social preview image. |
+| `docs/` | github pages site. |
 
-## Setup
+## setup
 
-Python 3.13 on Linux/ARM64 (developed on a Raspberry Pi 5).
+The project is developed on Linux/ARM64 with Python 3.13 on a Raspberry Pi 5. It should also run on other Linux hosts with the same dependencies.
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
 
-# Piper voice (about 63 MB)
+# download a Piper voice, about 63 MB
 .venv/bin/python -m piper.download_voices en_US-lessac-medium --download-dir voices
-
-# faster-whisper downloads its model into whisper_models/ on first run
 ```
 
-The model binaries (Piper voice, Whisper weights, openWakeWord ONNX files) are not
-committed — they download on setup and first run.
+faster-whisper downloads its model into `whisper_models/` on first use. Model binaries and generated voice assets are intentionally not committed.
 
-## Usage
+## usage
 
-Mic-free today: feed it a WAV.
+List installed wake words:
 
 ```bash
-# list the wake words you can switch between right now
 .venv/bin/python pipeline.py --list-wake-words
+```
 
-# switch the active wake word (persists to config.json)
+Switch the active wake word and persist it to `config.json`:
+
+```bash
 .venv/bin/python pipeline.py --set-wake-word hey_jarvis
+```
 
-# run the full chain on a clip
+Run the full chain on a wav file:
+
+```bash
 .venv/bin/python pipeline.py clip.wav -o reply.wav
 ```
 
-Run the tests:
+The output file contains the spoken reply.
+
+## configuration
+
+`config.json` holds the runtime defaults:
+
+- `wake_word` chooses the active openWakeWord model.
+- wake thresholds control how confident detection must be before the pipeline continues.
+- Whisper settings choose the model size and cache path.
+- Piper settings choose the voice model and output path.
+- bridge settings point at the assistant inbox, reply file, and transport details.
+
+Keep hostnames, usernames, and private session paths out of commits when adapting the bridge for a real deployment.
+
+## testing
+
+Fast bridge test:
 
 ```bash
-.venv/bin/python test_brain_bridge.py     # bridge logic, fast, no models
-.venv/bin/python test_pipeline_bridge.py  # full chain, loads models
+.venv/bin/python test_brain_bridge.py
 ```
 
-On a memory-constrained host, cap the model run:
+Full bridge pipeline test:
+
+```bash
+.venv/bin/python test_pipeline_bridge.py
+```
+
+Fallback CLI brain pipeline test:
+
+```bash
+.venv/bin/python test_pipeline.py
+```
+
+On a memory-constrained host, cap the full model run:
 
 ```bash
 systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 \
   .venv/bin/python test_pipeline_bridge.py
 ```
 
-## Latency
+The bridge test is the best first check because it avoids large speech models. The pipeline tests synthesize and consume audio, so they are slower and depend on local model availability.
 
-Measured on a Raspberry Pi 5, warm models, with a stand-in brain:
+## latency notes
 
-| Stage | Time |
-|-------|------|
-| wake detection | ~0.8 s |
-| speech-to-text | ~3.3 s |
-| text-to-speech | ~3.9 s |
+Measured on a Raspberry Pi 5 with warm models and a simulated brain:
 
-The text-to-speech cost is almost entirely Piper reloading its voice model in a
-fresh subprocess each call; keeping Piper resident drops it to well under a second.
-The real brain adds the assistant's own thinking time on top.
+| stage | approximate time |
+| --- | --- |
+| wake detection | 0.8 s |
+| speech-to-text | 3.3 s |
+| text-to-speech | 3.9 s |
 
-## Roadmap
+Piper currently reloads its voice model in a fresh subprocess per reply. Keeping Piper resident should cut most of the text-to-speech time.
 
-- Custom "computah" wake word — train an openWakeWord model on real recordings so it
-  fires on the exact pronunciation, not a stock phrase.
-- Live microphone loop — continuous capture, voice-activity endpointing, and
-  playback (needs a USB mic and speaker, or a network voice satellite).
-- Resident Piper — keep the voice model loaded to cut the spoken-reply latency.
-- Live assistant integration — point the bridge at the running session over the
-  network.
-- Network satellite — an on-device wake-word puck that streams audio only when
-  summoned, so the always-listening cost stays off the small host.
+## roadmap
 
-## Known limitations
+- Train a custom “computah” openWakeWord model on real recordings.
+- Add a live microphone loop with endpointing and playback.
+- Keep Piper resident between turns.
+- Point the bridge at a live assistant session over the network.
+- Build a small network satellite that listens for the wake word locally and streams audio only after activation.
+- Add reply correlation if the upstream reply format gains a turn id.
 
-Reply correlation is positional: the bridge returns the next new reply block after
-sending. If a turn times out and a late reply lands during the next turn, it can be
-mis-attributed. The reply format carries no correlation key, so the mitigation is a
-generous timeout. Voice turns are serialized, so this is rare.
+## known limitations
 
-## License
+The bridge correlates replies by position. It returns the next new reply block after sending a transcript. If one turn times out and its late reply arrives during the next turn, that reply can be misattributed. Voice turns are serialized, so this should be rare, but the limitation is real until replies carry an explicit correlation key.
 
-MIT — see [LICENSE](LICENSE).
+## contributing
+
+Keep changes small and testable:
+
+1. read `CLAUDE.md` for architecture notes and repository rules.
+2. update docs when behavior changes.
+3. run the fastest relevant test first, then broader tests when models are available.
+4. keep generated model files, voices, and local assistant session data out of git.
+5. use sentence case for headings and user-facing text.
+
+## github pages
+
+The site in `docs/` is ready for github pages. In the repository settings, set Pages to deploy from the `docs` folder on the current branch. The page includes a matching svg favicon and social preview metadata.
+
+## license
+
+MIT. See `LICENSE`.
