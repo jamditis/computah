@@ -227,12 +227,15 @@ def detect_wake(wav_path: str, model_name: str | None = None,
     model.reset()  # clear streaming buffers between independent clips
     pcm = _load_pcm16(wav_path)
     # A one-shot clip file must fill the detector's ~2s context window; live audio
-    # fills it naturally. Pad short clips with leading/trailing silence so the wake
-    # word is scored with context, matching how the model was trained.
-    if len(pcm) < 40000:  # < 2.5s
-        lead = np.zeros(24000, dtype=np.int16)  # 1.5s leading silence
-        tail = np.zeros(8000, dtype=np.int16)  # 0.5s trailing silence
-        pcm = np.concatenate([lead, pcm, tail])
+    # fills it naturally. The wake word can sit at the very start of a clip of any
+    # length, so always prepend leading silence (plus a short trailing pad) rather
+    # than gating on total duration: a long recording whose request runs past 2.5s
+    # still starts the freshly-reset detector with an empty window. Padding gives it
+    # the context to score the wake word the way it was trained; silence scores ~0,
+    # so the extra frames never raise the peak for clips that already had context.
+    lead = np.zeros(24000, dtype=np.int16)  # 1.5s leading silence
+    tail = np.zeros(8000, dtype=np.int16)  # 0.5s trailing silence
+    pcm = np.concatenate([lead, pcm, tail])
 
     step = 1280  # 80ms at 16kHz — openWakeWord's frame size
     peak = 0.0
