@@ -1,4 +1,6 @@
-# computah
+# COMPUTAH
+
+<img width="1213" height="667" alt="image" src="https://github.com/user-attachments/assets/7fbd1b26-35bf-490f-8fac-edb73c74b7b6" />
 
 A local, self-hosted voice assistant with a wake word you set and change yourself.
 Speak to it and it answers in a spoken voice with your own assistant — the same
