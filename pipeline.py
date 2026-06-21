@@ -231,7 +231,14 @@ def _reset_oww(model) -> None:
     pp = model.preprocessor
     pp.raw_data_buffer.clear()
     pp.accumulated_samples = 0
-    mel, feat = model._blank_buffers
+    blank = getattr(model, "_blank_buffers", None)
+    if blank is None:
+        # A model not built by _get_oww_model (e.g. a mic adapter's own Model).
+        # Snapshot on first reset: a freshly constructed model is in the blank
+        # state, which is the only safe moment to capture it.
+        blank = (pp.melspectrogram_buffer.copy(), pp.feature_buffer.copy())
+        model._blank_buffers = blank
+    mel, feat = blank
     pp.melspectrogram_buffer = mel.copy()
     pp.feature_buffer = feat.copy()
 
@@ -531,11 +538,11 @@ def run_turn(frames, model_name: str | None = None,
     request to its endpoint, then transcribe -> brain -> speak.
 
     `frames` is any iterator of 80 ms int16 frames (iter_wav_frames for tests, a
-    mic source on hardware). Returns a result dict, or None if the stream ended
-    before the wake word fired, or the wake fired but no speech followed it (a
-    false or abandoned wake — nothing to act on). This is the unit an always-on
-    loop calls repeatedly; the loop wrapper and mic/speaker I/O land with the
-    microphone (issues #10, #11).
+    mic source on hardware). Returns a result dict, or None when there is nothing
+    to act on: the stream ended before the wake word fired, the wake fired but no
+    speech followed it, or the captured audio transcribed to no words (noise). This
+    is the unit an always-on loop calls repeatedly; the loop wrapper and mic/speaker
+    I/O land with the microphone (issues #10, #11).
     """
     cfg = load_config()
     model_name = model_name or cfg["wake_word"]
@@ -559,6 +566,9 @@ def run_turn(frames, model_name: str | None = None,
         transcript = transcribe(req_wav)
     finally:
         os.unlink(req_wav)
+
+    if not transcript.strip():
+        return None  # captured audio whisper read as no words (noise) — ignore
 
     reply = brain(transcript)
     if out_wav_path is None:

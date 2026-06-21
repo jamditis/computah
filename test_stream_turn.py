@@ -25,6 +25,12 @@ from pipeline import FRAME_SIZE
 TEST_DIR = Path(__file__).resolve().parent / "test_audio"
 TEST_DIR.mkdir(exist_ok=True)
 
+# Synth "hey jarvis" fires well above this (0.43-0.98 observed) and the negatives
+# score ~0, so 0.2 keeps positives firing with margin against onnxruntime's
+# run-to-run float nondeterminism while keeping the silent cases clearly silent.
+# This is a test threshold only; the production default lives in config.json.
+DETECT_THR = 0.2
+
 PASS, FAIL = "PASS", "FAIL"
 results: list[tuple[str, str]] = []
 
@@ -96,13 +102,13 @@ def main() -> int:
     nowake = build_stream("what time is it in tokyo right now?", "nowake")
     model = pipeline._get_oww_model(pipeline._resolve_wake_path("hey_jarvis"))
 
-    score = pipeline.stream_detect_wake(pipeline.iter_wav_frames(jarvis), model, 0.3)
+    score = pipeline.stream_detect_wake(pipeline.iter_wav_frames(jarvis), model, DETECT_THR)
     check("streaming detect fires on the wake word (no padding)",
-          score is not None and score >= 0.3,
+          score is not None and score >= DETECT_THR,
           f"peak score {score}")
 
     none_score = pipeline.stream_detect_wake(
-        pipeline.iter_wav_frames(nowake), model, 0.3)
+        pipeline.iter_wav_frames(nowake), model, DETECT_THR)
     check("streaming detect stays silent without the wake word",
           none_score is None, f"returned {none_score}")
 
@@ -113,7 +119,7 @@ def main() -> int:
     try:
         out_wav = str(TEST_DIR / "turn_reply.wav")
         r = pipeline.run_turn(pipeline.iter_wav_frames(jarvis),
-                              model_name="hey_jarvis", threshold=0.3,
+                              model_name="hey_jarvis", threshold=DETECT_THR,
                               out_wav_path=out_wav)
     finally:
         pipeline.brain = real_brain
@@ -127,7 +133,7 @@ def main() -> int:
           f"transcript={r['transcript']!r} reply={r['reply']!r}" if r else "returned None")
 
     no_turn = pipeline.run_turn(pipeline.iter_wav_frames(nowake),
-                                model_name="hey_jarvis", threshold=0.3)
+                                model_name="hey_jarvis", threshold=DETECT_THR)
     check("run_turn returns None when no wake fires", no_turn is None,
           f"returned {no_turn}")
 
@@ -141,13 +147,43 @@ def main() -> int:
     pipeline.brain = lambda t, **_: called.__setitem__("brain", True) or ""
     try:
         silent_turn = pipeline.run_turn(pipeline.iter_wav_frames(jarvis),
-                                        model_name="hey_jarvis", threshold=0.3)
+                                        model_name="hey_jarvis", threshold=DETECT_THR)
     finally:
         pipeline.capture_request, pipeline.transcribe, pipeline.brain = (
             real_cap, real_tx, real_brain)
     check("run_turn ignores a wake with no speech (skips transcribe/brain)",
           silent_turn is None and not called["transcribe"] and not called["brain"],
           f"returned {silent_turn}, called={called}")
+
+    # Non-speech audio (a loud blip that sets speech_seen) can still transcribe to
+    # nothing; that turn must not reach the brain.
+    brain_hit = {"called": False}
+    real_cap2, real_tx2, real_brain2 = (
+        pipeline.capture_request, pipeline.transcribe, pipeline.brain)
+    pipeline.capture_request = lambda fr: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
+    pipeline.transcribe = lambda p: "   "
+    pipeline.brain = lambda t, **_: brain_hit.__setitem__("called", True) or "x"
+    try:
+        noise_turn = pipeline.run_turn(pipeline.iter_wav_frames(jarvis),
+                                       model_name="hey_jarvis", threshold=DETECT_THR)
+    finally:
+        pipeline.capture_request, pipeline.transcribe, pipeline.brain = (
+            real_cap2, real_tx2, real_brain2)
+    check("run_turn ignores audio that transcribes to nothing (skips brain)",
+          noise_turn is None and not brain_hit["called"],
+          f"returned {noise_turn}, brain_called={brain_hit['called']}")
+
+    # A model not built by _get_oww_model (a future mic adapter may build its own)
+    # must not crash _reset_oww on a missing _blank_buffers snapshot.
+    from openwakeword.model import Model
+    raw = Model(wakeword_model_paths=[pipeline._resolve_wake_path("hey_jarvis")])
+    had_snapshot_before = hasattr(raw, "_blank_buffers")
+    raw_score = pipeline.stream_detect_wake(
+        pipeline.iter_wav_frames(jarvis), raw, DETECT_THR)
+    check("stream_detect_wake handles a model not built by the cache",
+          raw_score is not None and not had_snapshot_before
+          and hasattr(raw, "_blank_buffers"),
+          f"external model fired (score {raw_score}); snapshot attached lazily")
 
     n_pass = sum(1 for r in results if r[0] == PASS)
     n_total = len(results)
