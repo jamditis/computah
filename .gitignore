@@ -17,6 +17,16 @@ whisper_models/
 test_audio/*
 !test_audio/.gitkeep
 
+# Wake-word recordings and processed clips — personal voice data, never committed
+samples/
+recordings/
+
+# Local experiment/training scripts (machine-specific paths), not part of the published project
+experiments/
+
+# Custom-trained wake-word models live here; the binaries are personal (see *.onnx above)
+!models/.gitkeep
+
 # Build-process notes, not part of the published project
 INVENTORY.txt
 HALT_REPORT.md

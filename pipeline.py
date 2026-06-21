@@ -49,6 +49,7 @@ CONFIG_PATH = PROJECT_DIR / "config.json"
 LOCAL_CONFIG_PATH = PROJECT_DIR / "config.local.json"
 VOICES_DIR = PROJECT_DIR / "voices"
 WHISPER_DIR = PROJECT_DIR / "whisper_models"
+CUSTOM_MODELS_DIR = PROJECT_DIR / "models"  # custom-trained wake words live here
 # Prefer the claude binary on PATH; fall back to the common per-user install path.
 CLAUDE_BIN = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
 
@@ -141,6 +142,11 @@ def available_wake_models() -> dict[str, str]:
         if name in _NON_PHRASE:
             continue
         out[name] = str(f)
+    # Custom-trained models in the repo's models/ dir are named directly by file
+    # stem (e.g. computah.onnx -> "computah") and override built-ins on collision.
+    if CUSTOM_MODELS_DIR.is_dir():
+        for f in sorted(CUSTOM_MODELS_DIR.glob("*.onnx")):
+            out[f.stem] = str(f)
     return out
 
 
@@ -220,6 +226,16 @@ def detect_wake(wav_path: str, model_name: str | None = None,
     model = _get_oww_model(path)
     model.reset()  # clear streaming buffers between independent clips
     pcm = _load_pcm16(wav_path)
+    # A one-shot clip file must fill the detector's ~2s context window; live audio
+    # fills it naturally. The wake word can sit at the very start of a clip of any
+    # length, so always prepend leading silence (plus a short trailing pad) rather
+    # than gating on total duration: a long recording whose request runs past 2.5s
+    # still starts the freshly-reset detector with an empty window. Padding gives it
+    # the context to score the wake word the way it was trained; silence scores ~0,
+    # so the extra frames never raise the peak for clips that already had context.
+    lead = np.zeros(24000, dtype=np.int16)  # 1.5s leading silence
+    tail = np.zeros(8000, dtype=np.int16)  # 0.5s trailing silence
+    pcm = np.concatenate([lead, pcm, tail])
 
     step = 1280  # 80ms at 16kHz — openWakeWord's frame size
     peak = 0.0
