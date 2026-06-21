@@ -55,7 +55,9 @@ def main() -> int:
         pipeline.speak("hey jarvis, what is two plus two?", clip)
 
     try:
-        r = pipeline.run_pipeline(clip, out_wav_path=str(d / "reply.wav"))
+        # Pin the wake word so the test is independent of config.json's active one.
+        r = pipeline.run_pipeline(clip, out_wav_path=str(d / "reply.wav"),
+                                  wake_word="hey_jarvis")
     finally:
         sim.stop()
 

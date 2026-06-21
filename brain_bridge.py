@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import time
 import uuid
@@ -104,33 +105,54 @@ def cli_send(bot_spren_bin: str = "bot-spren") -> SendFn:
 
 
 def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren") -> SendFn:
-    """Send via bot-spren on a remote host over ssh (e.g. Syl on officejawn)."""
+    """Send via bot-spren on a remote host over ssh.
+
+    ssh does not preserve argv boundaries past the host: everything after it is
+    joined into one string and run by the remote login shell. So the remote
+    command is built explicitly and every field is shell-quoted. The prompt is
+    untrusted (transcribed speech), so this prevents both word-splitting and
+    shell-metacharacter execution on the brain host.
+    """
     def _send(persona: str, prompt: str) -> None:
+        remote = " ".join(shlex.quote(p) for p in (bot_spren_bin, "send", persona, prompt))
         subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=15", host, bot_spren_bin, "send", persona, prompt],
+            ["ssh", "-o", "ConnectTimeout=15", host, remote],
             capture_output=True, text=True, timeout=40, check=True,
         )
     return _send
 
 
 def file_reply_reader(reply_path: str | Path) -> ReplyReader:
-    """Read the reply file directly (persona on this host)."""
+    """Read the reply file directly (persona on this host).
+
+    Honors the ReplyReader contract: never raises. A missing or unreadable file
+    means "no reply yet" -> "", so the poll loop keeps going and brain_via_bridge
+    falls through to its own spoken timeout rather than crashing the voice loop.
+    """
     reply_path = Path(reply_path)
     def _read() -> str:
         try:
             return reply_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
+        except OSError:
             return ""
     return _read
 
 
 def ssh_reply_reader(host: str, reply_path: str) -> ReplyReader:
-    """Read the reply file on a remote host over ssh."""
+    """Read the reply file on a remote host over ssh.
+
+    Honors the ReplyReader contract: never raises. A flaky/hanging remote (ssh
+    timeout, non-zero exit, transport error) returns "" so the poll keeps trying
+    and a bad host degrades to a spoken timeout instead of an exception.
+    """
     def _read() -> str:
-        proc = subprocess.run(
-            ["ssh", "-o", "ConnectTimeout=15", host, "cat", reply_path],
-            capture_output=True, text=True, timeout=40,
-        )
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=15", host, "cat", shlex.quote(reply_path)],
+                capture_output=True, text=True, timeout=40,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
         return proc.stdout if proc.returncode == 0 else ""
     return _read
 

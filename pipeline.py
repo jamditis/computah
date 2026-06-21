@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -39,7 +40,8 @@ PROJECT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_DIR / "config.json"
 VOICES_DIR = PROJECT_DIR / "voices"
 WHISPER_DIR = PROJECT_DIR / "whisper_models"
-CLAUDE_BIN = str(Path.home() / ".local/bin/claude")
+# Prefer the claude binary on PATH; fall back to the common per-user install path.
+CLAUDE_BIN = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
 
 # openWakeWord ships its pretrained models inside the installed package.
 import openwakeword  # noqa: E402
@@ -232,6 +234,9 @@ def brain(text: str, model: str | None = None,
         )
     except subprocess.TimeoutExpired:
         return "Sorry, I timed out thinking about that."
+    except (FileNotFoundError, OSError):
+        # The claude binary is not installed / not on PATH. Speak, do not crash.
+        return "Sorry, the brain is not available right now."
     if result.returncode != 0:
         err = (result.stderr or "").strip().splitlines()
         tail = err[-1] if err else f"exit {result.returncode}"
