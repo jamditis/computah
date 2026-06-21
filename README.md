@@ -117,6 +117,20 @@ Run the full chain on a wav file:
 
 The output file contains the spoken reply.
 
+### Custom wake words
+
+The built-in openWakeWord phrases (alexa, hey_jarvis, hey_marvin, hey_mycroft) are
+listed automatically. To add your own, drop a trained `<name>.onnx` model into the
+`models/` directory; it appears in `--list-wake-words` as `<name>` and is selected the
+same way:
+
+```bash
+.venv/bin/python pipeline.py --set-wake-word <name>
+```
+
+A custom model overrides a built-in of the same name. The model binaries are personal
+and gitignored — train them separately with openWakeWord and keep them in `models/`.
+
 ## Configuration
 
 `config.json` holds the runtime defaults the pipeline reads:
