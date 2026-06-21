@@ -186,12 +186,17 @@ Piper currently reloads its voice model in a fresh subprocess per reply. Keeping
 
 ## Roadmap
 
-- Train a custom “computah” openWakeWord model on real recordings.
-- Add a live microphone loop with endpointing and playback.
-- Keep Piper resident between turns.
-- Point the bridge at a live assistant session over the network.
-- Build a small network satellite that listens for the wake word locally and streams audio only after activation.
-- Add reply correlation if the upstream reply format gains a turn id.
+- Custom "computah" wake word — train an openWakeWord model plus a per-speaker custom
+  verifier so it fires on the exact pronunciation, not a stock phrase. See
+  [docs/recording-computah.md](docs/recording-computah.md) for the recording protocol
+  and `prep_wake_samples.py` for turning recordings into 16 kHz training clips.
+- Live microphone loop — continuous capture, voice-activity endpointing, and
+  playback (needs a USB mic and speaker, or a network voice satellite).
+- Resident Piper — keep the voice model loaded to cut the spoken-reply latency.
+- Live assistant integration — point the bridge at the running session over the
+  network.
+- Network satellite — an on-device wake-word puck that streams audio only when
+  summoned, so the always-listening cost stays off the small host.
 
 ## Known limitations
 
