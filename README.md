@@ -1,103 +1,110 @@
 # computah
 
-A local voice assistant for people who want the assistant they already talk to by text to also answer by voice.
+A local voice assistant for people who want the assistant they already use by text to answer by voice too.
 
-computah listens for a wake word, transcribes the request, sends it to a persistent assistant session, and speaks the answer back. The speech stack is local and CPU-only: openWakeWord, faster-whisper, and Piper. The brain can live on the same machine or across the network behind a small file-based bridge.
+computah listens for a wake word, transcribes the request, sends the transcript to a persistent assistant session, and speaks the answer back. The speech path runs locally on CPU with openWakeWord, faster-whisper, and Piper. The brain can run on the same host or behind a small file bridge on another machine.
 
 <img width="1213" height="667" alt="computah screenshot" src="https://github.com/user-attachments/assets/7fbd1b26-35bf-490f-8fac-edb73c74b7b6" />
 
-## Why this exists
+## What it does
 
-Most voice assistants make you pick a fixed wake phrase and route every request through a stateless cloud turn. computah is built around a different shape:
+computah is the mic-free core of a local voice assistant. Feed it a wav file and it runs the same stages a live loop will use later:
 
-- The wake word is yours and can be swapped from configuration today.
-- The voice turn reaches the same long-running assistant session you already use by text.
+1. Detect the wake word in the audio.
+2. Transcribe the spoken request.
+3. Send the transcript to an assistant session that keeps context.
+4. Render the answer as a wav file.
+
+The project is built so each stage can be replaced. The wake-word detector, transcriber, brain bridge, and text-to-speech layer have narrow boundaries in `pipeline.py`.
+
+## Why it exists
+
+Most voice assistants bundle wake-word detection, speech recognition, memory, and speech output into one service. That makes the assistant easy to start but hard to own. computah is shaped around different constraints:
+
+- The wake word is configurable today, and a trainable `computah` wake word is the goal.
 - Speech recognition and speech synthesis stay local.
-- The pipeline can be tested without a microphone by feeding audio files through the same stages.
-- Each stage is small enough to replace without rewriting the rest of the project.
+- The voice interface talks to the same long-running assistant session used for text.
+- Tests can run without a microphone by passing audio files through the pipeline.
+- Model files, voices, local session paths, and hostnames stay outside git.
 
-The project name is also the intended wake word: “computah,” said the way you say it. A custom trained wake-word model is on the roadmap; the current release can already switch between installed openWakeWord models.
+The name is also the intended wake word: “computah,” said in your own voice.
 
-## Project status
+## Current status
 
-v0.1.0 is the mic-free core. The end-to-end path works with audio files:
+v0.1.0 is a working file-based pipeline, not a live microphone appliance yet.
 
-1. Wake-word detection reads a wav file.
-2. Speech-to-text turns the spoken request into text.
-3. The brain bridge sends the transcript to a persistent assistant session or a test stand-in.
-4. Text-to-speech writes the spoken reply to a wav file.
+| Area | Status |
+| --- | --- |
+| Wake-word detection | Works with installed openWakeWord models and custom `.onnx` files in `models/`. |
+| Speech-to-text | Works through faster-whisper with CTranslate2 int8. |
+| Brain | Supports a fallback CLI backend and the persistent file bridge. |
+| Text-to-speech | Works through Piper by writing a reply wav. |
+| Live loop | Planned. |
+| Custom `computah` wake word | Planned; recording notes live in `docs/recording-computah.md`. |
 
-Live microphone capture, a custom “computah” wake-word model, and lower-latency resident text-to-speech are next.
-
-## How it works
+## How the pipeline works
 
 ```text
-audio in ──▶ wake word ──▶ speech-to-text ──▶ brain bridge ──▶ text-to-speech ──▶ audio out
-            openWakeWord   faster-whisper     persistent       Piper
-            (ONNX)         (CTranslate2 int8) assistant        (ONNX)
+audio in
+  └─▶ wake word       openWakeWord, ONNX, 80 ms frames
+      └─▶ transcript  faster-whisper, CTranslate2 int8
+          └─▶ brain   persistent assistant bridge or CLI fallback
+              └─▶ wav Piper, ONNX voice model
 ```
 
-| Stage | Default implementation | Why it is here |
+| Stage | Default implementation | Boundary |
 | --- | --- | --- |
-| wake word | openWakeWord | Scans 80 ms frames locally using ONNX models. |
-| speech-to-text | faster-whisper | Runs Whisper through CTranslate2 with int8 weights. |
-| brain | file bridge | Talks to a long-running assistant session instead of creating one stateless request per turn. |
-| text-to-speech | Piper | Produces local spoken replies through an ONNX voice model. |
+| Wake word | openWakeWord | `detect_wake` returns whether the configured phrase fired. |
+| Speech-to-text | faster-whisper | `transcribe` returns text from the audio file. |
+| Brain | bridge or CLI | `brain` returns short spoken text. |
+| Text-to-speech | Piper | `speak` writes the answer to a wav file. |
 
-All speech stages run CPU-only and are intended to fit on an 8 GB Raspberry Pi.
+Module-level caches keep the wake-word and Whisper models warm inside one process. Audio is normalized to 16 kHz mono int16 before detection and transcription.
 
 ## The brain bridge
 
-The bridge is the project’s main design choice. A normal voice assistant sends one request and gets one response. computah sends the transcript into a persistent assistant session so the voice assistant and the text assistant can share memory, tone, and context.
+The bridge is the main design choice. computah does not need to create a fresh assistant call for every voice turn. It can append a user event to an inbox file and wait for the next reply block from an already-running assistant session.
 
-The transport is injected in `brain_bridge.py`:
+`brain_bridge.py` keeps the transport injectable:
 
-- Local transport appends a turn to an inbox file and reads a reply file.
-- SSH transport does the same work on another host.
-- Simulated transport uses `sim_persona.py` so tests can exercise the bridge without a real assistant session.
+- `cli_send` and `file_reply_reader` talk to a session on the same host.
+- `ssh_cli_send` and `ssh_reply_reader` use the same file contract on another host.
+- `local_sim_send` and `sim_persona.py` let tests exercise bridge behavior without a live assistant.
 
-The bridge snapshots the last reply block, sends the new transcript, then polls for the next block. That keeps the production path simple while preserving the same contract in tests.
+`brain_via_bridge` snapshots the latest reply block, sends one transcript, then polls until a newer block appears. Voice turns are serialized, so this simple positional contract is enough for the current prototype.
 
-By default a fresh clone runs standalone: `brain_backend` is `cli`, a one-shot
-`claude` CLI call, so there is no session to wire up first. Set `brain_backend` to
-`bridge` to use a persistent session, and put the deployment-specific values
-(persona, transport, ssh host, reply-file path) in `config.local.json` — gitignored,
-overrides `config.json`. Copy `config.local.example.json` to start.
+A fresh clone uses `brain_backend: "cli"` so it can run without bridge setup. To use the persistent session path, copy `config.local.example.json` to `config.local.json`, set `brain_backend` to `bridge`, and keep deployment values there. `config.local.json` is gitignored and overrides `config.json` at runtime.
 
 ## Repository layout
 
-| File | What it is |
-|------|-----------|
-| `pipeline.py` | The four stages, the end-to-end chain, and the CLI. |
-| `brain_bridge.py` | Routes the transcript to a persistent assistant session; injected transports (local / ssh / sim). |
-| `sim_persona.py` | A stand-in assistant for tests — tails an inbox, writes canned replies in the real reply format. |
-| `test_brain_bridge.py` | Bridge round-trip test (no models, no session, no mic). |
-| `test_brain_dispatch.py` | Config selects the brain backend, without leaking local config (no models). |
-| `test_pipeline_bridge.py` | Full chain with real models plus the bridge brain, mic-free. |
-| `test_pipeline.py` | Full chain with the fallback CLI brain. |
-| `config.json` | Active wake word, thresholds, model choices, and the brain backend toggle. |
-| `config.local.example.json` | Template for the gitignored `config.local.json` deployment overrides. |
-| `requirements.txt` | Pinned dependencies — CPU-only, no PyTorch. |
-| `assets/og-image.html` | Source document for the repository social preview image. |
-| `docs/` | GitHub Pages site. |
+| Path | Purpose |
+| --- | --- |
+| `pipeline.py` | Pipeline stages, config loading, and CLI entry point. |
+| `brain_bridge.py` | Bridge contract plus local, ssh, and simulated transports. |
+| `sim_persona.py` | Test stand-in for a long-running assistant session. |
+| `prep_wake_samples.py` | Converts wake-word recordings into training clips. |
+| `config.json` | Committed defaults for wake word, model choices, and backend selection. |
+| `config.local.example.json` | Template for gitignored local bridge settings. |
+| `requirements.txt` | Python dependencies for the CPU-only speech path. |
+| `docs/` | GitHub Pages site and recording notes. |
+| `models/`, `voices/`, `whisper_models/` | Local model directories; generated or downloaded files stay out of git. |
+| `test_*.py` | Mic-free tests for the bridge, dispatch logic, sample prep, and pipeline. |
 
 ## Setup
 
-The project is developed on Linux/ARM64 with Python 3.13 on a Raspberry Pi 5. It should also run on other Linux hosts with the same dependencies.
+The project is developed on Linux/ARM64 with Python 3.13 on a Raspberry Pi 5. Other Linux hosts should work if the same dependencies are available.
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
-
-# download a Piper voice, about 63 MB
 .venv/bin/python -m piper.download_voices en_US-lessac-medium --download-dir voices
 ```
 
-faster-whisper downloads its model into `whisper_models/` on first use. Model binaries and generated voice assets are intentionally not committed.
+faster-whisper downloads its model into `whisper_models/` on first use. Piper voices live in `voices/`. Custom wake-word models live in `models/`. These files are local artifacts and are not committed.
 
 ## Usage
 
-List installed wake words:
+List available wake words:
 
 ```bash
 .venv/bin/python pipeline.py --list-wake-words
@@ -109,68 +116,64 @@ Switch the active wake word and persist it to `config.json`:
 .venv/bin/python pipeline.py --set-wake-word hey_jarvis
 ```
 
-Run the full chain on a wav file:
+Run the pipeline on a wav file:
 
 ```bash
 .venv/bin/python pipeline.py clip.wav -o reply.wav
 ```
 
-The output file contains the spoken reply.
+The output path receives the spoken reply.
 
-### Custom wake words
+## Configuration
 
-The built-in openWakeWord phrases (alexa, hey_jarvis, hey_marvin, hey_mycroft) are
-listed automatically. To add your own, drop a trained `<name>.onnx` model into the
-`models/` directory; it appears in `--list-wake-words` as `<name>` and is selected the
-same way:
+`config.json` contains safe defaults that can be committed:
+
+| Key | Meaning |
+| --- | --- |
+| `wake_word` | Active openWakeWord model name. |
+| `wake_threshold` | Detection score required before the pipeline continues. |
+| `whisper_model` | faster-whisper model size or path. |
+| `whisper_compute` | CTranslate2 compute type, usually `int8` on the target device. |
+| `voice_model` | Piper voice path. |
+| `brain_backend` | `cli` for standalone fallback or `bridge` for the persistent session path. |
+| `claude_model` | Model name for the fallback CLI brain. |
+| `claude_timeout_s` | Timeout for the fallback CLI brain. |
+
+Use `config.local.json` for machine-specific bridge values. It is gitignored and merged over `config.json`, so private hostnames, usernames, and assistant paths do not leak into commits.
+
+## Custom wake words
+
+Built-in openWakeWord phrases appear in `--list-wake-words`. To add a custom wake word, place a trained `<name>.onnx` model in `models/`. It appears as `<name>` and can be selected the same way as a built-in model:
 
 ```bash
 .venv/bin/python pipeline.py --set-wake-word <name>
 ```
 
-A custom model overrides a built-in of the same name. The model binaries are personal
-and gitignored — train them separately with openWakeWord and keep them in `models/`.
-
-## Configuration
-
-`config.json` holds the runtime defaults the pipeline reads:
-
-- `wake_word` chooses the active openWakeWord model.
-- `wake_threshold` sets how confident detection must be before the pipeline continues.
-- `whisper_model` and `whisper_compute` choose the transcription model size and compute type.
-- `voice_model` chooses the Piper voice used for replies.
-- `claude_model` and `claude_timeout_s` configure the fallback CLI brain.
-
-The brain bridge is wired in code rather than from `config.json`: callers such as `test_pipeline_bridge.py` construct the local, ssh, or simulated transport and point it at the assistant inbox and reply file. Keep hostnames, usernames, and private session paths out of commits when adapting the bridge for a real deployment.
+A custom model overrides a built-in model with the same name. Keep custom model files local unless you intend to publish them.
 
 ## Testing
 
-Fast bridge test:
+Start with the fast tests. They do not load speech models:
 
 ```bash
 .venv/bin/python test_brain_bridge.py
+.venv/bin/python test_brain_dispatch.py
+.venv/bin/python test_prep_wake_samples.py
 ```
 
-Full bridge pipeline test:
+Run model-dependent tests when the voice and Whisper models are present:
 
 ```bash
 .venv/bin/python test_pipeline_bridge.py
-```
-
-Fallback CLI brain pipeline test:
-
-```bash
 .venv/bin/python test_pipeline.py
 ```
 
-On a memory-constrained host, cap the full model run:
+On a memory-constrained host, cap the full bridge test:
 
 ```bash
 systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 \
   .venv/bin/python test_pipeline_bridge.py
 ```
-
-The bridge test is the best first check because it avoids large speech models. The pipeline tests synthesize and consume audio, so they are slower and depend on local model availability.
 
 ## Latency notes
 
@@ -178,43 +181,38 @@ Measured on a Raspberry Pi 5 with warm models and a simulated brain:
 
 | Stage | Approximate time |
 | --- | --- |
-| wake detection | 0.8 s |
-| speech-to-text | 3.3 s |
-| text-to-speech | 3.9 s |
+| Wake detection | 0.8 s |
+| Speech-to-text | 3.3 s |
+| Text-to-speech | 3.9 s |
 
-Piper currently reloads its voice model in a fresh subprocess per reply. Keeping Piper resident should cut most of the text-to-speech time.
+The largest known cost is `speak()`: it shells out to Piper for each reply, so the voice model reloads every turn. Keeping Piper resident is the likely next latency win.
 
 ## Roadmap
 
-- Custom "computah" wake word — train an openWakeWord model plus a per-speaker custom
-  verifier so it fires on the exact pronunciation, not a stock phrase. See
-  [docs/recording-computah.md](docs/recording-computah.md) for the recording protocol
-  and `prep_wake_samples.py` for turning recordings into 16 kHz training clips.
-- Live microphone loop — continuous capture, voice-activity endpointing, and
-  playback (needs a USB mic and speaker, or a network voice satellite).
-- Resident Piper — keep the voice model loaded to cut the spoken-reply latency.
-- Live assistant integration — point the bridge at the running session over the
-  network.
-- Network satellite — an on-device wake-word puck that streams audio only when
-  summoned, so the always-listening cost stays off the small host.
+- Train and ship a custom `computah` openWakeWord model.
+- Add a live microphone loop with endpointing and playback.
+- Keep Piper loaded between turns.
+- Exercise the bridge against a live assistant session over the network.
+- Explore a small wake-word satellite that streams audio only after detection.
 
 ## Known limitations
 
-The bridge correlates replies by position. It returns the next new reply block after sending a transcript. If one turn times out and its late reply arrives during the next turn, that reply can be misattributed. Voice turns are serialized, so this should be rare, but the limitation is real until replies carry an explicit correlation key.
+The bridge correlates replies by position. It returns the next reply block after the transcript is sent. If one turn times out and its late reply arrives during the next turn, that reply can be misattributed. Voice turns are serialized, which lowers the risk, but the reply format needs an explicit correlation key before this is fully solved.
 
 ## Contributing
 
-Keep changes small and testable:
+Keep changes small and tested:
 
-1. Read `CLAUDE.md` for architecture notes and repository rules.
-2. Update docs when behavior changes.
-3. Run the fastest relevant test first, then broader tests when models are available.
-4. Keep generated model files, voices, and local assistant session data out of git.
-5. Use sentence case for headings and user-facing text, and keep product names like GitHub and GitHub Pages in their official casing.
+1. Read `CLAUDE.md` before changing architecture or public docs.
+2. Use sentence case for headings and user-facing text.
+3. Avoid filler and hype; say what the project does in plain language.
+4. Update docs when behavior changes.
+5. Run the fastest relevant test first, then broader tests when local models are available.
+6. Keep generated models, voices, local config, and assistant session data out of git.
 
 ## GitHub Pages
 
-The site in `docs/` is ready for GitHub Pages. In the repository settings, set Pages to deploy from the `docs` folder on the current branch. The page includes a matching SVG favicon and social preview metadata.
+The site in `docs/` is ready for GitHub Pages. In repository settings, deploy Pages from the `docs` folder on the current branch. The page includes an SVG favicon and PNG social preview metadata.
 
 ## License
 
