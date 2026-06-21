@@ -110,15 +110,15 @@ The output file contains the spoken reply.
 
 ## Configuration
 
-`config.json` holds the runtime defaults:
+`config.json` holds the runtime defaults the pipeline reads:
 
 - `wake_word` chooses the active openWakeWord model.
-- Wake thresholds control how confident detection must be before the pipeline continues.
-- Whisper settings choose the model size and cache path.
-- Piper settings choose the voice model and output path.
-- Bridge settings point at the assistant inbox, reply file, and transport details.
+- `wake_threshold` sets how confident detection must be before the pipeline continues.
+- `whisper_model` and `whisper_compute` choose the transcription model size and compute type.
+- `voice_model` chooses the Piper voice used for replies.
+- `claude_model` and `claude_timeout_s` configure the fallback CLI brain.
 
-Keep hostnames, usernames, and private session paths out of commits when adapting the bridge for a real deployment.
+The brain bridge is wired in code rather than from `config.json`: callers such as `test_pipeline_bridge.py` construct the local, ssh, or simulated transport and point it at the assistant inbox and reply file. Keep hostnames, usernames, and private session paths out of commits when adapting the bridge for a real deployment.
 
 ## Testing
 
