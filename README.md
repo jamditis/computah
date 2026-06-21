@@ -182,7 +182,7 @@ Keep changes small and testable:
 2. update docs when behavior changes.
 3. run the fastest relevant test first, then broader tests when models are available.
 4. keep generated model files, voices, and local assistant session data out of git.
-5. use sentence case for headings and user-facing text.
+5. use consistent casing for headings and user-facing text.
 
 ## github pages
 
