@@ -18,6 +18,9 @@ a bridge, not a stateless per-utterance API call.
 Four stages, each independently swappable (`pipeline.py`):
 
 1. `detect_wake` — openWakeWord (ONNX). 80 ms frames; peak score vs threshold.
+   For a live mic, `stream_detect_wake` + `capture_request` drive detection and
+   energy-based endpointing over a continuous frame stream instead of a whole
+   file, and `run_turn` runs one full turn from that stream.
 2. `transcribe` — faster-whisper (CTranslate2, int8).
 3. `brain` — the transcript goes to a persistent assistant; the reply is short
    spoken text.
@@ -87,6 +90,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python test_brain_dispatch.py    # config selects the backend — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
 .venv/bin/python test_pipeline.py          # full chain + fallback CLI brain
+.venv/bin/python test_stream_turn.py       # streaming detect + endpointing + run_turn (loads models)
 
 # wake words
 .venv/bin/python pipeline.py --list-wake-words
@@ -114,7 +118,7 @@ bug.
 
 ## File index
 
-- `pipeline.py` — stages, chain, CLI.
+- `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`).
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.
 - `test_*.py` — see Dev commands.
