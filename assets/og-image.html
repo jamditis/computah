@@ -12,13 +12,12 @@
     color: #e6edf3;
     display: flex;
     flex-direction: column;
-    justify-content: center;
-    padding: 78px 90px;
-    position: relative;
+    justify-content: flex-start;
+    padding: 74px 90px 56px;
   }
   .prompt { color: #6e7681; font-size: 30px; margin-bottom: 26px; }
   .prompt .tick { color: #3fb950; }
-  h1 { font-size: 150px; font-weight: 700; letter-spacing: -3px; line-height: 1; }
+  h1 { font-size: 140px; font-weight: 700; letter-spacing: -3px; line-height: 1; }
   .cursor { color: #3fb950; }
   .tag {
     font-size: 37px;
@@ -27,15 +26,10 @@
     max-width: 1000px;
     line-height: 1.35;
   }
-  .wave { display: flex; align-items: flex-end; gap: 9px; height: 72px; margin-top: 50px; }
+  .wave { display: flex; align-items: flex-end; gap: 9px; height: 64px; margin-top: 42px; }
   .wave span { width: 9px; background: #2f81f7; border-radius: 3px; display: block; }
   .foot {
-    position: absolute;
-    bottom: 52px;
-    left: 90px;
-    right: 90px;
-    display: flex;
-    justify-content: space-between;
+    margin-top: auto;
     font-size: 26px;
     color: #6e7681;
   }
@@ -46,10 +40,7 @@
   <h1>computah<span class="cursor">_</span></h1>
   <div class="tag">a local, self-hosted voice assistant with a wake word you set and change yourself</div>
   <div class="wave" id="wave"></div>
-  <div class="foot">
-    <span>github.com/jamditis/computah</span>
-    <span>wake &rarr; speech-to-text &rarr; brain &rarr; speech</span>
-  </div>
+  <div class="foot">github.com/jamditis/computah</div>
   <script>
     // Static waveform glyph (deterministic), not a live audio meter.
     const wave = document.getElementById('wave');
