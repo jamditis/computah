@@ -1,0 +1,27 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtualenv — recreate with: python -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/
+venv/
+
+# Model binaries — large; download via the setup steps in README.md
+voices/
+whisper_models/
+*.onnx
+*.onnx.json
+
+# Generated audio (tests synthesize their own)
+test_audio/*
+!test_audio/.gitkeep
+
+# Build-process notes, not part of the published project
+INVENTORY.txt
+HALT_REPORT.md
+
+# Local, non-published config and session cruft
+config.local.json
+.remember/
+.DS_Store

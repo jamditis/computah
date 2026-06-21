@@ -1,0 +1,9 @@
+{
+  "wake_word": "hey_jarvis",
+  "wake_threshold": 0.5,
+  "whisper_model": "tiny.en",
+  "whisper_compute": "int8",
+  "voice_model": "en_US-lessac-medium",
+  "claude_model": "haiku",
+  "claude_timeout_s": 60
+}
