@@ -51,8 +51,24 @@ LOCAL_CONFIG_PATH = PROJECT_DIR / "config.local.json"
 VOICES_DIR = PROJECT_DIR / "voices"
 WHISPER_DIR = PROJECT_DIR / "whisper_models"
 CUSTOM_MODELS_DIR = PROJECT_DIR / "models"  # custom-trained wake words live here
-# Prefer the claude binary on PATH; fall back to the common per-user install path.
-CLAUDE_BIN = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
+def _resolve_claude_bin() -> str:
+    """Locate the claude CLI: prefer PATH, otherwise fall back per OS.
+
+    The fallback applies only when claude is not on PATH. On POSIX (the Pi) the
+    common per-user install is ~/.local/bin/claude. On Windows that POSIX path is
+    meaningless, so defer to the bare name and let the OS resolver -- or the
+    graceful FileNotFoundError path in _brain_cli -- handle absence.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    if os.name == "posix":
+        return str(Path.home() / ".local/bin/claude")
+    return "claude"
+
+
+# Prefer the claude binary on PATH; otherwise a platform-appropriate fallback.
+CLAUDE_BIN = _resolve_claude_bin()
 
 # openWakeWord ships its pretrained models inside the installed package.
 import openwakeword  # noqa: E402
@@ -450,7 +466,7 @@ def _brain_cli(text: str, cfg: dict, model: str | None = None,
             [CLAUDE_BIN, "-p", "--model", model,
              "--tools", "", "--no-session-persistence"],
             input=prompt, capture_output=True, text=True,
-            timeout=timeout_s, cwd="/tmp",
+            timeout=timeout_s, cwd=tempfile.gettempdir(),
         )
     except subprocess.TimeoutExpired:
         return "Sorry, I timed out thinking about that."
