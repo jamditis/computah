@@ -59,7 +59,7 @@ audio in
 | Brain | bridge or CLI | `brain` returns short spoken text. |
 | Text-to-speech | Piper | `speak` writes the answer to a wav file. |
 
-Module-level caches keep the wake-word and Whisper models warm inside one process. Audio is normalized to 16 kHz mono int16 before detection and transcription.
+Module-level caches keep the wake-word and Whisper models warm inside one process. Wake-word detection normalizes audio to 16 kHz mono int16; transcription passes the wav file to faster-whisper.
 
 ## The brain bridge
 
@@ -134,7 +134,7 @@ The output path receives the spoken reply.
 | `wake_threshold` | Detection score required before the pipeline continues. |
 | `whisper_model` | faster-whisper model size or path. |
 | `whisper_compute` | CTranslate2 compute type, usually `int8` on the target device. |
-| `voice_model` | Piper voice path. |
+| `voice_model` | Piper voice name/stem; `speak` loads `voices/<voice_model>.onnx`. |
 | `brain_backend` | `cli` for standalone fallback or `bridge` for the persistent session path. |
 | `claude_model` | Model name for the fallback CLI brain. |
 | `claude_timeout_s` | Timeout for the fallback CLI brain. |

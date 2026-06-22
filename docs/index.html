@@ -55,7 +55,7 @@
     .links a { text-decoration: none; }
     .links a:hover { color: var(--text); }
     .hero { padding: 92px 0 72px; }
-    .badges { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 22px; }
+    .badges { display: flex; gap: 10px; flex-wrap: wrap; margin: 22px 0 0; padding: 0; list-style: none; }
     .badge { border: 1px solid var(--line); background: rgb(22 27 34 / 70%); color: var(--muted); border-radius: 999px; padding: 7px 11px; font-size: 0.9rem; }
     .hero-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr); gap: 44px; align-items: center; }
     .eyebrow { color: var(--green); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0 0 18px; }
@@ -131,7 +131,7 @@
           <p class="eyebrow">$ say the wake word</p>
           <h1>computah</h1>
           <p class="lead">A local voice assistant with local speech models, a configurable wake word, and a bridge to the persistent assistant session you already use.</p>
-          <div class="badges" aria-label="project traits"><span class="badge">CPU-only speech path</span><span class="badge">No cloud speech API</span><span class="badge">Mic-free tests</span></div>
+          <ul class="badges" aria-label="project traits"><li class="badge">CPU-only speech path</li><li class="badge">No cloud speech API</li><li class="badge">Mic-free tests</li></ul>
           <div class="actions">
             <a class="button primary" href="https://github.com/jamditis/computah">view the repo</a>
             <a class="button" href="#setup">run it locally</a>
