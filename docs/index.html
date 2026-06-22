@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>computah</title>
-  <meta name="description" content="A local, self-hosted voice assistant with a wake word you control and a bridge to a persistent assistant session.">
+  <meta name="description" content="A local voice assistant with local speech models, a configurable wake word, and a bridge to a persistent assistant session.">
   <meta name="theme-color" content="#0d1117">
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="canonical" href="https://jamditis.github.io/computah/">
   <meta property="og:type" content="website">
   <meta property="og:title" content="computah">
-  <meta property="og:description" content="A local voice assistant with a wake word you control, local speech models, and a bridge to a persistent assistant session.">
+  <meta property="og:description" content="A local voice assistant with local speech models, a configurable wake word, and a bridge to a persistent assistant session.">
   <meta property="og:url" content="https://jamditis.github.io/computah/">
   <meta property="og:image" content="https://jamditis.github.io/computah/assets/social-card.png">
   <meta property="og:image:type" content="image/png">
@@ -19,7 +19,7 @@
   <meta property="og:image:alt" content="computah — local voice assistant">
   <meta name="twitter:card" content="summary_large_image">
   <meta name="twitter:title" content="computah">
-  <meta name="twitter:description" content="A local voice assistant with a wake word you control, local speech models, and a persistent assistant bridge.">
+  <meta name="twitter:description" content="A local voice assistant with local speech models, a configurable wake word, and a persistent assistant bridge.">
   <meta name="twitter:image" content="https://jamditis.github.io/computah/assets/social-card.png">
   <meta name="twitter:image:alt" content="computah — local voice assistant">
   <style>
@@ -33,6 +33,7 @@
       --line: #30363d;
       --blue: #58a6ff;
       --green: #3fb950;
+      --amber: #d29922;
       --shadow: 0 24px 80px rgb(0 0 0 / 32%);
     }
     * { box-sizing: border-box; }
@@ -54,6 +55,8 @@
     .links a { text-decoration: none; }
     .links a:hover { color: var(--text); }
     .hero { padding: 92px 0 72px; }
+    .badges { display: flex; gap: 10px; flex-wrap: wrap; margin: 22px 0 0; padding: 0; list-style: none; }
+    .badge { border: 1px solid var(--line); background: rgb(22 27 34 / 70%); color: var(--muted); border-radius: 999px; padding: 7px 11px; font-size: 0.9rem; }
     .hero-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr); gap: 44px; align-items: center; }
     .eyebrow { color: var(--green); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0 0 18px; }
     h1, h2, h3 { line-height: 1.08; letter-spacing: -0.04em; }
@@ -65,6 +68,13 @@
     .button { display: inline-flex; align-items: center; justify-content: center; min-height: 46px; padding: 0 18px; border: 1px solid var(--line); border-radius: 999px; text-decoration: none; font-weight: 700; background: var(--panel); }
     .button.primary { background: var(--green); border-color: var(--green); color: #07140b; }
     .terminal { background: rgb(22 27 34 / 86%); border: 1px solid var(--line); border-radius: 22px; box-shadow: var(--shadow); overflow: hidden; }
+    .device { position: relative; padding: 24px; }
+    .device::before { content: ""; position: absolute; inset: 16px; border: 1px solid rgb(88 166 255 / 22%); border-radius: 28px; pointer-events: none; }
+    .orb { width: 190px; height: 190px; margin: 18px auto 28px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #e6edf3, #58a6ff 22%, #1f6feb 48%, #0d1117 72%); box-shadow: 0 0 90px rgb(88 166 255 / 34%); }
+    .meter { display: flex; align-items: end; justify-content: center; gap: 10px; height: 90px; margin: 0 0 22px; }
+    .meter span { width: 12px; border-radius: 999px; background: var(--green); box-shadow: 0 0 20px rgb(63 185 80 / 30%); }
+    .meter span:nth-child(1) { height: 28px; } .meter span:nth-child(2) { height: 54px; } .meter span:nth-child(3) { height: 78px; } .meter span:nth-child(4) { height: 44px; } .meter span:nth-child(5) { height: 66px; } .meter span:nth-child(6) { height: 34px; }
+    .device-copy { color: var(--muted); text-align: center; margin: 0; }
     .terminal-bar { display: flex; gap: 8px; padding: 16px 18px; border-bottom: 1px solid var(--line); }
     .dot { width: 12px; height: 12px; border-radius: 50%; background: #f85149; }
     .dot:nth-child(2) { background: #d29922; }
@@ -83,15 +93,18 @@
     .list { display: grid; gap: 12px; padding: 0; margin: 0; list-style: none; }
     .list li { border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; background: rgb(22 27 34 / 68%); color: var(--muted); }
     .list strong { color: var(--text); }
+    .status { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 20px; }
+    .status .card { border-color: rgb(88 166 255 / 30%); }
+    .kicker { color: var(--amber); font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
     footer { border-top: 1px solid var(--line); color: var(--muted); padding: 30px 0 48px; }
     @media (max-width: 860px) {
       header { position: static; }
       .hero-grid, .split { grid-template-columns: 1fr; }
-      .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .cards, .status { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .flow { grid-template-columns: 1fr; }
     }
     @media (max-width: 560px) {
-      .cards { grid-template-columns: 1fr; }
+      .cards, .status { grid-template-columns: 1fr; }
       .links { display: none; }
       .hero { padding-top: 56px; }
     }
@@ -103,6 +116,7 @@
       <a class="brand" href="#top"><img src="assets/favicon.svg" alt="">computah</a>
       <div class="links">
         <a href="#design">design</a>
+        <a href="#status">status</a>
         <a href="#bridge">bridge</a>
         <a href="#setup">setup</a>
         <a href="https://github.com/jamditis/computah">GitHub</a>
@@ -116,19 +130,17 @@
         <div>
           <p class="eyebrow">$ say the wake word</p>
           <h1>computah</h1>
-          <p class="lead">A local voice assistant with a wake word you control, speech models that run on CPU, and a bridge to the persistent assistant session you already use.</p>
+          <p class="lead">A local voice assistant with local speech models, a configurable wake word, and a bridge to the persistent assistant session you already use.</p>
+          <ul class="badges" aria-label="project traits"><li class="badge">CPU-only speech path</li><li class="badge">No cloud speech API</li><li class="badge">Mic-free tests</li></ul>
           <div class="actions">
             <a class="button primary" href="https://github.com/jamditis/computah">view the repo</a>
             <a class="button" href="#setup">run it locally</a>
           </div>
         </div>
-        <div class="terminal" aria-label="example command output">
-          <div class="terminal-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-          <pre><code>$ .venv/bin/python pipeline.py clip.wav -o reply.wav
-wake word: detected
-transcript: what is next on the bench?
-brain: checking the persistent session
-reply.wav: written</code></pre>
+        <div class="terminal device" aria-label="computah device illustration">
+          <div class="orb" aria-hidden="true"></div>
+          <div class="meter" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span></div>
+          <p class="device-copy">wake word detected → transcript sent → reply.wav written</p>
         </div>
       </div>
     </section>
@@ -149,6 +161,18 @@ reply.wav: written</code></pre>
           <div class="step"><span>03</span><h3>brain bridge</h3><p>The transcript enters the persistent session.</p></div>
           <div class="step"><span>04</span><h3>text-to-speech</h3><p>Piper renders the response.</p></div>
           <div class="step"><span>05</span><h3>audio out</h3><p>The reply is saved as a wav file.</p></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="status">
+      <div class="wrap">
+        <h2>where the project is now</h2>
+        <p class="section-lead">v0.1.0 is the file-based core. It runs wav files through the same stages the live loop will use later.</p>
+        <div class="status">
+          <article class="card"><span class="kicker">works now</span><h3>mic-free pipeline</h3><p>Wake detection, transcription, brain routing, and speech output can run from a wav file.</p></article>
+          <article class="card"><span class="kicker">works now</span><h3>replaceable bridge</h3><p>The brain path can use a local session, an ssh session, or a simulated test persona.</p></article>
+          <article class="card"><span class="kicker">planned</span><h3>live loop</h3><p>Microphone capture, endpointing, playback, and a trained computah wake word are next.</p></article>
         </div>
       </div>
     </section>
