@@ -7,16 +7,20 @@ All notable changes to computah are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
-- Mishear confidence guard: a live turn now gates the transcript on faster-whisper
-  confidence (`avg_logprob`, `no_speech_prob`) before dispatching to the brain, so a
-  garbled or silence-derived command cannot trigger an action. A rejected turn speaks
-  a short re-prompt instead of calling the brain. New config keys
-  `stt_confidence_guard`, `stt_min_avg_logprob`, and `stt_max_no_speech_prob` (the
-  last two default to faster-whisper's own thresholds). `transcribe_detailed` returns
-  the new `Transcript` (text plus the two signals); `transcribe` still returns text.
-- `test_confidence_guard.py`: fast, no-model coverage of the gate decision and
-  segment aggregation, plus two model-tier checks in `test_stream_turn.py` proving a
-  low-confidence transcript skips the brain and a confident one passes through.
+- Mishear confidence guard: both live paths (`pipeline.run_turn` and the
+  `live_driver` hardware loop) now gate the transcript on faster-whisper confidence
+  (`avg_logprob`, `no_speech_prob`) before dispatching to the brain, through a shared
+  `guard_transcript`, so a garbled or silence-derived command cannot trigger an
+  action on either path. A rejected turn speaks a short re-prompt instead of calling
+  the brain. New config keys `stt_confidence_guard`, `stt_min_avg_logprob`, and
+  `stt_max_no_speech_prob` (the last two default to faster-whisper's own thresholds).
+  `transcribe_detailed` returns the new `Transcript` (text plus the two signals);
+  `transcribe` still returns text.
+- `test_confidence_guard.py`: fast, no-model coverage of the gate decision, segment
+  aggregation, and the shared `guard_transcript`. `test_live_driver.py`: fast,
+  no-model proof the hardware path honors the guard. Two model-tier checks in
+  `test_stream_turn.py` prove a low-confidence transcript skips the brain and a
+  confident one passes through.
 - Config-selectable brain backend: the `brain_backend` key chooses `cli` (the
   `claude -p` fallback, default) or `bridge` (a persistent assistant session), so the
   bridge is reachable from a real run, not only from tests.

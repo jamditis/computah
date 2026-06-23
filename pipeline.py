@@ -484,6 +484,22 @@ def transcript_confident(t: Transcript, *, min_avg_logprob: float,
     return True, "ok"
 
 
+def guard_transcript(heard: Transcript, cfg: dict) -> tuple[bool, str]:
+    """Apply the configured mishear guard to a transcription.
+
+    Returns (ok, reason): ok is True when the guard is disabled or the transcript
+    clears it, and False when a low-confidence transcript should be re-prompted
+    rather than dispatched. Both live paths -- run_turn here and live_driver's own
+    turn loop -- gate through this one function, so the brain cannot be reached
+    unguarded on one path while the other is protected.
+    """
+    if not cfg["stt_confidence_guard"]:
+        return True, "guard disabled"
+    return transcript_confident(
+        heard, min_avg_logprob=cfg["stt_min_avg_logprob"],
+        max_no_speech_prob=cfg["stt_max_no_speech_prob"])
+
+
 # --------------------------------------------------------------------------- #
 # Stage 3: the brain (persistent session via the bridge, or the claude CLI)
 # --------------------------------------------------------------------------- #
@@ -711,21 +727,18 @@ def run_turn(frames, model_name: str | None = None,
     # speak a short re-prompt and return the turn marked rejected -- the loop still
     # plays the re-prompt, since spoken feedback is the only channel, but the brain
     # is never called, so a garbled word cannot trigger an action.
-    if cfg["stt_confidence_guard"]:
-        ok, reason = transcript_confident(
-            heard, min_avg_logprob=cfg["stt_min_avg_logprob"],
-            max_no_speech_prob=cfg["stt_max_no_speech_prob"])
-        if not ok:
-            speak(STT_REPROMPT, out_wav_path)
-            return {
-                "wake_word": model_name,
-                "wake_score": round(score, 4),
-                "transcript": heard.text,
-                "reply": STT_REPROMPT,
-                "output_wav": out_wav_path,
-                "rejected": "low_confidence",
-                "reject_reason": reason,
-            }
+    ok, reason = guard_transcript(heard, cfg)
+    if not ok:
+        speak(STT_REPROMPT, out_wav_path)
+        return {
+            "wake_word": model_name,
+            "wake_score": round(score, 4),
+            "transcript": heard.text,
+            "reply": STT_REPROMPT,
+            "output_wav": out_wav_path,
+            "rejected": "low_confidence",
+            "reject_reason": reason,
+        }
 
     reply = brain(heard.text)
     speak(reply, out_wav_path)

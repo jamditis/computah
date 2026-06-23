@@ -121,6 +121,22 @@ def main() -> int:
     check("zero-duration segments do not divide by zero",
           abs(t.avg_logprob - (-0.5)) < 1e-9, f"avg_logprob={t.avg_logprob}")
 
+    print("\n=== guard_transcript: the shared gate both live paths use ===")
+    on = {"stt_confidence_guard": True, "stt_min_avg_logprob": FLOOR,
+          "stt_max_no_speech_prob": CEIL}
+    ok, _ = pipeline.guard_transcript(Transcript("go", -0.2, 0.05), on)
+    check("guard_transcript passes a confident transcript when enabled", ok,
+          f"ok={ok}")
+
+    ok, reason = pipeline.guard_transcript(Transcript("garble", -3.0, 0.05), on)
+    check("guard_transcript rejects a low-confidence transcript when enabled",
+          not ok and "avg_logprob" in reason, f"ok={ok} reason={reason!r}")
+
+    off = dict(on, stt_confidence_guard=False)
+    ok, reason = pipeline.guard_transcript(Transcript("garble", -3.0, 0.99), off)
+    check("guard_transcript passes everything when the guard is disabled",
+          ok and reason == "guard disabled", f"ok={ok} reason={reason!r}")
+
     print("\n=== config: the guard is wired into defaults ===")
     for key, want in (("stt_confidence_guard", True),
                       ("stt_min_avg_logprob", -1.0),

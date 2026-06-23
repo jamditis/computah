@@ -61,7 +61,7 @@ audio in
 
 Module-level caches keep the wake-word and Whisper models warm inside one process. Wake-word detection normalizes audio to 16 kHz mono int16; transcription passes the wav file to faster-whisper.
 
-In a live turn, a mishear guard sits between transcription and the brain: it reads faster-whisper's own confidence signals (`avg_logprob`, `no_speech_prob`) and, when a transcript looks garbled or silence-derived, speaks a short re-prompt instead of dispatching. Because the brain acts on what it hears, this keeps a misheard command from triggering an action. The guard runs in `run_turn`; the file-based `run_pipeline` reports the same signals for inspection but does not gate on them.
+In a live turn, a mishear guard sits between transcription and the brain: it reads faster-whisper's own confidence signals (`avg_logprob`, `no_speech_prob`) and, when a transcript looks garbled or silence-derived, speaks a short re-prompt instead of dispatching. Because the brain acts on what it hears, this keeps a misheard command from triggering an action. Both live paths (`run_turn` and the `live_driver` hardware loop) gate through the same `guard_transcript`; the file-based `run_pipeline` reports the same signals for inspection but does not gate on them.
 
 ## The brain bridge
 
