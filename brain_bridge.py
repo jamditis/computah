@@ -16,10 +16,11 @@ bot-spren is message-passing, not request/response:
         <reply text>
 
 There is no built-in correlation between the inbound event_id and the outbound
-delivery_id, so brain_via_bridge() correlates by position: snapshot the last
-delivery_id, send, then poll the reply file until a NEW block appears. Voice
-turns are serialized (one utterance at a time), so the next new block is this
-turn's reply.
+delivery_id, so brain_via_bridge() correlates by position with a persistent
+cursor (ReplyCursor): each send reserves the next reply slot, and the turn reads
+the block at that slot. Voice turns are serialized, and a send reserves its slot
+even when it times out, so a late reply from a timed-out turn fills its own
+reserved slot and is skipped — it is not mis-read as the next turn's answer.
 
 Transport is injected so the same logic works in three settings:
   - persona on this host: cli_send + file_reply_reader
@@ -48,18 +49,51 @@ SendFn = Callable[[str, str], None]   # (persona, prompt) -> None, raises on fai
 ReplyReader = Callable[[], str]       # () -> full reply-file text ("" if absent)
 
 
-def _last_delivery(reply_text: str) -> tuple[str | None, str]:
-    """Return (delivery_id, payload) of the last FileOutbound block.
+def _delivery_blocks(reply_text: str) -> list[tuple[str, str]]:
+    """Return every FileOutbound block as (delivery_id, payload), in file order.
 
-    payload is everything after the last header line to end of text, stripped of
-    the surrounding newlines FileOutbound adds. Returns (None, "") when no block
-    is present yet.
+    payload is the text from one header line to the next header (or end of text),
+    stripped of the surrounding newlines FileOutbound adds. Empty list when no
+    block is present yet.
     """
     matches = list(_DELIVERY_RE.finditer(reply_text))
-    if not matches:
-        return None, ""
-    last = matches[-1]
-    return last.group(1), reply_text[last.end():].strip("\n")
+    blocks: list[tuple[str, str]] = []
+    for i, m in enumerate(matches):
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(reply_text)
+        blocks.append((m.group(1), reply_text[m.end():end].strip("\n")))
+    return blocks
+
+
+# Consecutive timeouts after which the cursor is assumed to have out-run the reply
+# file because a reply was dropped (never written), not merely delayed — at which
+# point it resyncs to the live end instead of wedging forever. A single late reply
+# never reaches this: the next turn reads its own slot and resets the counter. Two
+# is the smallest value that still distinguishes one slow turn from a real drop.
+_RESYNC_AFTER_MISSES = 2
+
+
+class ReplyCursor:
+    """Persistent positional watermark for the reply file, shared across turns.
+
+    Tracks how many FileOutbound blocks the bridge has accounted for. Initialized
+    lazily to the block count present at the first send, so blocks already in the
+    file (a prior session, or a reply still in flight from a timed-out turn) are
+    skipped instead of being read as this turn's answer. Each send advances the
+    cursor by one — reserving that turn's reply slot even when the turn times out,
+    which is what stops a late reply from shifting every following turn by one.
+
+    `misses` counts consecutive timeouts. A reply that lands resets it; once it
+    reaches _RESYNC_AFTER_MISSES while the cursor sits ahead of the file, the bridge
+    concludes a reply was dropped (not delayed) and resyncs to the live end, so a
+    dropped reply self-heals instead of wedging the loop. The robust fix is a real
+    correlation key linking request to reply; this is the bounded interim.
+    """
+
+    __slots__ = ("consumed", "misses")
+
+    def __init__(self, consumed: int | None = None, misses: int = 0) -> None:
+        self.consumed = consumed
+        self.misses = misses
 
 
 def brain_via_bridge(
@@ -68,43 +102,89 @@ def brain_via_bridge(
     persona: str,
     send: SendFn,
     read_reply: ReplyReader,
+    cursor: ReplyCursor | None = None,
     system_prompt: str | None = None,
     timeout_s: int = 120,
     poll_s: float = 0.5,
 ) -> str:
     """Send `text` to the persona and return its reply, or a spoken error string.
 
+    Correlates the reply by position using `cursor` (see ReplyCursor): the send
+    reserves the next slot and the turn returns the block at that slot. Pass a
+    cursor that persists across turns so timeouts and in-flight replies stay
+    aligned; with no cursor a fresh one is used, which is correct only for a
+    single isolated, backlog-free turn.
+
     Never raises for an expected failure (timeout, send error): the caller is a
     voice loop, so a short spoken sentence is more useful than a traceback.
     """
-    prev_id, _ = _last_delivery(read_reply())
+    if cursor is None:
+        cursor = ReplyCursor()
+    blocks_now = len(_delivery_blocks(read_reply()))
+    if cursor.consumed is None:
+        cursor.consumed = blocks_now
+    elif cursor.misses >= _RESYNC_AFTER_MISSES and cursor.consumed > blocks_now:
+        # The cursor has out-run the reply file across several turns: a reply was
+        # dropped (the session never wrote it), not merely delayed, so every turn
+        # since has reserved a slot that can never fill. Resync to the live end —
+        # skipping the dead slots — rather than time out forever. A correlation key
+        # would make this exact; positional correlation cannot tell dropped from late.
+        cursor.consumed = blocks_now
+        cursor.misses = 0
+    target = cursor.consumed
+
     prompt = text if system_prompt is None else f"{system_prompt}\n\nUser: {text}"
     try:
         send(persona, prompt)
     except Exception as e:  # transport failure (ssh down, CLI missing, ...)
         return f"Sorry, I couldn't reach the brain ({type(e).__name__})."
+    # Reserve this turn's slot even if it times out below, so a late reply fills
+    # the reserved slot and is skipped next turn instead of shifting it by one.
+    cursor.consumed = target + 1
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        cur_id, payload = _last_delivery(read_reply())
-        if cur_id is not None and cur_id != prev_id and payload:
-            return payload
+        blocks = _delivery_blocks(read_reply())
+        if len(blocks) > target and blocks[target][1]:
+            cursor.misses = 0
+            return blocks[target][1]
         time.sleep(poll_s)
+    cursor.misses += 1
     return "Sorry, the brain took too long to answer."
 
 
 # --------------------------------------------------------------------------- #
 # Concrete transports
 # --------------------------------------------------------------------------- #
-def cli_send(bot_spren_bin: str = "bot-spren") -> SendFn:
+def _send_argv(bot_spren_bin: str, working_dir: str | None,
+               persona: str, prompt: str) -> list[str]:
+    """Build the `bot-spren send` argv, inserting -d when a working dir is set.
+
+    bot-spren resolves the persona's inbox from its working directory (--working-dir,
+    default ~/.bot-spren/<name>), NOT from BOT_SPREN_STATE_DIR. A send without -d
+    therefore writes to ~/.bot-spren/<name>/state/manual-inbox.jsonl — a dead-letter
+    file the running session (which reads BOT_SPREN_STATE_DIR) never tails, so the
+    message is silently lost and the turn just times out. Passing -d <persona project
+    dir> points the send at the same inbox the session consumes.
+    """
+    argv = [bot_spren_bin, "send"]
+    if working_dir:
+        argv += ["-d", working_dir]
+    argv += [persona, prompt]
+    return argv
+
+
+def cli_send(bot_spren_bin: str = "bot-spren",
+             working_dir: str | None = None) -> SendFn:
     """Send via the local bot-spren CLI (persona on this host)."""
     def _send(persona: str, prompt: str) -> None:
-        subprocess.run([bot_spren_bin, "send", persona, prompt],
+        subprocess.run(_send_argv(bot_spren_bin, working_dir, persona, prompt),
                        capture_output=True, text=True, timeout=30, check=True)
     return _send
 
 
-def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren") -> SendFn:
+def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren",
+                 working_dir: str | None = None) -> SendFn:
     """Send via bot-spren on a remote host over ssh.
 
     ssh does not preserve argv boundaries past the host: everything after it is
@@ -114,7 +194,8 @@ def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren") -> SendFn:
     shell-metacharacter execution on the brain host.
     """
     def _send(persona: str, prompt: str) -> None:
-        remote = " ".join(shlex.quote(p) for p in (bot_spren_bin, "send", persona, prompt))
+        argv = _send_argv(bot_spren_bin, working_dir, persona, prompt)
+        remote = " ".join(shlex.quote(p) for p in argv)
         subprocess.run(
             ["ssh", "-o", "ConnectTimeout=15", host, remote],
             capture_output=True, text=True, timeout=40, check=True,

@@ -104,6 +104,8 @@ DEFAULTS = {
     "brain_transport": "local",   # "local" (this host) or "ssh" (another host)
     "brain_host": "",             # ssh host alias, required for transport "ssh"
     "brain_bot_spren_bin": "bot-spren",
+    "brain_bot_spren_workdir": "",  # bot-spren --working-dir; set so the send lands
+                                    # in the session's inbox, not a dead-letter one
     "brain_reply_path": "",       # path to the persona's FileOutbound reply file
     "brain_timeout_s": 120,
     "brain_poll_s": 0.5,
@@ -424,6 +426,13 @@ def brain(text: str, model: str | None = None,
     return _brain_cli(text, cfg, model=model, timeout_s=timeout_s)
 
 
+# One reply cursor per reply file, kept for the life of the process so the
+# positional correlation survives across turns (a fresh cursor each turn would
+# re-snapshot and lose the slot reservation that keeps timeouts aligned). A loop
+# relaunch starts empty, so the first turn drains whatever backlog is on disk.
+_bridge_cursors: dict[str, brain_bridge.ReplyCursor] = {}
+
+
 def _brain_bridge(text: str, cfg: dict) -> str:
     """Route the transcript to a persistent assistant session over the bridge.
 
@@ -435,20 +444,23 @@ def _brain_bridge(text: str, cfg: dict) -> str:
     if not reply_path:
         return "Sorry, the brain reply path is not configured."
 
+    cursor = _bridge_cursors.setdefault(reply_path, brain_bridge.ReplyCursor())
+
     persona = cfg["brain_persona"]
     bot_spren_bin = cfg["brain_bot_spren_bin"]
+    workdir = cfg.get("brain_bot_spren_workdir") or None
     if cfg["brain_transport"] == "ssh":
         host = cfg["brain_host"]
         if not host:
             return "Sorry, the brain host is not configured."
-        send = brain_bridge.ssh_cli_send(host, bot_spren_bin)
+        send = brain_bridge.ssh_cli_send(host, bot_spren_bin, working_dir=workdir)
         read_reply = brain_bridge.ssh_reply_reader(host, reply_path)
     else:
-        send = brain_bridge.cli_send(bot_spren_bin)
+        send = brain_bridge.cli_send(bot_spren_bin, working_dir=workdir)
         read_reply = brain_bridge.file_reply_reader(reply_path)
 
     return brain_bridge.brain_via_bridge(
-        text, persona=persona, send=send, read_reply=read_reply,
+        text, persona=persona, send=send, read_reply=read_reply, cursor=cursor,
         system_prompt=VOICE_SYSTEM_PROMPT,
         timeout_s=cfg["brain_timeout_s"], poll_s=cfg["brain_poll_s"],
     )
