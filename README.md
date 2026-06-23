@@ -61,6 +61,8 @@ audio in
 
 Module-level caches keep the wake-word and Whisper models warm inside one process. Wake-word detection normalizes audio to 16 kHz mono int16; transcription passes the wav file to faster-whisper.
 
+In a live turn, a mishear guard sits between transcription and the brain: it reads faster-whisper's own confidence signals (`avg_logprob`, `no_speech_prob`) and, when a transcript looks garbled or silence-derived, speaks a short re-prompt instead of dispatching. Because the brain acts on what it hears, this keeps a misheard command from triggering an action. Both live paths (`run_turn` and the `live_driver` hardware loop) gate through the same `guard_transcript`; the file-based `run_pipeline` reports the same signals for inspection but does not gate on them.
+
 ## The brain bridge
 
 The bridge is the main design choice. computah does not need to create a fresh assistant call for every voice turn. It can append a user event to an inbox file and wait for the next reply block from an already-running assistant session.
@@ -134,6 +136,9 @@ The output path receives the spoken reply.
 | `wake_threshold` | Detection score required before the pipeline continues. |
 | `whisper_model` | faster-whisper model size or path. |
 | `whisper_compute` | CTranslate2 compute type, usually `int8` on the target device. |
+| `stt_confidence_guard` | When true, a live turn drops a low-confidence transcript before the brain and speaks a re-prompt. |
+| `stt_min_avg_logprob` | Floor for the transcript's mean per-token log-probability; below it the turn is rejected. This is the gate. |
+| `stt_max_no_speech_prob` | How silence-like the audio looked. Combined with a low `avg_logprob` it labels a reject as silence; following faster-whisper's own rule, a confident decode is never rejected for this alone. |
 | `voice_model` | Piper voice name/stem; `speak` loads `voices/<voice_model>.onnx`. |
 | `brain_backend` | `cli` for standalone fallback or `bridge` for the persistent session path. |
 | `claude_model` | Model name for the fallback CLI brain. |
@@ -158,6 +163,7 @@ Start with the fast tests. They do not load speech models:
 ```bash
 .venv/bin/python test_brain_bridge.py
 .venv/bin/python test_brain_dispatch.py
+.venv/bin/python test_confidence_guard.py
 .venv/bin/python test_prep_wake_samples.py
 ```
 

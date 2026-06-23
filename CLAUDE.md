@@ -47,7 +47,12 @@ Four stages, each independently swappable (`pipeline.py`):
    For a live mic, `stream_detect_wake` + `capture_request` drive detection and
    energy-based endpointing over a continuous frame stream instead of a whole
    file, and `run_turn` runs one full turn from that stream.
-2. `transcribe` — faster-whisper (CTranslate2, int8).
+2. `transcribe` — faster-whisper (CTranslate2, int8). `transcribe_detailed` also
+   returns the decoder's confidence (`avg_logprob`, `no_speech_prob`). Both live
+   paths (`run_turn` and `live_driver`) gate on it through `guard_transcript` so a
+   misheard or silence-derived command never reaches the action-capable brain (the
+   signal-level mishear guard); a rejected turn speaks a short re-prompt instead of
+   dispatching.
 3. `brain` — the transcript goes to a persistent assistant; the reply is short
    spoken text.
 4. `speak` — Piper (ONNX) renders the reply to a WAV.
@@ -116,6 +121,8 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 # tests
 .venv/bin/python test_brain_bridge.py      # bridge logic — fast, no models
 .venv/bin/python test_brain_dispatch.py    # config selects the backend — fast, no models
+.venv/bin/python test_confidence_guard.py  # mishear guard decision + aggregation — fast, no models
+.venv/bin/python test_live_driver.py       # live_driver hardware path honors the guard — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
 .venv/bin/python test_pipeline.py          # full chain + fallback CLI brain
 .venv/bin/python test_stream_turn.py       # streaming detect + endpointing + run_turn (loads models)
@@ -153,9 +160,11 @@ bug.
 ## File index
 
 - `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`).
-- `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> STT -> brain -> spoken reply, re-arming after each turn.
+- `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> STT -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.
 - `test_*.py` — see Dev commands.
-- `config.json` — wake word, thresholds, model choices, brain backend toggle.
+- `config.json` — wake word, thresholds, model choices, brain backend toggle, and the
+  mishear-guard thresholds (`stt_confidence_guard`, `stt_min_avg_logprob`,
+  `stt_max_no_speech_prob`).
 - `config.local.json` (gitignored) / `config.local.example.json` — deployment bridge settings.

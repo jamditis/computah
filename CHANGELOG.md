@@ -7,6 +7,22 @@ All notable changes to computah are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Mishear confidence guard: both live paths (`pipeline.run_turn` and the
+  `live_driver` hardware loop) now gate the transcript on faster-whisper confidence
+  before dispatching to the brain, through a shared `guard_transcript`, so a garbled
+  command cannot trigger an action on either path. `avg_logprob` is the gate;
+  following faster-whisper's own no-speech rule, a high `no_speech_prob` only marks a
+  reject as silence when the decode is also unconfident, so a clear command is never
+  dropped for it alone. A rejected turn speaks a short re-prompt instead of calling
+  the brain. New config keys `stt_confidence_guard`, `stt_min_avg_logprob`, and
+  `stt_max_no_speech_prob` (defaults mirror faster-whisper's own thresholds).
+  `transcribe_detailed` returns the new `Transcript` (text plus the two signals);
+  `transcribe` still returns text.
+- `test_confidence_guard.py`: fast, no-model coverage of the gate decision, segment
+  aggregation, and the shared `guard_transcript`. `test_live_driver.py`: fast,
+  no-model proof the hardware path honors the guard. Two model-tier checks in
+  `test_stream_turn.py` prove a low-confidence transcript skips the brain and a
+  confident one passes through.
 - Config-selectable brain backend: the `brain_backend` key chooses `cli` (the
   `claude -p` fallback, default) or `bridge` (a persistent assistant session), so the
   bridge is reachable from a real run, not only from tests.

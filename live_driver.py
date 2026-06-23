@@ -111,7 +111,7 @@ def drain(frames, n: int) -> None:
 
 
 def run_turn(frames, model, threshold: float, out_wav: str,
-             output_device, debug: bool) -> bool:
+             output_device, cfg: dict, debug: bool) -> bool:
     """Run one full turn off the live frame stream.
 
     Returns True if a turn ran (or was correctly skipped as noise), False only when
@@ -132,17 +132,25 @@ def run_turn(frames, model, threshold: float, out_wav: str,
     os.close(fd)
     try:
         sf.write(req_wav, request_pcm, 16000, subtype="PCM_16")
-        transcript = pipeline.transcribe(req_wav)
+        heard = pipeline.transcribe_detailed(req_wav)
     finally:
         os.unlink(req_wav)
-    if not transcript.strip():
+    if not heard.text.strip():
         log("empty transcript (noise) — ignoring")
         return True
-    log(f"you said: {transcript!r}")
+    log(f"you said: {heard.text!r}")
 
-    t0 = time.monotonic()
-    reply = pipeline.brain(transcript)
-    log(f"brain ({time.monotonic() - t0:.1f}s): {reply!r}")
+    # Mishear guard: this is the real-hardware path to the action-capable brain, so
+    # a low-confidence transcript must not be dispatched. On a reject, speak the
+    # re-prompt and skip the brain, so a garbled command never triggers an action.
+    ok, reason = pipeline.guard_transcript(heard, cfg)
+    if not ok:
+        log(f"low-confidence transcript ({reason}) — re-prompting, not dispatching")
+        reply = pipeline.STT_REPROMPT
+    else:
+        t0 = time.monotonic()
+        reply = pipeline.brain(heard.text)
+        log(f"brain ({time.monotonic() - t0:.1f}s): {reply!r}")
 
     pipeline.speak(reply, out_wav)
     try:
@@ -181,7 +189,7 @@ def main() -> int:
     try:
         while True:
             if not run_turn(frames, model, threshold, out_wav,
-                            args.output_device, args.debug):
+                            args.output_device, cfg, args.debug):
                 log("input stream ended — exiting")
                 break
             turn += 1

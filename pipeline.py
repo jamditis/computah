@@ -31,6 +31,7 @@ import time
 import warnings
 from math import gcd
 from pathlib import Path
+from typing import NamedTuple
 
 import brain_bridge
 
@@ -85,6 +86,16 @@ DEFAULTS = {
     "wake_threshold": 0.5,
     "whisper_model": "tiny.en",
     "whisper_compute": "int8",
+    # Mishear guard: gate a transcript on faster-whisper's confidence before it
+    # reaches the brain, so a garbled command never drives an action. avg_logprob is
+    # the gate (it must stay at or above the floor); following faster-whisper's own
+    # no-speech rule, a high no_speech_prob only marks a reject as silence when the
+    # decode is also unconfident, so a clear command is never dropped for it alone.
+    # The defaults mirror faster-whisper's log_prob and no_speech thresholds. Set
+    # stt_confidence_guard false to dispatch every turn.
+    "stt_confidence_guard": True,
+    "stt_min_avg_logprob": -1.0,
+    "stt_max_no_speech_prob": 0.6,
     "voice_model": "en_US-lessac-medium",
     # Live audio device selection by case-insensitive name substring (see audio.py).
     # Empty string means the system default device. Per-host values belong in
@@ -115,6 +126,10 @@ VOICE_SYSTEM_PROMPT = (
     "You are a local voice assistant. Answer in one or two short, plain spoken "
     "sentences. No markdown, no bullet points, no code blocks, no emoji."
 )
+
+# Spoken when the mishear guard rejects a low-confidence transcript. Short, so the
+# user simply repeats the command; the guard never sends this turn to the brain.
+STT_REPROMPT = "Sorry, I didn't catch that. Please say that again."
 
 # Module-level caches so repeated calls in one process do not reload models.
 _oww_cache: dict[str, object] = {}
@@ -399,12 +414,94 @@ def _get_whisper(model: str, compute: str):
     return _whisper_cache[key]
 
 
-def transcribe(wav_path: str) -> str:
-    """Transcribe a WAV with faster-whisper (int8). Returns the text."""
+class Transcript(NamedTuple):
+    """A transcription plus the faster-whisper signals the mishear guard reads.
+
+    avg_logprob is the mean per-token log-probability (closer to 0 is more
+    confident); no_speech_prob is how silence-like the audio looked (higher means
+    less likely to be real speech).
+    """
+    text: str
+    avg_logprob: float
+    no_speech_prob: float
+
+
+def _aggregate_segments(segments) -> Transcript:
+    """Collapse faster-whisper segments into one Transcript.
+
+    avg_logprob is averaged across segments weighted by their duration, so a long
+    confident clause outweighs a short hesitant one; no_speech_prob is the max
+    across segments, the most conservative summary -- any silence-like span pulls
+    confidence down. Pure over the segment objects (it reads only .text, .start,
+    .end, .avg_logprob, .no_speech_prob), so it is unit-testable with lightweight
+    stand-ins and no model.
+    """
+    segs = list(segments)
+    text = " ".join(s.text for s in segs).strip()
+    if not segs:
+        # No segments at all: empty text that fails the guard on both signals.
+        return Transcript(text, float("-inf"), 1.0)
+    weights = [max(float(s.end) - float(s.start), 1e-3) for s in segs]
+    total = sum(weights)
+    avg_logprob = sum(float(s.avg_logprob) * w
+                      for s, w in zip(segs, weights)) / total
+    no_speech_prob = max(float(s.no_speech_prob) for s in segs)
+    return Transcript(text, avg_logprob, no_speech_prob)
+
+
+def transcribe_detailed(wav_path: str) -> Transcript:
+    """Transcribe a WAV with faster-whisper (int8), returning the text plus the
+    confidence signals the mishear guard needs. transcribe() wraps this for callers
+    that want only the text."""
     cfg = load_config()
     model = _get_whisper(cfg["whisper_model"], cfg["whisper_compute"])
     segments, _info = model.transcribe(wav_path, beam_size=1, language="en")
-    return " ".join(seg.text for seg in segments).strip()
+    return _aggregate_segments(segments)
+
+
+def transcribe(wav_path: str) -> str:
+    """Transcribe a WAV with faster-whisper (int8). Returns the text."""
+    return transcribe_detailed(wav_path).text
+
+
+def transcript_confident(t: Transcript, *, min_avg_logprob: float,
+                         max_no_speech_prob: float) -> tuple[bool, str]:
+    """Is a transcript trustworthy enough to act on?
+
+    The brain acts on voice commands -- it files issues, changes things -- so a
+    misheard transcript must be stopped before it dispatches. The decoder's
+    avg_logprob is the gate: below the floor the words are unreliable and the turn
+    is rejected. Following faster-whisper's own no-speech rule, a confidently decoded
+    command is never rejected for a high no_speech_prob alone (a confident decode
+    overrides it); no_speech_prob only distinguishes a silence-derived reject (it
+    over the ceiling and avg_logprob under the floor) from a plain garbled one, which
+    sharpens the logged reason without ever re-prompting a clear command. Returns
+    (ok, reason); reason names why a turn was dropped.
+    """
+    if not t.text.strip():
+        return False, "empty transcript"
+    if t.avg_logprob < min_avg_logprob:
+        kind = ("silence" if t.no_speech_prob > max_no_speech_prob
+                else "low confidence")
+        return False, (f"{kind}: avg_logprob {t.avg_logprob:.2f} under floor "
+                       f"{min_avg_logprob:.2f}")
+    return True, "ok"
+
+
+def guard_transcript(heard: Transcript, cfg: dict) -> tuple[bool, str]:
+    """Apply the configured mishear guard to a transcription.
+
+    Returns (ok, reason): ok is True when the guard is disabled or the transcript
+    clears it, and False when a low-confidence transcript should be re-prompted
+    rather than dispatched. Both live paths -- run_turn here and live_driver's own
+    turn loop -- gate through this one function, so the brain cannot be reached
+    unguarded on one path while the other is protected.
+    """
+    if not cfg["stt_confidence_guard"]:
+        return True, "guard disabled"
+    return transcript_confident(
+        heard, min_avg_logprob=cfg["stt_min_avg_logprob"],
+        max_no_speech_prob=cfg["stt_max_no_speech_prob"])
 
 
 # --------------------------------------------------------------------------- #
@@ -536,6 +633,8 @@ def run_pipeline(wav_path: str, out_wav_path: str | None = None,
         "wake_fired": fired,
         "wake_score": round(score, 4),
         "transcript": None,
+        "transcript_avg_logprob": None,
+        "transcript_no_speech_prob": None,
         "reply": None,
         "output_wav": None,
         "timings_s": timings,
@@ -544,13 +643,18 @@ def run_pipeline(wav_path: str, out_wav_path: str | None = None,
         timings["total"] = time.time() - t0
         return result
 
+    # The file path is an inspection tool, so it surfaces the confidence signals
+    # but does not gate on them: the live turn path (run_turn) is where the mishear
+    # guard stops a low-confidence command from reaching the brain.
     t1 = time.time()
-    transcript = transcribe(wav_path)
+    heard = transcribe_detailed(wav_path)
     timings["transcribe"] = time.time() - t1
-    result["transcript"] = transcript
+    result["transcript"] = heard.text
+    result["transcript_avg_logprob"] = round(heard.avg_logprob, 3)
+    result["transcript_no_speech_prob"] = round(heard.no_speech_prob, 3)
 
     t2 = time.time()
-    reply = brain(transcript)
+    reply = brain(heard.text)
     timings["brain"] = time.time() - t2
     result["reply"] = reply
 
@@ -575,9 +679,12 @@ def run_turn(frames, model_name: str | None = None,
     `frames` is any iterator of 80 ms int16 frames (iter_wav_frames for tests, a
     mic source on hardware). Returns a result dict, or None when there is nothing
     to act on: the stream ended before the wake word fired, the wake fired but no
-    speech followed it, or the captured audio transcribed to no words (noise). This
-    is the unit an always-on loop calls repeatedly; the loop wrapper and mic/speaker
-    I/O land with the microphone (issues #10, #11).
+    speech followed it, or the captured audio transcribed to no words (noise). When
+    the mishear guard rejects a low-confidence transcript the brain is skipped, but
+    a result dict is still returned (reply set to a spoken re-prompt, "rejected" set
+    to "low_confidence") so the loop speaks the re-prompt. This is the unit an
+    always-on loop calls repeatedly; the loop wrapper and mic/speaker I/O land with
+    the microphone (issues #10, #11).
 
     `on_capture`, if given, is called once the request has been captured (listening
     for this turn is over). A half-duplex live loop uses it to stop the mic before
@@ -609,21 +716,40 @@ def run_turn(frames, model_name: str | None = None,
     os.close(fd)
     try:
         sf.write(req_wav, request_pcm, 16000, subtype="PCM_16")
-        transcript = transcribe(req_wav)
+        heard = transcribe_detailed(req_wav)
     finally:
         os.unlink(req_wav)
 
-    if not transcript.strip():
+    if not heard.text.strip():
         return None  # captured audio whisper read as no words (noise) — ignore
 
-    reply = brain(transcript)
     if out_wav_path is None:
         out_wav_path = str(PROJECT_DIR / "test_audio" / "reply.wav")
+
+    # Mishear guard: the brain acts on the command (files an issue, changes
+    # something), so a low-confidence transcript must never reach it. On a reject,
+    # speak a short re-prompt and return the turn marked rejected -- the loop still
+    # plays the re-prompt, since spoken feedback is the only channel, but the brain
+    # is never called, so a garbled word cannot trigger an action.
+    ok, reason = guard_transcript(heard, cfg)
+    if not ok:
+        speak(STT_REPROMPT, out_wav_path)
+        return {
+            "wake_word": model_name,
+            "wake_score": round(score, 4),
+            "transcript": heard.text,
+            "reply": STT_REPROMPT,
+            "output_wav": out_wav_path,
+            "rejected": "low_confidence",
+            "reject_reason": reason,
+        }
+
+    reply = brain(heard.text)
     speak(reply, out_wav_path)
     return {
         "wake_word": model_name,
         "wake_score": round(score, 4),
-        "transcript": transcript,
+        "transcript": heard.text,
         "reply": reply,
         "output_wav": out_wav_path,
     }
@@ -676,6 +802,9 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
                                   on_capture=pause_for_turn)
                 if result is not None:
                     print(f"  heard: {result['transcript']!r}")
+                    if result.get("rejected") == "low_confidence":
+                        print("  low confidence, re-prompting "
+                              f"({result.get('reject_reason')})")
                     print(f"  reply: {result['reply']!r}")
                     audio.play_wav(out_wav, output_name)
                 if paused:
