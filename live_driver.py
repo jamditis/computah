@@ -156,7 +156,8 @@ def main() -> int:
     args = ap.parse_args()
 
     out_wav = args.out_wav
-    if out_wav is None:
+    auto_wav = out_wav is None
+    if auto_wav:
         fd, out_wav = tempfile.mkstemp(prefix="computah-reply-", suffix=".wav")
         os.close(fd)
 
@@ -180,6 +181,13 @@ def main() -> int:
             log(f"--- turn {turn} done; listening again ---")
     except KeyboardInterrupt:
         log("stopped")
+    finally:
+        # Remove the reply WAV only when we created it; a user-supplied path is theirs.
+        if auto_wav:
+            try:
+                os.unlink(out_wav)
+            except OSError:
+                pass
     return 0
 
 
