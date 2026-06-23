@@ -1,6 +1,7 @@
 {
   "_comment": "Copy to config.local.json (gitignored) for host-specific settings. config.local.json overrides config.json. Two independent groups: live-audio device names for `pipeline.py --listen`, and the persistent-session brain. Keep deployment-specific names and paths here, not in config.json.",
   "_audio_comment": "Case-insensitive device-name substrings (run `python audio.py --list`). Empty string = system default. Legion: mic 'powerconf' (or 'shure' as a backup), output 'desktop speakers'. Pi: 'powerconf' over USB for both.",
+  "_brain_comment": "Persistent-session brain via bot-spren. transport: 'local' (persona on this host), 'ssh' (persona on brain_host, reached over ssh), or 'sim' (tests). brain_bot_spren_workdir MUST point at the persona's project dir so `bot-spren send -d <workdir>` writes to the inbox the running session tails, not its dead-letter dir — omitting it makes every turn silently time out.",
   "mic_device": "powerconf",
   "output_device": "desktop speakers",
   "brain_backend": "bridge",
@@ -8,6 +9,7 @@
   "brain_transport": "local",
   "brain_host": "",
   "brain_bot_spren_bin": "bot-spren",
+  "brain_bot_spren_workdir": "/path/to/persona/project-dir",
   "brain_reply_path": "/path/to/persona/reply-file.txt",
   "brain_timeout_s": 120,
   "brain_poll_s": 0.5
