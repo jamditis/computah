@@ -141,15 +141,17 @@ def main() -> int:
     # ignored before transcribe/brain run, so whisper never hallucinates on silence.
     called = {"transcribe": False, "brain": False}
     real_cap, real_tx, real_brain = (
-        pipeline.capture_request, pipeline.transcribe, pipeline.brain)
+        pipeline.capture_request, pipeline.transcribe_detailed, pipeline.brain)
     pipeline.capture_request = lambda fr: np.zeros(0, dtype=np.int16)
-    pipeline.transcribe = lambda p: called.__setitem__("transcribe", True) or ""
+    pipeline.transcribe_detailed = (
+        lambda p: called.__setitem__("transcribe", True)
+        or pipeline.Transcript("", 0.0, 0.0))
     pipeline.brain = lambda t, **_: called.__setitem__("brain", True) or ""
     try:
         silent_turn = pipeline.run_turn(pipeline.iter_wav_frames(jarvis),
                                         model_name="hey_jarvis", threshold=DETECT_THR)
     finally:
-        pipeline.capture_request, pipeline.transcribe, pipeline.brain = (
+        pipeline.capture_request, pipeline.transcribe_detailed, pipeline.brain = (
             real_cap, real_tx, real_brain)
     check("run_turn ignores a wake with no speech (skips transcribe/brain)",
           silent_turn is None and not called["transcribe"] and not called["brain"],
@@ -159,19 +161,61 @@ def main() -> int:
     # nothing; that turn must not reach the brain.
     brain_hit = {"called": False}
     real_cap2, real_tx2, real_brain2 = (
-        pipeline.capture_request, pipeline.transcribe, pipeline.brain)
+        pipeline.capture_request, pipeline.transcribe_detailed, pipeline.brain)
     pipeline.capture_request = lambda fr: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
-    pipeline.transcribe = lambda p: "   "
+    pipeline.transcribe_detailed = lambda p: pipeline.Transcript("   ", 0.0, 0.0)
     pipeline.brain = lambda t, **_: brain_hit.__setitem__("called", True) or "x"
     try:
         noise_turn = pipeline.run_turn(pipeline.iter_wav_frames(jarvis),
                                        model_name="hey_jarvis", threshold=DETECT_THR)
     finally:
-        pipeline.capture_request, pipeline.transcribe, pipeline.brain = (
+        pipeline.capture_request, pipeline.transcribe_detailed, pipeline.brain = (
             real_cap2, real_tx2, real_brain2)
     check("run_turn ignores audio that transcribes to nothing (skips brain)",
           noise_turn is None and not brain_hit["called"],
           f"returned {noise_turn}, brain_called={brain_hit['called']}")
+
+    # Mishear guard: a low-confidence transcript must never reach the brain (a
+    # garbled command must not trigger an action). Stub the transcription to look
+    # garbled (avg_logprob below the floor) and assert the brain is skipped, the
+    # spoken reply is the re-prompt, and the turn is marked rejected so the loop
+    # still gives spoken feedback. stream_detect_wake and capture_request run for
+    # real on the jarvis stream; only the transcription and brain are stubbed.
+    cfg = pipeline.load_config()
+    guard_brain = {"called": False}
+    real_td, real_brain4 = pipeline.transcribe_detailed, pipeline.brain
+    pipeline.transcribe_detailed = lambda p: pipeline.Transcript(
+        "delete everything", cfg["stt_min_avg_logprob"] - 2.0, 0.1)
+    pipeline.brain = lambda t, **_: guard_brain.__setitem__("called", True) or "x"
+    try:
+        rej = pipeline.run_turn(
+            pipeline.iter_wav_frames(jarvis), model_name="hey_jarvis",
+            threshold=DETECT_THR, out_wav_path=str(TEST_DIR / "turn_reply.wav"))
+    finally:
+        pipeline.transcribe_detailed, pipeline.brain = real_td, real_brain4
+    check("mishear guard rejects a low-confidence transcript (brain skipped)",
+          rej is not None and rej.get("rejected") == "low_confidence"
+          and not guard_brain["called"] and rej["reply"] == pipeline.STT_REPROMPT,
+          (f"reply={rej['reply']!r} rejected={rej.get('rejected')} "
+           f"brain_called={guard_brain['called']}") if rej else "returned None")
+
+    # A confident transcript passes the guard and reaches the brain unchanged.
+    pass_brain = {"called": False}
+    real_td2, real_brain5 = pipeline.transcribe_detailed, pipeline.brain
+    pipeline.transcribe_detailed = lambda p: pipeline.Transcript(
+        "what is two plus two", 0.0, 0.0)
+    pipeline.brain = lambda t, **_: pass_brain.__setitem__("called", True) or "Four."
+    try:
+        passed = pipeline.run_turn(
+            pipeline.iter_wav_frames(jarvis), model_name="hey_jarvis",
+            threshold=DETECT_THR, out_wav_path=str(TEST_DIR / "turn_reply.wav"))
+    finally:
+        pipeline.transcribe_detailed, pipeline.brain = real_td2, real_brain5
+    check("mishear guard passes a confident transcript through to the brain",
+          passed is not None and pass_brain["called"]
+          and "rejected" not in passed and passed["reply"] == "Four.",
+          (f"reply={passed['reply']!r} brain_called={pass_brain['called']}")
+          if passed else "returned None")
 
     # on_capture marks the moment listening for a turn ends. The half-duplex loop
     # pauses the mic there, so it must fire once a request is captured -- on a
