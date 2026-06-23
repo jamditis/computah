@@ -56,9 +56,16 @@ def _play_wav(path: str, device: str | None) -> None:
         cmd += ["-D", device]
     cmd.append(path)
     try:
-        subprocess.run(cmd, check=True, stderr=subprocess.DEVNULL)
+        subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL)
     except subprocess.CalledProcessError:
-        subprocess.run(["sudo", *cmd], check=True)
+        # Retry once under non-interactive sudo: /dev/snd needs root in some launch
+        # contexts. -n so a missing or expired sudo timestamp fails fast instead of
+        # prompting, and stdin from /dev/null so a prompt can never consume the raw
+        # mic pipe that is this process's stdin. Playback then degrades to the logged
+        # error in run_turn rather than wedging the loop.
+        subprocess.run(["sudo", "-n", *cmd], check=True,
+                       stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def frames_from_stdin(stream):
@@ -152,7 +159,8 @@ def main() -> int:
     ap.add_argument("-v", "--debug", action="store_true",
                     help="per-frame rms+score telemetry to stderr")
     ap.add_argument("-o", "--output-device", default=None,
-                    help="playback device name substring (default: system default)")
+                    help="ALSA output PCM for aplay -D (e.g. "
+                         "plughw:CARD=PowerConf,DEV=0); default: ALSA default device")
     args = ap.parse_args()
 
     out_wav = args.out_wav
