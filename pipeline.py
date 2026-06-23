@@ -86,6 +86,12 @@ DEFAULTS = {
     "whisper_model": "tiny.en",
     "whisper_compute": "int8",
     "voice_model": "en_US-lessac-medium",
+    # Live audio device selection by case-insensitive name substring (see audio.py).
+    # Empty string means the system default device. Per-host values belong in
+    # config.local.json -- e.g. Legion: mic "shure", output "desktop speakers";
+    # the Pi: "powerconf" over USB.
+    "mic_device": "",
+    "output_device": "",
     # Brain backend: "cli" (the claude -p dev fallback, default so a fresh clone
     # runs standalone) or "bridge" (a persistent assistant session).
     "brain_backend": "cli",
@@ -549,7 +555,8 @@ def run_pipeline(wav_path: str, out_wav_path: str | None = None,
 
 def run_turn(frames, model_name: str | None = None,
              threshold: float | None = None,
-             out_wav_path: str | None = None) -> dict | None:
+             out_wav_path: str | None = None,
+             on_capture=None) -> dict | None:
     """One live turn over a frame stream: wait for the wake word, capture the
     request to its endpoint, then transcribe -> brain -> speak.
 
@@ -559,6 +566,12 @@ def run_turn(frames, model_name: str | None = None,
     speech followed it, or the captured audio transcribed to no words (noise). This
     is the unit an always-on loop calls repeatedly; the loop wrapper and mic/speaker
     I/O land with the microphone (issues #10, #11).
+
+    `on_capture`, if given, is called once the request has been captured (listening
+    for this turn is over). A half-duplex live loop uses it to stop the mic before
+    the slow transcribe/brain/speak stages, so they do not buffer input the loop
+    would only discard. It fires whether or not speech was found, so the caller can
+    pair every call with a resume.
     """
     cfg = load_config()
     model_name = model_name or cfg["wake_word"]
@@ -571,6 +584,11 @@ def run_turn(frames, model_name: str | None = None,
         return None
 
     request_pcm = capture_request(frames)
+    # Listening for this turn is done. Let a live loop stop the mic now, before the
+    # slow stages below, so it does not buffer (then throw away) input recorded
+    # while the assistant is thinking and speaking.
+    if on_capture is not None:
+        on_capture()
     if request_pcm.size == 0:
         return None  # wake fired but only silence followed — ignore the turn
 
@@ -599,6 +617,74 @@ def run_turn(frames, model_name: str | None = None,
     }
 
 
+def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
+             threshold: float | None = None) -> None:
+    """Always-on voice loop: listen, wake, capture, answer, speak -- repeat.
+
+    Drives run_turn over a live microphone (audio.Microphone) and plays each reply
+    through the configured output device. Half-duplex: run_turn's on_capture hook
+    pauses the mic the instant the request is captured, so the slow transcribe /
+    brain / speak stages and the reply playback never run while the mic is live.
+    After each turn the mic is resumed and flushed, dropping anything that leaked in
+    so the assistant never transcribes its own voice -- raw devices have no echo
+    cancellation, so the loop avoids capturing and playing at once rather than
+    relying on the hardware to cancel the speaker.
+
+    Device names come from config (mic_device / output_device) unless overridden.
+    `audio` is imported lazily so file-mode use and the tests never require the
+    PortAudio backend.
+    """
+    import audio  # lazy: only the live loop needs the PortAudio backend
+
+    cfg = load_config()
+    wake_word = wake_word or cfg["wake_word"]
+    if mic_name is None:
+        mic_name = cfg.get("mic_device") or None
+    if output_name is None:
+        output_name = cfg.get("output_device") or None
+    out_wav = str(PROJECT_DIR / "test_audio" / "reply.wav")
+    Path(out_wav).parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"computah listening -- wake word: {wake_word}. Ctrl-C to stop.")
+    with audio.Microphone(mic_name) as mic:
+        print(f"mic: {mic.device_label}")
+        frames = mic.frames()
+        paused = False
+
+        def pause_for_turn():
+            nonlocal paused
+            mic.pause()
+            paused = True
+
+        try:
+            while True:
+                paused = False
+                result = run_turn(frames, model_name=wake_word,
+                                  threshold=threshold, out_wav_path=out_wav,
+                                  on_capture=pause_for_turn)
+                if result is not None:
+                    print(f"  heard: {result['transcript']!r}")
+                    print(f"  reply: {result['reply']!r}")
+                    audio.play_wav(out_wav, output_name)
+                if paused:
+                    # A turn was captured (mic stopped before the slow stages).
+                    # Flush while the stream is still stopped: no fresh audio is
+                    # arriving yet, so this drops only the stale audio buffered
+                    # during thinking/speaking. Resume after, so the next utterance
+                    # is captured from a clean buffer even if the user starts
+                    # speaking the instant playback ends. Flushing after resume()
+                    # would race the callback and discard the start of that speech.
+                    mic.flush()
+                    mic.resume()
+                elif not mic.active():
+                    # run_turn returned without capturing a request and the stream
+                    # is no longer delivering frames: the device ended. Stop.
+                    print("mic stream ended; stopping")
+                    break
+        except KeyboardInterrupt:
+            print("\nstopped.")
+
+
 def _cli() -> int:
     p = argparse.ArgumentParser(description="jawn-voice pipeline (mic-free)")
     p.add_argument("input_wav", nargs="?", help="input WAV to process")
@@ -608,6 +694,12 @@ def _cli() -> int:
                    help="list installed wake-word models and exit")
     p.add_argument("--set-wake-word", metavar="NAME",
                    help="persist a new active wake word to config.json and exit")
+    p.add_argument("--listen", action="store_true",
+                   help="run the always-on live mic loop (needs sounddevice)")
+    p.add_argument("--mic", metavar="NAME",
+                   help="mic device name substring (overrides config mic_device)")
+    p.add_argument("--speaker", metavar="NAME",
+                   help="output device name substring (overrides config output_device)")
     args = p.parse_args()
 
     if args.list_wake_words:
@@ -620,8 +712,13 @@ def _cli() -> int:
         cfg = set_wake_word(args.set_wake_word)
         print(f"active wake word is now: {cfg['wake_word']}")
         return 0
+    if args.listen:
+        run_loop(wake_word=args.wake_word, mic_name=args.mic,
+                 output_name=args.speaker)
+        return 0
     if not args.input_wav:
-        p.error("input_wav is required unless using --list/--set-wake-word")
+        p.error("input_wav is required unless using "
+                "--listen/--list-wake-words/--set-wake-word")
 
     r = run_pipeline(args.input_wav, out_wav_path=args.output,
                      wake_word=args.wake_word)

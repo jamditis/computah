@@ -1,5 +1,8 @@
 {
-  "_comment": "Copy to config.local.json (gitignored) to enable the persistent-session brain. config.local.json overrides config.json. Keep deployment-specific names and paths here, not in config.json.",
+  "_comment": "Copy to config.local.json (gitignored) for host-specific settings. config.local.json overrides config.json. Two independent groups: live-audio device names for `pipeline.py --listen`, and the persistent-session brain. Keep deployment-specific names and paths here, not in config.json.",
+  "_audio_comment": "Case-insensitive device-name substrings (run `python audio.py --list`). Empty string = system default. Legion: mic 'powerconf' (or 'shure' as a backup), output 'desktop speakers'. Pi: 'powerconf' over USB for both.",
+  "mic_device": "powerconf",
+  "output_device": "desktop speakers",
   "brain_backend": "bridge",
   "brain_persona": "assistant",
   "brain_transport": "local",

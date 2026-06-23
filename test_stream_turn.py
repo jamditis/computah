@@ -173,6 +173,44 @@ def main() -> int:
           noise_turn is None and not brain_hit["called"],
           f"returned {noise_turn}, brain_called={brain_hit['called']}")
 
+    # on_capture marks the moment listening for a turn ends. The half-duplex loop
+    # pauses the mic there, so it must fire once a request is captured -- on a
+    # successful turn AND on a wake followed by silence -- and never when no wake
+    # fired, or the loop's pause/resume bookkeeping desyncs.
+    fired = {"n": 0}
+    real_brain3 = pipeline.brain
+    pipeline.brain = lambda text, **_: "Two plus two is four."
+    try:
+        cap_turn = pipeline.run_turn(
+            pipeline.iter_wav_frames(jarvis), model_name="hey_jarvis",
+            threshold=DETECT_THR, out_wav_path=str(TEST_DIR / "turn_reply.wav"),
+            on_capture=lambda: fired.__setitem__("n", fired["n"] + 1))
+    finally:
+        pipeline.brain = real_brain3
+    check("on_capture fires once on a successful turn",
+          cap_turn is not None and fired["n"] == 1, f"calls={fired['n']}")
+
+    fired_nowake = {"n": 0}
+    nc_turn = pipeline.run_turn(
+        pipeline.iter_wav_frames(nowake), model_name="hey_jarvis",
+        threshold=DETECT_THR,
+        on_capture=lambda: fired_nowake.__setitem__("n", fired_nowake["n"] + 1))
+    check("on_capture does not fire when no wake fires",
+          nc_turn is None and fired_nowake["n"] == 0, f"calls={fired_nowake['n']}")
+
+    fired_silent = {"n": 0}
+    real_cap3 = pipeline.capture_request
+    pipeline.capture_request = lambda fr: np.zeros(0, dtype=np.int16)
+    try:
+        si_turn = pipeline.run_turn(
+            pipeline.iter_wav_frames(jarvis), model_name="hey_jarvis",
+            threshold=DETECT_THR,
+            on_capture=lambda: fired_silent.__setitem__("n", fired_silent["n"] + 1))
+    finally:
+        pipeline.capture_request = real_cap3
+    check("on_capture fires on a wake even when no speech follows",
+          si_turn is None and fired_silent["n"] == 1, f"calls={fired_silent['n']}")
+
     # A model not built by _get_oww_model (a future mic adapter may build its own)
     # must not crash _reset_oww on a missing _blank_buffers snapshot.
     from openwakeword.model import Model
