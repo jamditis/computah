@@ -137,8 +137,8 @@ The output path receives the spoken reply.
 | `whisper_model` | faster-whisper model size or path. |
 | `whisper_compute` | CTranslate2 compute type, usually `int8` on the target device. |
 | `stt_confidence_guard` | When true, a live turn drops a low-confidence transcript before the brain and speaks a re-prompt. |
-| `stt_min_avg_logprob` | Floor for the transcript's mean per-token log-probability; below it the turn is rejected. |
-| `stt_max_no_speech_prob` | Ceiling for how silence-like the audio looked; above it the turn is rejected. |
+| `stt_min_avg_logprob` | Floor for the transcript's mean per-token log-probability; below it the turn is rejected. This is the gate. |
+| `stt_max_no_speech_prob` | How silence-like the audio looked. Combined with a low `avg_logprob` it labels a reject as silence; following faster-whisper's own rule, a confident decode is never rejected for this alone. |
 | `voice_model` | Piper voice name/stem; `speak` loads `voices/<voice_model>.onnx`. |
 | `brain_backend` | `cli` for standalone fallback or `bridge` for the persistent session path. |
 | `claude_model` | Model name for the fallback CLI brain. |

@@ -63,28 +63,34 @@ def main() -> int:
           not ok and reason == "empty transcript", f"ok={ok} reason={reason!r}")
 
     ok, reason = confident(Transcript("muffled words", -2.5, 0.05))
-    check("low avg_logprob is rejected", not ok and "avg_logprob" in reason,
+    check("low avg_logprob is rejected as low confidence",
+          not ok and "low confidence" in reason and "avg_logprob" in reason,
           f"ok={ok} reason={reason!r}")
 
-    ok, reason = confident(Transcript("room tone", -0.2, 0.95))
-    check("high no_speech_prob is rejected", not ok and "no_speech_prob" in reason,
+    # Following faster-whisper's no-speech rule, a high no_speech_prob does NOT
+    # reject a confidently decoded command (avg_logprob above the floor). This is
+    # the false-reject the combined rule avoids.
+    ok, reason = confident(Transcript("a quiet but clear command", -0.2, 0.95))
+    check("high no_speech_prob alone does not reject a confident decode", ok,
           f"ok={ok} reason={reason!r}")
 
-    # no_speech_prob is checked before avg_logprob, so a transcript that fails both
-    # reports the silence signal first.
-    ok, reason = confident(Transcript("garbled", -5.0, 0.99))
-    check("a transcript failing both signals reports no_speech first",
-          not ok and "no_speech_prob" in reason, f"ok={ok} reason={reason!r}")
+    # A low-confidence decode that is also silence-like is rejected and labeled
+    # silence (both signals past their thresholds).
+    ok, reason = confident(Transcript("garbled silence", -5.0, 0.99))
+    check("low confidence with high no_speech is rejected as silence",
+          not ok and "silence" in reason, f"ok={ok} reason={reason!r}")
 
-    # Boundary: exactly at the floor/ceiling passes (>= floor, <= ceiling).
+    # Boundary: exactly at the floor passes (rejection is strictly below the floor).
     ok, _ = confident(Transcript("edge", FLOOR, CEIL))
-    check("values exactly at the floor and ceiling pass", ok, f"ok={ok}")
+    check("avg_logprob exactly at the floor passes", ok, f"ok={ok}")
 
     ok, _ = confident(Transcript("just under", FLOOR - 0.001, 0.0))
     check("avg_logprob just under the floor is rejected", not ok, f"ok={ok}")
 
-    ok, _ = confident(Transcript("just over", 0.0, CEIL + 0.001))
-    check("no_speech_prob just over the ceiling is rejected", not ok, f"ok={ok}")
+    # no_speech over the ceiling but a confident decode: passes (no independent
+    # no_speech rejection).
+    ok, _ = confident(Transcript("confident yet silence-like", 0.0, CEIL + 0.001))
+    check("no_speech over the ceiling with good avg_logprob passes", ok, f"ok={ok}")
 
     print("\n=== _aggregate_segments: collapsing whisper segments (no model) ===")
 

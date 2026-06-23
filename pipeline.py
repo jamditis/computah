@@ -87,10 +87,12 @@ DEFAULTS = {
     "whisper_model": "tiny.en",
     "whisper_compute": "int8",
     # Mishear guard: gate a transcript on faster-whisper's confidence before it
-    # reaches the brain, so a garbled or silence-derived command never drives an
-    # action. avg_logprob must stay at or above the floor and no_speech_prob at or
-    # below the ceiling; the defaults mirror faster-whisper's own log_prob and
-    # no_speech thresholds. Set stt_confidence_guard false to dispatch every turn.
+    # reaches the brain, so a garbled command never drives an action. avg_logprob is
+    # the gate (it must stay at or above the floor); following faster-whisper's own
+    # no-speech rule, a high no_speech_prob only marks a reject as silence when the
+    # decode is also unconfident, so a clear command is never dropped for it alone.
+    # The defaults mirror faster-whisper's log_prob and no_speech thresholds. Set
+    # stt_confidence_guard false to dispatch every turn.
     "stt_confidence_guard": True,
     "stt_min_avg_logprob": -1.0,
     "stt_max_no_speech_prob": 0.6,
@@ -467,19 +469,21 @@ def transcript_confident(t: Transcript, *, min_avg_logprob: float,
     """Is a transcript trustworthy enough to act on?
 
     The brain acts on voice commands -- it files issues, changes things -- so a
-    misheard or silence-derived transcript must be stopped before it dispatches.
-    Two faster-whisper signals gate it: no_speech_prob must stay at or under its
-    ceiling (the audio was speech, not room tone) and avg_logprob at or above its
-    floor (the decoder was confident in the words). Returns (ok, reason); reason
-    names the failing signal so the caller can log why a turn was dropped.
+    misheard transcript must be stopped before it dispatches. The decoder's
+    avg_logprob is the gate: below the floor the words are unreliable and the turn
+    is rejected. Following faster-whisper's own no-speech rule, a confidently decoded
+    command is never rejected for a high no_speech_prob alone (a confident decode
+    overrides it); no_speech_prob only distinguishes a silence-derived reject (it
+    over the ceiling and avg_logprob under the floor) from a plain garbled one, which
+    sharpens the logged reason without ever re-prompting a clear command. Returns
+    (ok, reason); reason names why a turn was dropped.
     """
     if not t.text.strip():
         return False, "empty transcript"
-    if t.no_speech_prob > max_no_speech_prob:
-        return False, (f"no_speech_prob {t.no_speech_prob:.2f} over ceiling "
-                       f"{max_no_speech_prob:.2f}")
     if t.avg_logprob < min_avg_logprob:
-        return False, (f"avg_logprob {t.avg_logprob:.2f} under floor "
+        kind = ("silence" if t.no_speech_prob > max_no_speech_prob
+                else "low confidence")
+        return False, (f"{kind}: avg_logprob {t.avg_logprob:.2f} under floor "
                        f"{min_avg_logprob:.2f}")
     return True, "ok"
 
