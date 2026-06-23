@@ -73,7 +73,8 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
 
     # The local transport normally shells the real bot-spren CLI. Swap just the
     # sender for the sim writer; the reply reader is the real file reader.
-    real_brain_bridge.cli_send = lambda _bin: real_brain_bridge.local_sim_send(inbox)
+    real_brain_bridge.cli_send = (
+        lambda _bin, working_dir=None: real_brain_bridge.local_sim_send(inbox))
 
     sim = SimPersona(inbox, reply, poll_s=0.02)
     sim.start()

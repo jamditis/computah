@@ -13,6 +13,32 @@ The design goal: the voice assistant and the user's existing text assistant are 
 same session with shared memory. So the brain is a long-running session reached over
 a bridge, not a stateless per-utterance API call.
 
+## Primary use case
+
+Voice-first and eyes-free: the user is away from a keyboard (often just looking at a
+phone) and wants to act on something without getting to a computer — most often "file
+a GitHub issue about this" or capture a quick note. So computah is a voice-driven
+action executor, not a chatbot. The brain (Syl) has a real toolset and permissions,
+so it carries the instruction out — it files the issue — rather than only talking
+about it.
+
+That makes faithful execution of explicit spoken instructions the core requirement,
+not raw reasoning. Syl runs on a fast, low-cycle model (Sonnet 4.6 medium) and stays
+in the conversation: anything that is not pure voice back-and-forth — any real task or
+tool use — it hands to a subagent immediately rather than doing inline. Two reasons.
+Interruptibility: while a subagent works, Syl is still listening, so a follow-up
+correction ("no, change the title") can interrupt and redirect the subagent instead of
+waiting for it to finish and redoing the work. Capability: the subagent's model scales
+with the task — a routine action at the default tier, a genuinely hard one on a higher
+tier (Opus 4.8). Either way the subagent is ephemeral (spawn, work, exit), not a
+second resident session.
+
+Two consequences for the pipeline. Eyes-free means a spoken confirmation is the only
+feedback channel: the brain must say what it did ("filed issue 46 in computah") and
+read an external or destructive action back before doing it. And because speech is
+misheard, a mishear guard belongs in front of any action that creates or changes
+something, so a garbled word never files a garbage issue.
+
 ## Architecture
 
 Four stages, each independently swappable (`pipeline.py`):
@@ -33,8 +59,10 @@ normalized to 16 kHz mono int16 (`_load_pcm16`).
 
 The brain stage routes through a persistent session using a file-based contract (the
 bot-spren framework's): send appends one event to an inbox file; the session writes
-its reply to a reply file as a delimited block; `brain_via_bridge` snapshots the last
-block, sends, then polls for the next new one.
+its reply to a reply file as a delimited block; `brain_via_bridge` reserves the next
+reply slot with a persistent cursor, sends, then polls for the block at that slot — so
+a late reply from a timed-out turn fills its own reserved slot instead of being read
+as the next turn's answer.
 
 Transport is injected, so the same logic serves three settings: assistant on the
 same host (`cli_send` + `file_reply_reader`), on another host (`ssh_cli_send` +
@@ -109,16 +137,23 @@ bug.
 
 ## Known limitations
 
-- Positional reply correlation in the bridge: `brain_via_bridge` returns the next new
-  reply block after sending. A late reply from a timed-out turn can be mis-attributed
-  on the following turn. The reply format carries no correlation key; mitigate with a
-  generous timeout. Voice turns are serialized, so this is rare.
+- Positional reply correlation in the bridge: the reply format carries no correlation
+  key, so `brain_via_bridge` correlates by position with a persistent cursor that
+  reserves one reply slot per send. A late reply from a timed-out turn fills its own
+  reserved slot and is skipped, so it is not mis-attributed to the next turn; a reply
+  dropped entirely (never written) would otherwise wedge the cursor one ahead, so after
+  a couple of consecutive timeouts it resyncs to the live end and recovers. Positional
+  correlation still cannot tell a slow reply from a dropped one, and a relaunch across
+  an in-flight prompt can re-seed a one-turn lag — drain the session to quiescence
+  before relaunching. The robust fix is a real correlation key: the reply echoing the
+  request's `event_id` so the match is by identity, not position.
 - `speak()` shells a fresh Piper process per call and reloads the voice model
   (~3.9 s). Keeping Piper resident is the planned fix.
 
 ## File index
 
 - `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`).
+- `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> STT -> brain -> spoken reply, re-arming after each turn.
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.
 - `test_*.py` — see Dev commands.
