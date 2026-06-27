@@ -165,14 +165,17 @@ def brain_via_bridge(
         # whatever its file position, so a dropped or reordered reply on another turn
         # cannot shift it. Active only once the producer stamps event_id; until then
         # no block carries one and this loop falls through to the positional branch.
-        for idx, (_did, eid, payload) in enumerate(blocks):
+        for _did, eid, payload in blocks:
             if eid == event_id and payload:
-                # Realign the positional cursor to the matched block's actual slot. An
-                # identity match can land off `target` (after a dropped or reordered
-                # reply); leaving the cursor at target+1 would desync the positional
-                # accounting a later unstamped, positional-fallback turn still relies
-                # on, making it poll a slot past its own reply and time out.
-                cursor.consumed = idx + 1
+                # Identity match is cursor-independent and deliberately does NOT touch
+                # the positional cursor. Realigning it to the matched slot would have to
+                # rewind past slots reserved for earlier timed-out sends, and positional
+                # correlation cannot tell a dropped reserved slot from a merely late one
+                # — rewinding could let a late legacy reply be spoken as the next turn's
+                # answer (the invariant that a late reply fills its own reserved slot and
+                # is skipped). So coherence between a stamped match and a later unstamped
+                # fallback turn is deferred to the producer step (#59), where full
+                # stamping removes the unstamped fallback entirely.
                 cursor.misses = 0
                 return payload
         # Positional fallback, for unstamped blocks only. A stamped block that is not
