@@ -46,7 +46,12 @@ Four stages, each independently swappable (`pipeline.py`):
 1. `detect_wake` — openWakeWord (ONNX). 80 ms frames; peak score vs threshold.
    For a live mic, `stream_detect_wake` + `capture_request` drive detection and
    energy-based endpointing over a continuous frame stream instead of a whole
-   file, and `run_turn` runs one full turn from that stream.
+   file, and `run_turn` runs one full turn from that stream. `stream_detect_wake`
+   keeps a `_PREROLL_FRAMES`-deep ring buffer of the most recent frames and
+   `capture_request` prepends it, so a command spoken with no pause after the wake
+   word is not clipped by detection latency (the pre-roll is dropped on an
+   abandoned wake, so it never becomes a phantom request). The pre-roll size is
+   tuned to the deployed mic's real wake-detection latency.
 2. `transcribe` — faster-whisper (CTranslate2, int8). `transcribe_detailed` also
    returns the decoder's confidence (`avg_logprob`, `no_speech_prob`). Both live
    paths (`run_turn` and `live_driver`) gate on it through `guard_transcript` so a
@@ -122,6 +127,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python test_brain_bridge.py      # bridge logic — fast, no models
 .venv/bin/python test_brain_dispatch.py    # config selects the backend — fast, no models
 .venv/bin/python test_confidence_guard.py  # mishear guard decision + aggregation — fast, no models
+.venv/bin/python test_preroll.py           # pre-roll buffer keeps a no-pause request's leading audio — fast, no models
 .venv/bin/python test_live_driver.py       # live_driver hardware path honors the guard — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
 .venv/bin/python test_pipeline.py          # full chain + fallback CLI brain

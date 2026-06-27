@@ -21,6 +21,7 @@ overrides config.json.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import shutil
@@ -330,6 +331,14 @@ _SILENCE_RMS = 250.0           # int16 RMS below this is room tone, not speech
 _ENDPOINT_SILENCE_FRAMES = 10  # ~0.8 s of trailing quiet ends a captured request
 _NO_SPEECH_ONSET_FRAMES = 20   # ~1.6 s; abandon a wake that no speech follows
 _MAX_REQUEST_FRAMES = 100      # ~8 s cap so a stuck stream cannot record forever
+_PREROLL_FRAMES = 8            # ~0.64 s of audio kept before the wake fire and
+                               # prepended to the request, so a command spoken with
+                               # no pause after the wake word is not clipped by
+                               # detection latency (issue #30). A starting value: the
+                               # right size is the real wake-detection latency for the
+                               # deployed mic, tuned with a live voice test. Larger
+                               # recovers more leading audio but bleeds more of the
+                               # wake word into the transcript.
 
 
 def iter_wav_frames(wav_path: str):
@@ -345,7 +354,7 @@ def _frame_rms(frame: np.ndarray) -> float:
     return float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
 
 
-def stream_detect_wake(frames, model, threshold: float) -> float | None:
+def stream_detect_wake(frames, model, threshold: float, preroll=None) -> float | None:
     """Watch a continuous frame stream for the wake word.
 
     detect_wake handles a one-shot file by resetting the model and padding the clip
@@ -355,10 +364,18 @@ def stream_detect_wake(frames, model, threshold: float) -> float | None:
     score so far; returns None if the stream ends with no detection. Leaves the
     iterator positioned right after the wake word so the caller can capture the
     request that follows.
+
+    `preroll`, if given, is a bounded collection (a deque(maxlen=N)) that each frame
+    is appended to as it is consumed, so on a fire it holds the most recent N frames
+    -- including the firing frame. capture_request prepends those to the request,
+    recovering the leading audio that detection latency consumes, so a command spoken
+    with no pause after the wake word is not clipped (issue #30).
     """
     _reset_oww(model)
     peak = 0.0
     for frame in frames:
+        if preroll is not None:
+            preroll.append(frame)
         score = max(float(s) for s in model.predict(frame).values())
         peak = max(peak, score)
         if score >= threshold:
@@ -366,7 +383,7 @@ def stream_detect_wake(frames, model, threshold: float) -> float | None:
     return None
 
 
-def capture_request(frames) -> np.ndarray:
+def capture_request(frames, preroll=None) -> np.ndarray:
     """Collect request frames after a wake fire until a trailing-silence endpoint.
 
     Energy-based endpointing: once speech has been seen, stop after
@@ -377,6 +394,14 @@ def capture_request(frames) -> np.ndarray:
     no speech followed the wake word. Transcribing that silence would feed whisper
     room tone, which it tends to hallucinate words for, so the empty return lets
     the caller ignore the turn instead.
+
+    `preroll`, if given, is a list of frames captured just before the wake fired
+    (see stream_detect_wake). They are prepended to the returned PCM so a request
+    spoken immediately after the wake word keeps its leading audio, which detection
+    latency would otherwise have consumed (issue #30). The pre-roll takes no part in
+    the speech-onset / endpoint decision -- that runs only over the frames after the
+    wake word -- so an abandoned wake (no speech after it) still returns empty and the
+    wake word held in the pre-roll is never transcribed as a phantom request.
     """
     captured: list[np.ndarray] = []
     quiet = 0
@@ -395,7 +420,16 @@ def capture_request(frames) -> np.ndarray:
         if len(captured) >= _MAX_REQUEST_FRAMES:
             break
     if not speech_seen:
+        # No speech after the wake fired. The pre-roll is dropped here on purpose:
+        # by post-fire audio alone an abandoned wake (the wake word then silence) is
+        # indistinguishable from a short command consumed entirely during detection,
+        # and the wake word always sits in the pre-roll. Prepending it whenever the
+        # pre-roll holds speech would dispatch a bare wake word as a phantom command,
+        # against the mishear-guard rule. Dropping is the safe side; the rare
+        # fully-consumed short command is tracked as its own problem (issue #53).
         return np.zeros(0, dtype=np.int16)
+    if preroll:
+        return np.concatenate([*preroll, *captured])
     return np.concatenate(captured)
 
 
@@ -698,11 +732,14 @@ def run_turn(frames, model_name: str | None = None,
     model = _get_oww_model(_resolve_wake_path(model_name))
 
     frames = iter(frames)
-    score = stream_detect_wake(frames, model, threshold)
+    # Keep the most recent frames during detection so the request's leading audio,
+    # consumed while the detector was crossing threshold, is recovered (issue #30).
+    preroll = collections.deque(maxlen=_PREROLL_FRAMES)
+    score = stream_detect_wake(frames, model, threshold, preroll=preroll)
     if score is None:
         return None
 
-    request_pcm = capture_request(frames)
+    request_pcm = capture_request(frames, preroll=list(preroll))
     # Listening for this turn is done. Let a live loop stop the mic now, before the
     # slow stages below, so it does not buffer (then throw away) input recorded
     # while the assistant is thinking and speaking.

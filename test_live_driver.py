@@ -47,9 +47,9 @@ def drive(cfg: dict, transcript: Transcript) -> dict:
     real = (live_driver.listen_for_wake, pipeline.capture_request,
             pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
             live_driver._play_wav)
-    live_driver.listen_for_wake = lambda fr, m, t, d: 0.9
+    live_driver.listen_for_wake = lambda fr, m, t, d, preroll=None: 0.9
     pipeline.capture_request = (
-        lambda fr: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16))
+        lambda fr, preroll=None: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16))
     pipeline.transcribe_detailed = lambda p: transcript
 
     def fake_brain(text, **_):
