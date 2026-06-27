@@ -130,6 +130,23 @@ def main() -> int:
     check("abandoned wake stays empty even with a pre-roll seed",
           cap_empty.size == 0, f"got {cap_empty.size} samples, want 0")
 
+    # A transient after the wake -- a click, a cough edge, a speaker echo -- is a frame
+    # or two of energy, not speech. It must not count as speech onset: otherwise a
+    # wake-only turn would prepend its pre-roll (which holds the wake word) and whisper
+    # could decode a confident phantom command the mishear guard cannot catch. Onset
+    # requires a sustained run of speech frames, so a transient leaves the wake abandoned
+    # and empty (energy gate is not a speech gate -- found reviewing #54).
+    for k in (1, 2):
+        cap_transient = pipeline.capture_request(iter(loud(k) + silent(30)),
+                                                  preroll=loud(3))
+        check(f"a {k}-frame transient after the wake stays empty (no phantom command)",
+              cap_transient.size == 0, f"got {cap_transient.size} samples, want 0")
+    # The fix must not over-reject: a short but sustained command (3 frames) still
+    # captures, with its pre-roll seed prepended.
+    cap_short = pipeline.capture_request(iter(loud(3) + silent(15)), preroll=loud(2))
+    check("a sustained 3-frame command still captures with its pre-roll",
+          nframes(cap_short) == 15, f"got {nframes(cap_short)} frames, want 15 (2 seed + 3 + 10)")
+
     # A pre-roll of None or [] behaves exactly like the original (no prepend).
     cap_none = pipeline.capture_request(iter(loud(5) + silent(15)), preroll=None)
     check("no pre-roll behaves like the original capture", nframes(cap_none) == 15,

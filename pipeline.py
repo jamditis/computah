@@ -330,6 +330,10 @@ FRAME_SIZE = 1280  # 80 ms at 16 kHz — openWakeWord's frame size
 _SILENCE_RMS = 250.0           # int16 RMS below this is room tone, not speech
 _ENDPOINT_SILENCE_FRAMES = 10  # ~0.8 s of trailing quiet ends a captured request
 _NO_SPEECH_ONSET_FRAMES = 20   # ~1.6 s; abandon a wake that no speech follows
+_SPEECH_ONSET_FRAMES = 3       # consecutive above-threshold frames before energy counts
+                               # as speech onset; a click/cough/echo is 1-2 frames, so a
+                               # sustained run keeps a transient from tripping onset and
+                               # prepending the wake-word pre-roll as a phantom (#54)
 _MAX_REQUEST_FRAMES = 100      # ~8 s cap so a stuck stream cannot record forever
 _PREROLL_FRAMES = 2            # ~0.16 s of audio kept before the wake fire and
                                # prepended to the request, so a command spoken with
@@ -403,19 +407,26 @@ def capture_request(frames, preroll=None) -> np.ndarray:
     spoken immediately after the wake word keeps its leading audio, which detection
     latency would otherwise have consumed (issue #30). The pre-roll takes no part in
     the speech-onset / endpoint decision -- that runs only over the frames after the
-    wake word -- so an abandoned wake (no speech after it) still returns empty and the
-    wake word held in the pre-roll is never transcribed as a phantom request.
+    wake word. Onset requires a sustained run of above-threshold frames
+    (_SPEECH_ONSET_FRAMES), not a single loud frame, so a transient after the wake --
+    a click, a cough edge, a speaker echo -- does not count as speech. A wake with no
+    sustained speech after it still returns empty, so the wake word held in the pre-roll
+    is never prepended and transcribed as a phantom request (#54).
     """
     captured: list[np.ndarray] = []
     quiet = 0
+    voiced_run = 0
     speech_seen = False
     for frame in frames:
         captured.append(frame)
         if _frame_rms(frame) < _SILENCE_RMS:
             quiet += 1
+            voiced_run = 0
         else:
             quiet = 0
-            speech_seen = True
+            voiced_run += 1
+            if voiced_run >= _SPEECH_ONSET_FRAMES:
+                speech_seen = True  # sustained energy, not a lone transient
         if speech_seen and quiet >= _ENDPOINT_SILENCE_FRAMES:
             break
         if not speech_seen and quiet >= _NO_SPEECH_ONSET_FRAMES:
@@ -423,13 +434,15 @@ def capture_request(frames, preroll=None) -> np.ndarray:
         if len(captured) >= _MAX_REQUEST_FRAMES:
             break
     if not speech_seen:
-        # No speech after the wake fired. The pre-roll is dropped here on purpose:
-        # by post-fire audio alone an abandoned wake (the wake word then silence) is
-        # indistinguishable from a short command consumed entirely during detection,
-        # and the wake word always sits in the pre-roll. Prepending it whenever the
-        # pre-roll holds speech would dispatch a bare wake word as a phantom command,
-        # against the mishear-guard rule. Dropping is the safe side; the rare
-        # fully-consumed short command is tracked as its own problem (issue #53).
+        # No sustained speech after the wake fired (silence, or only a transient like a
+        # click or cough). The pre-roll is dropped here on purpose: by post-fire audio
+        # alone an abandoned wake is indistinguishable from a short command consumed
+        # entirely during detection, and the wake word always sits in the pre-roll.
+        # Prepending it whenever the pre-roll holds speech would dispatch a bare wake
+        # word as a phantom command, against the mishear-guard rule. Dropping is the safe
+        # side; a genuine command with fewer than _SPEECH_ONSET_FRAMES of post-fire speech
+        # (the wake consumed the rest) is dropped here too -- the cost of not being able to
+        # tell it from a transient -- and is tracked as its own problem (#53).
         return np.zeros(0, dtype=np.int16)
     if preroll:
         return np.concatenate([*preroll, *captured])
