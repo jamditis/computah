@@ -38,6 +38,17 @@ def check(name: str, ok: bool, detail: str) -> bool:
     return ok
 
 
+class FakeMic:
+    """Records flush-to-now calls. The post-cue drop is now mic.flush() (issue #56):
+    a cue that played flushes once; a failed or suppressed cue never flushes."""
+
+    def __init__(self) -> None:
+        self.flushed = 0
+
+    def flush(self) -> None:
+        self.flushed += 1
+
+
 def _dom_freq(seg: np.ndarray) -> float:
     """Dominant frequency (Hz) of an int16 segment, windowed to limit edge leakage."""
     x = seg.astype(np.float64)
@@ -181,7 +192,7 @@ def test_live_driver_chime() -> None:
     order: list[str] = []
     real = (live_driver.listen_for_wake, pipeline.capture_request,
             pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-            live_driver._play_wav, live_driver.drain, chime.wake_cue_wav)
+            live_driver._play_wav, chime.wake_cue_wav)
 
     def fake_listen(fr, m, t, d, preroll=None):
         if preroll is not None:  # detection leaves the wake-word tail in the pre-roll
@@ -205,18 +216,18 @@ def test_live_driver_chime() -> None:
     pipeline.brain = lambda t, **_: "Brain answer."
     pipeline.speak = lambda text, out, **_: out
     live_driver._play_wav = fake_play
-    live_driver.drain = lambda frames, n: order.append("drain")
+    mic = FakeMic()
 
     cfg = {"stt_confidence_guard": True, "stt_min_avg_logprob": -1.0,
            "stt_max_no_speech_prob": 0.6, "wake_chime": True,
            "capture_vad_threshold": 0.5}
     try:
-        ran = live_driver.run_turn(iter([]), object(), 0.5, os.devnull, None,
+        ran = live_driver.run_turn(iter([]), mic, object(), 0.5, os.devnull, None,
                                    cfg, False)
     finally:
         (live_driver.listen_for_wake, pipeline.capture_request,
          pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-         live_driver._play_wav, live_driver.drain, chime.wake_cue_wav) = real
+         live_driver._play_wav, chime.wake_cue_wav) = real
 
     check("chime plays before the request is captured",
           "play:cue" in order and "capture" in order
@@ -226,6 +237,8 @@ def test_live_driver_chime() -> None:
           "play:reply" in order
           and order.index("play:reply") > order.index("capture"),
           f"order={order}")
+    check("a cue that played flushes-to-now once (drops the post-cue mic bleed)",
+          mic.flushed == 1, f"flushed={mic.flushed}")
     check("the chime drops the pre-roll so the wake-word tail is not prepended",
           seen_preroll == [[]],
           f"preroll lengths seen by capture={[len(p) for p in seen_preroll]}")
@@ -238,7 +251,7 @@ def test_live_driver_chime_failure_keeps_preroll() -> None:
     order: list[str] = []
     real = (live_driver.listen_for_wake, pipeline.capture_request,
             pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-            live_driver._play_wav, live_driver.drain, chime.wake_cue_wav)
+            live_driver._play_wav, chime.wake_cue_wav)
 
     def fake_listen(fr, m, t, d, preroll=None):
         if preroll is not None:
@@ -265,21 +278,21 @@ def test_live_driver_chime_failure_keeps_preroll() -> None:
     pipeline.brain = lambda t, **_: "Brain answer."
     pipeline.speak = lambda text, out, **_: out
     live_driver._play_wav = failing_play
-    live_driver.drain = lambda frames, n: order.append("drain")
+    mic = FakeMic()
 
     cfg = {"stt_confidence_guard": True, "stt_min_avg_logprob": -1.0,
            "stt_max_no_speech_prob": 0.6, "wake_chime": True,
            "capture_vad_threshold": 0.5}
     try:
-        ran = live_driver.run_turn(iter([]), object(), 0.5, os.devnull, None,
+        ran = live_driver.run_turn(iter([]), mic, object(), 0.5, os.devnull, None,
                                    cfg, False)
     finally:
         (live_driver.listen_for_wake, pipeline.capture_request,
          pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-         live_driver._play_wav, live_driver.drain, chime.wake_cue_wav) = real
+         live_driver._play_wav, chime.wake_cue_wav) = real
 
-    check("a failed cue does not drain (nothing bled into the pipe)",
-          "drain" not in order, f"order={order}")
+    check("a failed cue does not flush (nothing bled into the pipe)",
+          mic.flushed == 0, f"flushed={mic.flushed}")
     check("a failed cue keeps the pre-roll so a no-pause command is still recovered",
           len(seen_preroll) == 1 and len(seen_preroll[0]) == 1,
           f"preroll lengths seen by capture={[len(p) for p in seen_preroll]}")
@@ -293,13 +306,13 @@ def test_chime_opt_in_default_off() -> None:
     print("\n=== chime is opt-in: no cue when wake_chime is off or unset ===")
     # The cue regresses the no-pause case on a half-duplex device, so it ships off by
     # default (issue #41). Both an absent key and an explicit false must suppress it,
-    # while the turn itself still runs normally (capture -> reply, just no cue/drain).
+    # while the turn itself still runs normally (capture -> reply, just no cue/flush).
     for label, cfg_extra in (("wake_chime unset", {}),
                              ("wake_chime false", {"wake_chime": False})):
         order: list[str] = []
         real = (live_driver.listen_for_wake, pipeline.capture_request,
                 pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-                live_driver._play_wav, live_driver.drain, chime.wake_cue_wav)
+                live_driver._play_wav, chime.wake_cue_wav)
 
         def fake_listen(fr, m, t, d, preroll=None):
             if preroll is not None:
@@ -323,22 +336,22 @@ def test_chime_opt_in_default_off() -> None:
         pipeline.brain = lambda t, **_: "Brain answer."
         pipeline.speak = lambda text, out, **_: out
         live_driver._play_wav = fake_play
-        live_driver.drain = lambda frames, n: order.append("drain")
+        mic = FakeMic()
 
         cfg = {"stt_confidence_guard": True, "stt_min_avg_logprob": -1.0,
                "stt_max_no_speech_prob": 0.6, "capture_vad_threshold": 0.5,
                **cfg_extra}
         try:
-            ran = live_driver.run_turn(iter([]), object(), 0.5, os.devnull, None,
+            ran = live_driver.run_turn(iter([]), mic, object(), 0.5, os.devnull, None,
                                        cfg, False)
         finally:
             (live_driver.listen_for_wake, pipeline.capture_request,
              pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-             live_driver._play_wav, live_driver.drain, chime.wake_cue_wav) = real
+             live_driver._play_wav, chime.wake_cue_wav) = real
 
-        check(f"no cue and no chime-drain when {label}",
-              "play:cue" not in order and "drain" not in order,
-              f"ran={ran} order={order}")
+        check(f"no cue and no flush when {label}",
+              "play:cue" not in order and mic.flushed == 0,
+              f"ran={ran} order={order} flushed={mic.flushed}")
         check(f"the turn still runs (capture then reply) when {label}",
               "capture" in order and "play:reply" in order,
               f"order={order}")
