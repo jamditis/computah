@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import math
 import os
 import subprocess
 import sys
@@ -33,6 +34,7 @@ import soundfile as sf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline
+import chime
 
 FRAME_BYTES = pipeline.FRAME_SIZE * 2  # 1280 int16 = 2560 bytes (80 ms)
 _DRAIN_FRAMES = 25  # ~2 s discarded after a turn: clears stale/echo audio from the
@@ -133,6 +135,37 @@ def run_turn(frames, model, threshold: float, out_wav: str,
     if score is None:
         return False
     log(f"wake fired (score={score:.3f})")
+
+    # Acknowledge the wake with a cue before capture (issue #41). arecord cannot be
+    # paused, so on a shared mic/speaker device (the PowerConf) the cue bleeds straight
+    # back into the mic; drop the frames that buffered in the pipe while it played so
+    # the cue is not captured as part of the request. The drain is sized to the cue's
+    # measured wall-clock duration (its playback plus aplay's device-open latency):
+    # _play_wav blocks for that span, during which arecord buffers that many frames, so
+    # draining them removes the cue's bleed -- no fixed frame count to guess or tune per
+    # device. Round the frame count UP (ceil): every frame that can hold any cue audio
+    # must go, since a leftover chime tail would be transcribed into the command and
+    # reach the action-capable brain. Rounding up drains at most one extra 80 ms frame,
+    # which is inside human reaction time between the cue ending and speech starting, so
+    # it cannot clip the request. On a cue failure nothing played and nothing bled in,
+    # so the drain is skipped (the else) and the user's request is left intact.
+    if cfg.get("wake_chime", False):  # opt-in, default off (issue #41): the cue
+        # regresses the no-pause case on this half-duplex device, so off unless enabled
+        t0 = time.monotonic()
+        try:
+            _play_wav(chime.wake_cue_wav(), output_device)
+        except Exception as e:  # noqa: BLE001 - the chime is a nicety, not core
+            log(f"wake chime failed ({type(e).__name__}: {e})")
+        else:
+            played_frames = math.ceil((time.monotonic() - t0) * 16000 / pipeline.FRAME_SIZE)
+            drain(frames, played_frames)
+            # The cue established a clean post-cue capture boundary (the drain dropped
+            # the frames buffered while it played). Drop the detection pre-roll with it:
+            # it holds the pre-cue wake-word tail, kept only to recover a no-pause
+            # command's leading audio (issue #30) -- which does not apply once the user
+            # waits for the cue. Without this the stale tail would prepend the post-cue
+            # command and reach the brain (issue #41).
+            preroll.clear()
 
     request_pcm = pipeline.capture_request(frames, preroll=list(preroll),
                                            vad_threshold=cfg["capture_vad_threshold"])

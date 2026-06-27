@@ -104,6 +104,13 @@ DEFAULTS = {
     # and keeps the pre-roll only if the peak per-chunk speech probability reaches this
     # threshold. Lower to confirm quieter/marginal speech; raise to reject more noise.
     "capture_vad_threshold": 0.5,
+    # Wake-acknowledgment chime (issue #41). Opt-in, default off: on the half-duplex
+    # PowerConf the cue cannot play while the mic captures, so when it is on a command
+    # spoken in one breath with the wake word loses its leading audio (it lands in the
+    # cue window) -- which regresses the pre-roll no-pause case. Off keeps that primary
+    # flow intact; enable it for a wait-for-cue style. Gating the cue on a pause so both
+    # can coexist is the deferred fix.
+    "wake_chime": False,
     "voice_model": "en_US-lessac-medium",
     # Live audio device selection by case-insensitive name substring (see audio.py).
     # Empty string means the system default device. Per-host values belong in
@@ -784,7 +791,7 @@ def run_pipeline(wav_path: str, out_wav_path: str | None = None,
 def run_turn(frames, model_name: str | None = None,
              threshold: float | None = None,
              out_wav_path: str | None = None,
-             on_capture=None) -> dict | None:
+             on_capture=None, on_wake=None) -> dict | None:
     """One live turn over a frame stream: wait for the wake word, capture the
     request to its endpoint, then transcribe -> brain -> speak.
 
@@ -797,6 +804,17 @@ def run_turn(frames, model_name: str | None = None,
     to "low_confidence") so the loop speaks the re-prompt. This is the unit an
     always-on loop calls repeatedly; the loop wrapper and mic/speaker I/O land with
     the microphone (issues #10, #11).
+
+    `on_wake`, if given, is called the instant the wake word fires -- after detection,
+    before capture -- so a live loop can play an acknowledgment chime to signal the
+    mic is now listening (issue #41). It fires only on a real wake, never when the
+    stream ends with no detection. Being half-duplex, the loop's hook keeps the cue
+    out of the captured request (e.g. by pausing the mic and flushing the cue frames).
+    It returns True if it established a fresh post-cue capture boundary (cue played,
+    buffered audio flushed); run_turn then drops the detection pre-roll too, so the
+    pre-cue wake-word tail does not prepend a command spoken after the cue. If the cue
+    failed (returns falsy, buffered audio kept), the pre-roll is kept so a no-pause
+    command is still recovered (issue #30) rather than clipped.
 
     `on_capture`, if given, is called once the request has been captured (listening
     for this turn is over). A half-duplex live loop uses it to stop the mic before
@@ -816,6 +834,22 @@ def run_turn(frames, model_name: str | None = None,
     score = stream_detect_wake(frames, model, threshold, preroll=preroll)
     if score is None:
         return None
+
+    # The wake fired. Acknowledge it now -- after detection, before capture -- so a
+    # live loop can chime "listening" (issue #41). on_wake runs only on a real wake,
+    # never on an ended stream, so silence never triggers the cue.
+    if on_wake is not None:
+        # on_wake plays the cue and returns True only if it established a fresh
+        # post-cue capture boundary (cue played, the audio buffered up to now
+        # flushed). Drop the detection pre-roll only then, matching that flush: the
+        # pre-roll exists only to recover a no-pause command's leading audio that
+        # detection latency ate (issue #30), and a user who waits for the cue speaks
+        # fresh after it, so keeping it would inject the stale pre-cue wake-word tail
+        # into the post-cue command (issue #41). If the cue failed (hook returns
+        # falsy -- no boundary, buffered audio kept), keep the pre-roll too, so the
+        # no-pause case is still recovered instead of clipped.
+        if on_wake():
+            preroll.clear()
 
     request_pcm = capture_request(frames, preroll=list(preroll),
                                   vad_threshold=cfg["capture_vad_threshold"])
@@ -889,6 +923,7 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
     PortAudio backend.
     """
     import audio  # lazy: only the live loop needs the PortAudio backend
+    import chime  # the wake-acknowledgment cue (pure DSP; no audio backend)
 
     cfg = load_config()
     wake_word = wake_word or cfg["wake_word"]
@@ -898,6 +933,18 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
         output_name = cfg.get("output_device") or None
     out_wav = str(PROJECT_DIR / "test_audio" / "reply.wav")
     Path(out_wav).parent.mkdir(parents=True, exist_ok=True)
+    # Render the acknowledgment cue once when enabled (issue #41); None disables it.
+    # Opt-in, default off (see DEFAULTS): the cue regresses the no-pause case on a
+    # half-duplex device, so it is off unless config turns it on. Rendering is a
+    # nicety -- if it fails (filesystem / soundfile), degrade to no chime rather than
+    # taking down the whole live loop before it starts listening.
+    cue_wav = None
+    if cfg.get("wake_chime", False):
+        try:
+            cue_wav = chime.wake_cue_wav()
+        except Exception as e:  # noqa: BLE001 - the chime is optional, never fatal
+            print(f"  wake chime unavailable ({type(e).__name__}: {e}); "
+                  "continuing without it")
 
     print(f"computah listening -- wake word: {wake_word}. Ctrl-C to stop.")
     with audio.Microphone(mic_name) as mic:
@@ -910,12 +957,36 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
             mic.pause()
             paused = True
 
+        def chime_for_turn():
+            # The wake fired: pause the mic, play the cue, then flush so the cue --
+            # which bleeds straight back in on a shared mic/speaker device like the
+            # PowerConf -- is not captured as part of the request, then resume so
+            # capture starts from clean audio. A failed cue must never kill the loop,
+            # and on failure nothing was emitted, so skip the flush and leave the
+            # buffered post-wake audio intact for capture (matches live_driver).
+            # Return True only when the cue played and the buffer was flushed, so
+            # run_turn drops the detection pre-roll exactly when this boundary was
+            # established, and keeps it (no-pause recovery, issue #30) when the cue
+            # failed and the buffered audio was left intact.
+            mic.pause()
+            flushed = False
+            try:
+                audio.play_wav(cue_wav, output_name)
+            except Exception as e:  # noqa: BLE001 - the chime is a nicety, not core
+                print(f"  wake chime failed ({type(e).__name__}: {e})")
+            else:
+                mic.flush()
+                flushed = True
+            mic.resume()
+            return flushed
+
         try:
             while True:
                 paused = False
                 result = run_turn(frames, model_name=wake_word,
                                   threshold=threshold, out_wav_path=out_wav,
-                                  on_capture=pause_for_turn)
+                                  on_capture=pause_for_turn,
+                                  on_wake=chime_for_turn if cue_wav else None)
                 if result is not None:
                     print(f"  heard: {result['transcript']!r}")
                     if result.get("rejected") == "low_confidence":
