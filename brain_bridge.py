@@ -15,12 +15,15 @@ bot-spren is message-passing, not request/response:
         --- <iso-ts> delivery_id=<id> ---
         <reply text>
 
-There is no built-in correlation between the inbound event_id and the outbound
-delivery_id, so brain_via_bridge() correlates by position with a persistent
-cursor (ReplyCursor): each send reserves the next reply slot, and the turn reads
-the block at that slot. Voice turns are serialized, and a send reserves its slot
-even when it times out, so a late reply from a timed-out turn fills its own
-reserved slot and is skipped — it is not mis-read as the next turn's answer.
+The reply can echo the request's event_id in its header ("event_id=<id>"), so
+brain_via_bridge() matches a reply to its request by identity (#19). When the field
+is absent — the producer does not stamp it yet — it falls back to positional
+correlation with a persistent cursor (ReplyCursor): each send reserves the next
+reply slot, and the turn reads the block at that slot. Voice turns are serialized,
+and a send reserves its slot even when it times out, so a late reply from a timed-out
+turn fills its own reserved slot and is skipped — it is not mis-read as the next
+turn's answer. The parser tolerates the optional event_id token whether or not a
+producer emits it, so the bridge can ship before the producer side.
 
 Transport is injected so the same logic works in three settings:
   - persona on this host: cli_send + file_reply_reader
@@ -42,25 +45,37 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-# A FileOutbound block header line: "--- <ts> delivery_id=<id> ---".
-_DELIVERY_RE = re.compile(r"^--- .* delivery_id=(\S+) ---$", re.MULTILINE)
+# A FileOutbound block header line: "--- <ts> delivery_id=<id> ---", optionally
+# carrying the originating request's "event_id=<id>" so a reply can be matched to its
+# request by identity instead of file position (#19). The event_id token is optional:
+# a producer that does not stamp it yet (today's bot-spren) still parses, and the
+# bridge falls back to positional correlation for those blocks. The consumer tolerates
+# the token before any producer emits it, so the rollout needs no flag day.
+_DELIVERY_RE = re.compile(
+    r"^--- .* delivery_id=(\S+)(?: event_id=(\S+))? ---$", re.MULTILINE
+)
 
-SendFn = Callable[[str, str], None]   # (persona, prompt) -> None, raises on failure
+# (persona, prompt, *, event_id=None) -> None, raises on failure. event_id is this
+# turn's correlation id (#19); a transport that can carry it stamps it into the inbound
+# event so the reply can echo it, others accept and ignore it (positional fallback).
+SendFn = Callable[..., None]
 ReplyReader = Callable[[], str]       # () -> full reply-file text ("" if absent)
 
 
-def _delivery_blocks(reply_text: str) -> list[tuple[str, str]]:
-    """Return every FileOutbound block as (delivery_id, payload), in file order.
+def _delivery_blocks(reply_text: str) -> list[tuple[str, str | None, str]]:
+    """Return every FileOutbound block as (delivery_id, event_id, payload), in file
+    order.
 
-    payload is the text from one header line to the next header (or end of text),
-    stripped of the surrounding newlines FileOutbound adds. Empty list when no
+    event_id is the originating request id when the producer stamped it (#19), else
+    None. payload is the text from one header line to the next header (or end of
+    text), stripped of the surrounding newlines FileOutbound adds. Empty list when no
     block is present yet.
     """
     matches = list(_DELIVERY_RE.finditer(reply_text))
-    blocks: list[tuple[str, str]] = []
+    blocks: list[tuple[str, str | None, str]] = []
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(reply_text)
-        blocks.append((m.group(1), reply_text[m.end():end].strip("\n")))
+        blocks.append((m.group(1), m.group(2), reply_text[m.end():end].strip("\n")))
     return blocks
 
 
@@ -134,8 +149,9 @@ def brain_via_bridge(
     target = cursor.consumed
 
     prompt = text if system_prompt is None else f"{system_prompt}\n\nUser: {text}"
+    event_id = str(uuid.uuid4())  # this turn's correlation id (#19)
     try:
-        send(persona, prompt)
+        send(persona, prompt, event_id=event_id)
     except Exception as e:  # transport failure (ssh down, CLI missing, ...)
         return f"Sorry, I couldn't reach the brain ({type(e).__name__})."
     # Reserve this turn's slot even if it times out below, so a late reply fills
@@ -145,9 +161,28 @@ def brain_via_bridge(
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         blocks = _delivery_blocks(read_reply())
-        if len(blocks) > target and blocks[target][1]:
-            cursor.misses = 0
-            return blocks[target][1]
+        # Identity match (#19): a reply that echoes this turn's event_id is ours
+        # whatever its file position, so a dropped or reordered reply on another turn
+        # cannot shift it. Active only once the producer stamps event_id; until then
+        # no block carries one and this loop falls through to the positional branch.
+        for idx, (_did, eid, payload) in enumerate(blocks):
+            if eid == event_id and payload:
+                # Realign the positional cursor to the matched block's actual slot. An
+                # identity match can land off `target` (after a dropped or reordered
+                # reply); leaving the cursor at target+1 would desync the positional
+                # accounting a later unstamped, positional-fallback turn still relies
+                # on, making it poll a slot past its own reply and time out.
+                cursor.consumed = idx + 1
+                cursor.misses = 0
+                return payload
+        # Positional fallback, for unstamped blocks only. A stamped block that is not
+        # ours is left alone (never consumed by position), so a dropped stamped reply
+        # cannot make us read another turn's answer — the failure #48 hits today.
+        if len(blocks) > target:
+            _did, eid, payload = blocks[target]
+            if eid is None and payload:
+                cursor.misses = 0
+                return payload
         time.sleep(poll_s)
     cursor.misses += 1
     return "Sorry, the brain took too long to answer."
@@ -176,8 +211,14 @@ def _send_argv(bot_spren_bin: str, working_dir: str | None,
 
 def cli_send(bot_spren_bin: str = "bot-spren",
              working_dir: str | None = None) -> SendFn:
-    """Send via the local bot-spren CLI (persona on this host)."""
-    def _send(persona: str, prompt: str) -> None:
+    """Send via the local bot-spren CLI (persona on this host).
+
+    event_id is accepted for the SendFn contract but not yet forwarded: bot-spren has
+    no flag to set the inbound event_id, so stamping the reply (the #19 producer side)
+    is a separate, held step. Until it lands these sends are unstamped and the bridge
+    matches them positionally.
+    """
+    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
         subprocess.run(_send_argv(bot_spren_bin, working_dir, persona, prompt),
                        capture_output=True, text=True, timeout=30, check=True)
     return _send
@@ -193,7 +234,9 @@ def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren",
     untrusted (transcribed speech), so this prevents both word-splitting and
     shell-metacharacter execution on the brain host.
     """
-    def _send(persona: str, prompt: str) -> None:
+    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
+        # event_id accepted but not forwarded yet — see cli_send. The held #19 producer
+        # step adds the remote --event-id flow plus the FileOutbound stamp.
         argv = _send_argv(bot_spren_bin, working_dir, persona, prompt)
         remote = " ".join(shlex.quote(p) for p in argv)
         subprocess.run(
@@ -248,11 +291,11 @@ def local_sim_send(inbox_path: str | Path) -> SendFn:
     sim_persona watcher, with no bot-spren CLI and no persona deployed.
     """
     inbox_path = Path(inbox_path)
-    def _send(persona: str, prompt: str) -> None:
+    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
         inbox_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
             "type": "manual", "source": "cli", "payload": prompt,
-            "event_id": str(uuid.uuid4()),
+            "event_id": event_id or str(uuid.uuid4()),
             "sent_at": datetime.now(timezone.utc).isoformat(),
         }
         with inbox_path.open("a", encoding="utf-8") as f:
