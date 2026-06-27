@@ -37,12 +37,19 @@ def canned_reply(text: str) -> str:
     return f"You said: {text.strip()}"
 
 
-def file_outbound_append(reply_path: Path, payload: str, delivery_id: str) -> None:
-    """Append one block in FileOutbound's exact on-disk format."""
+def file_outbound_append(reply_path: Path, payload: str, delivery_id: str,
+                         event_id: str | None = None) -> None:
+    """Append one block in FileOutbound's exact on-disk format. When event_id is
+    given, stamp it into the header so the bridge can match the reply to its request
+    by identity (#19) — models the future stamped producer."""
     ts = datetime.now(timezone.utc).isoformat()
     reply_path.parent.mkdir(parents=True, exist_ok=True)
+    header = f"--- {ts} delivery_id={delivery_id}"
+    if event_id is not None:
+        header += f" event_id={event_id}"
+    header += " ---"
     with reply_path.open("a", encoding="utf-8") as f:
-        f.write(f"\n--- {ts} delivery_id={delivery_id} ---\n{payload}\n")
+        f.write(f"\n{header}\n{payload}\n")
 
 
 class SimPersona:
@@ -54,11 +61,16 @@ class SimPersona:
         reply_path: str | Path,
         reply_fn: Callable[[str], str] = canned_reply,
         poll_s: float = 0.2,
+        echo_event_id: bool = False,
     ) -> None:
         self.inbox = Path(inbox_path)
         self.reply = Path(reply_path)
         self.reply_fn = reply_fn
         self.poll_s = poll_s
+        # When set, echo each request's event_id into its reply block header so the
+        # bridge can identity-match (#19). Off by default keeps the legacy positional
+        # behavior the other tests exercise.
+        self.echo_event_id = echo_event_id
         self._offset = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -85,7 +97,9 @@ class SimPersona:
                 continue
             # Strip the optional "system\n\nUser: <text>" wrapper to get the words.
             text = payload.split("User: ", 1)[-1] if "User: " in payload else payload
-            file_outbound_append(self.reply, self.reply_fn(text), str(uuid.uuid4()))
+            eid = entry.get("event_id") if self.echo_event_id else None
+            file_outbound_append(self.reply, self.reply_fn(text),
+                                 str(uuid.uuid4()), event_id=eid)
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True,

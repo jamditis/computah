@@ -96,7 +96,7 @@ def main() -> int:
 
     out4 = brain_bridge.brain_via_bridge(
         "turn C prompt", persona="syl",
-        send=lambda *_: None, read_reply=_scripted_read,
+        send=lambda *a, **k: None, read_reply=_scripted_read,
         cursor=cursor3, timeout_s=5, poll_s=0.01)
     check(out4 == "C answer",
           f"late reply from a timed-out turn is skipped, not spoken: {out4!r}")
@@ -118,7 +118,8 @@ def main() -> int:
             self.blocks: list[str] = []
             self.first = True
 
-        def send(self, _persona: str, prompt: str) -> None:
+        def send(self, _persona: str, prompt: str, *,
+                 event_id: str | None = None) -> None:
             if self.first:
                 self.first = False
                 return  # dropped: no block ever appears for this turn
@@ -174,6 +175,149 @@ def main() -> int:
               f"ssh_cli_send with workdir inserts -d into remote: {remote!r}")
     finally:
         brain_bridge.subprocess.run = real_run
+
+    # --- #19 correlation key: identity match, positional fallback -------------
+    # When a reply echoes the request's event_id the bridge matches by identity, so a
+    # dropped or out-of-order reply on one turn cannot shift another turn's answer --
+    # the collateral damage #48 hits under pure positional correlation.
+    answers = {
+        "what is two plus two?": "Two plus two is four.",
+        "what is the capital of france?": "The capital of France is Paris.",
+    }
+
+    class _StampedSyl:
+        """Stamps each reply with the request's event_id (models the future producer).
+        drop = 1-based turn numbers whose reply is never written (models #48)."""
+
+        def __init__(self, drop=(), plain=()) -> None:
+            self.blocks: list[tuple[str, str | None, str]] = []
+            self.turn = 0
+            self.drop = set(drop)
+            self.plain = set(plain)  # turns written WITHOUT an event_id (positional)
+
+        def send(self, _persona: str, prompt: str, *,
+                 event_id: str | None = None) -> None:
+            self.turn += 1
+            text = prompt.split("User: ", 1)[-1] if "User: " in prompt else prompt
+            if self.turn in self.drop:
+                return  # reply dropped at source (#48)
+            eid = None if self.turn in self.plain else event_id  # unstamped -> positional
+            self.blocks.append((f"d{self.turn}", eid,
+                                answers.get(text.strip(), f"echo:{text.strip()}")))
+
+        def read(self) -> str:
+            out = ""
+            for did, eid, payload in self.blocks:
+                hdr = f"--- t delivery_id={did}"
+                if eid is not None:
+                    hdr += f" event_id={eid}"
+                out += f"\n{hdr} ---\n{payload}\n"
+            return out
+
+    # The parser tolerates the optional event_id token and extracts it; an unstamped
+    # header still parses with event_id None. (Against the pre-#19 regex the stamped
+    # block fails to match at all -- the reason the consumer must tolerate the token
+    # before any producer emits it.)
+    parsed = brain_bridge._delivery_blocks(
+        "\n--- t delivery_id=d1 event_id=e1 ---\nstamped\n"
+        "\n--- t delivery_id=d2 ---\nunstamped\n")
+    check(parsed == [("d1", "e1", "stamped"), ("d2", None, "unstamped")],
+          f"_delivery_blocks parses the optional event_id token: {parsed}")
+
+    # Identity round trip: two turns, each returns its own stamped answer.
+    syl = _StampedSyl()
+    common = dict(persona="syl", send=syl.send, read_reply=syl.read,
+                  cursor=brain_bridge.ReplyCursor(), timeout_s=0.5, poll_s=0.01)
+    r1 = brain_bridge.brain_via_bridge("what is two plus two?", **common)
+    r2 = brain_bridge.brain_via_bridge("what is the capital of france?", **common)
+    check(r1 == answers["what is two plus two?"], f"identity turn 1: {r1!r}")
+    check(r2 == answers["what is the capital of france?"], f"identity turn 2: {r2!r}")
+
+    # The #48 fix: a dropped reply costs ONLY its own turn. Turn 1's reply is dropped;
+    # turn 2 still returns its own answer by identity. Under pure positional
+    # correlation turn 2 would time out too (its block sits at slot 0 while the cursor
+    # polls slot 1) -- the collateral damage this closes.
+    syl2 = _StampedSyl(drop={1})
+    common2 = dict(persona="syl", send=syl2.send, read_reply=syl2.read,
+                   cursor=brain_bridge.ReplyCursor(), timeout_s=0.3, poll_s=0.02)
+    d1 = brain_bridge.brain_via_bridge("what is two plus two?", **common2)
+    d2 = brain_bridge.brain_via_bridge("what is the capital of france?", **common2)
+    check(d1.startswith("Sorry, the brain took too long"),
+          f"dropped reply still times out its own turn: {d1!r}")
+    check(d2 == answers["what is the capital of france?"],
+          f"next turn keeps its own answer despite the drop (#48 fixed): {d2!r}")
+
+    # Mixed/transition seam (the hardest case): a stamped block that is NOT this turn's
+    # -- a different event_id -- sitting at the positional target slot must be SKIPPED
+    # by the positional fallback, never consumed. Otherwise a dropped stamped reply
+    # would just relocate the #48 theft to the next turn. event_id is an internal uuid,
+    # so the literal eids below never match this turn's id.
+    seam_file = (
+        "\n--- t delivery_id=d1 event_id=eid-one ---\nanswer one\n"
+        "\n--- t delivery_id=dx event_id=eid-x ---\nanswer x\n"
+    )
+    seam = brain_bridge.brain_via_bridge(
+        "stamped reply dropped for this turn", persona="syl",
+        send=lambda *a, **k: None, read_reply=lambda: seam_file,
+        cursor=brain_bridge.ReplyCursor(consumed=1), timeout_s=0.1, poll_s=0.02)
+    check(seam.startswith("Sorry, the brain took too long"),
+          f"non-matching stamped block at the target slot is skipped: {seam!r}")
+
+    # Cursor coherence across mixed resolution: an unstamped turn (positional) then a
+    # stamped turn (identity) through one cursor each return their own answer, and the
+    # cursor still counts one slot per send.
+    mix = _StampedSyl(plain={1})
+    mcur = brain_bridge.ReplyCursor()
+    mcommon = dict(persona="syl", send=mix.send, read_reply=mix.read,
+                   cursor=mcur, timeout_s=0.5, poll_s=0.01)
+    m1 = brain_bridge.brain_via_bridge("what is two plus two?", **mcommon)
+    m2 = brain_bridge.brain_via_bridge("what is the capital of france?", **mcommon)
+    check(m1 == answers["what is two plus two?"],
+          f"mixed: unstamped turn resolves positionally: {m1!r}")
+    check(m2 == answers["what is the capital of france?"],
+          f"mixed: stamped turn resolves by identity: {m2!r}")
+    check(mcur.consumed == 2, f"mixed: cursor counts both sends: {mcur.consumed}")
+
+    # Transition gap (documented, tracked in #59): after a stamped identity match, a
+    # later UNSTAMPED turn that falls back to position cannot read its own slot, because
+    # the stamped match left the positional cursor ahead of the file and the consumer
+    # cannot safely realign it — positional correlation can't tell a dropped reserved
+    # slot from a late one, so rewinding could speak a late reply as the next answer. The
+    # producer step (#59) closes this by stamping every reply, removing the unstamped
+    # fallback. Sequence: stamped turn dropped, stamped turn answered at slot 0, then an
+    # unstamped turn answered at slot 1.
+    trans = _StampedSyl(drop={1}, plain={3})
+    tcur = brain_bridge.ReplyCursor()
+    tcommon = dict(persona="syl", send=trans.send, read_reply=trans.read,
+                   cursor=tcur, timeout_s=0.3, poll_s=0.02)
+    t1 = brain_bridge.brain_via_bridge("what is two plus two?", **tcommon)
+    t2 = brain_bridge.brain_via_bridge("what is the capital of france?", **tcommon)
+    t3 = brain_bridge.brain_via_bridge("what is two plus two?", **tcommon)
+    check(t1.startswith("Sorry, the brain took too long"),
+          f"transition: dropped stamped turn times out: {t1!r}")
+    check(t2 == answers["what is the capital of france?"],
+          f"transition: stamped turn matches by identity regardless of position: {t2!r}")
+    check(t3.startswith("Sorry, the brain took too long"),
+          f"transition: mixed-window unstamped turn after a stamped match strands (deferred to #59): {t3!r}")
+
+    # End-to-end identity match through the real components (model-free): the actual
+    # local_sim_send stamps the inbox event_id, a real SimPersona echoes it into the
+    # reply block, and the bridge identity-matches -- proving the wire composes, not
+    # just the in-test stub.
+    e2e_inbox = d / "e2e-inbox.jsonl"
+    e2e_reply = d / "e2e-reply.txt"
+    e2e_sim = SimPersona(e2e_inbox, e2e_reply, poll_s=0.05, echo_event_id=True)
+    e2e_sim.start()
+    try:
+        ecommon = dict(persona="syl", send=brain_bridge.local_sim_send(e2e_inbox),
+                       read_reply=brain_bridge.file_reply_reader(e2e_reply),
+                       cursor=brain_bridge.ReplyCursor(), timeout_s=10, poll_s=0.05)
+        e1 = brain_bridge.brain_via_bridge("what is two plus two?", **ecommon)
+        e2 = brain_bridge.brain_via_bridge("what is the capital of france?", **ecommon)
+        check(e1 == "Two plus two is four.", f"e2e identity turn 1: {e1!r}")
+        check(e2 == "The capital of France is Paris.", f"e2e identity turn 2: {e2!r}")
+    finally:
+        e2e_sim.stop()
 
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"\n=== {n_pass}/{len(results)} checks passed ===")
