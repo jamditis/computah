@@ -21,6 +21,7 @@ the real persistent brain.
 from __future__ import annotations
 
 import argparse
+import collections
 import os
 import subprocess
 import sys
@@ -82,17 +83,25 @@ def frames_from_stdin(stream):
         yield np.frombuffer(buf, dtype=np.int16).copy()
 
 
-def listen_for_wake(frames, model, threshold: float, debug: bool):
+def listen_for_wake(frames, model, threshold: float, debug: bool, preroll=None):
     """Feed frames through the wake model until it crosses threshold.
 
     Resets the model ONCE at the start of each listen phase (the streaming
     contract), then runs continuously. Returns the firing score, or None if the
     input stream ended before any wake.
+
+    `preroll`, if given, is a bounded collection (a deque(maxlen=N)) that each frame is
+    appended to as it is consumed, so on a fire it holds the most recent N frames
+    including the firing frame; capture_request prepends them so a request spoken
+    with no pause after the wake word is not clipped (issue #30). Mirrors
+    pipeline.stream_detect_wake's pre-roll contract on the hardware path.
     """
     pipeline._reset_oww(model)
     i = 0
     for frame in frames:
         i += 1
+        if preroll is not None:
+            preroll.append(frame)
         score = max(float(s) for s in model.predict(frame).values())
         if debug and (score > 0.2 or i % 100 == 0):
             rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
@@ -117,12 +126,16 @@ def run_turn(frames, model, threshold: float, out_wav: str,
     Returns True if a turn ran (or was correctly skipped as noise), False only when
     the input stream ended and the loop should stop.
     """
-    score = listen_for_wake(frames, model, threshold, debug)
+    # Keep the most recent frames during detection so the request's leading audio,
+    # consumed while the detector crossed threshold, is recovered (issue #30).
+    preroll = collections.deque(maxlen=pipeline._PREROLL_FRAMES)
+    score = listen_for_wake(frames, model, threshold, debug, preroll=preroll)
     if score is None:
         return False
     log(f"wake fired (score={score:.3f})")
 
-    request_pcm = pipeline.capture_request(frames)
+    request_pcm = pipeline.capture_request(frames, preroll=list(preroll),
+                                           vad_threshold=cfg["capture_vad_threshold"])
     if request_pcm.size == 0:
         log("wake fired but no speech followed — ignoring")
         return True
