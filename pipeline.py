@@ -331,14 +331,17 @@ _SILENCE_RMS = 250.0           # int16 RMS below this is room tone, not speech
 _ENDPOINT_SILENCE_FRAMES = 10  # ~0.8 s of trailing quiet ends a captured request
 _NO_SPEECH_ONSET_FRAMES = 20   # ~1.6 s; abandon a wake that no speech follows
 _MAX_REQUEST_FRAMES = 100      # ~8 s cap so a stuck stream cannot record forever
-_PREROLL_FRAMES = 8            # ~0.64 s of audio kept before the wake fire and
+_PREROLL_FRAMES = 2            # ~0.16 s of audio kept before the wake fire and
                                # prepended to the request, so a command spoken with
                                # no pause after the wake word is not clipped by
-                               # detection latency (issue #30). A starting value: the
-                               # right size is the real wake-detection latency for the
-                               # deployed mic, tuned with a live voice test. Larger
-                               # recovers more leading audio but bleeds more of the
-                               # wake word into the transcript.
+                               # detection latency (issue #30). Tuned on the deployed
+                               # PowerConf with a live voice test: at 8 the wake word
+                               # itself bled into the transcript ("computer file an
+                               # issue..."); at 2 (~160 ms) the no-pause command keeps a
+                               # clip-margin while the wake word stays out. The command
+                               # onset never clipped at any size here, so the real risk
+                               # was over-capture, not under-capture. Larger recovers
+                               # more leading audio but bleeds more of the wake word in.
 
 
 def iter_wav_frames(wav_path: str):
