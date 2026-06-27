@@ -90,7 +90,7 @@ def listen_for_wake(frames, model, threshold: float, debug: bool, preroll=None):
     contract), then runs continuously. Returns the firing score, or None if the
     input stream ended before any wake.
 
-    `preroll`, if given, is a bounded collection (a deque(maxlen=N)) each frame is
+    `preroll`, if given, is a bounded collection (a deque(maxlen=N)) that each frame is
     appended to as it is consumed, so on a fire it holds the most recent N frames
     including the firing frame; capture_request prepends them so a request spoken
     with no pause after the wake word is not clipped (issue #30). Mirrors
