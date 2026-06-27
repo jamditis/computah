@@ -32,7 +32,8 @@ def check(name: str, ok: bool, detail: str) -> bool:
 
 
 GUARD_ON = {"stt_confidence_guard": True,
-            "stt_min_avg_logprob": -1.0, "stt_max_no_speech_prob": 0.6}
+            "stt_min_avg_logprob": -1.0, "stt_max_no_speech_prob": 0.6,
+            "capture_vad_threshold": 0.5}
 GUARD_OFF = dict(GUARD_ON, stt_confidence_guard=False)
 
 
@@ -49,7 +50,7 @@ def drive(cfg: dict, transcript: Transcript) -> dict:
             live_driver._play_wav)
     live_driver.listen_for_wake = lambda fr, m, t, d, preroll=None: 0.9
     pipeline.capture_request = (
-        lambda fr, preroll=None: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16))
+        lambda fr, preroll=None, vad_threshold=None: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16))
     pipeline.transcribe_detailed = lambda p: transcript
 
     def fake_brain(text, **_):

@@ -97,6 +97,13 @@ DEFAULTS = {
     "stt_confidence_guard": True,
     "stt_min_avg_logprob": -1.0,
     "stt_max_no_speech_prob": 0.6,
+    # Capture-time speech gate (#54): after a wake fires, energy endpointing decides
+    # when the command ends, but energy alone cannot tell a sustained noise from speech,
+    # so a >=240 ms cough/clap/hum after a bare wake could prepend the wake-word pre-roll
+    # as a phantom command. capture_request runs the silero VAD over the POST-FIRE audio
+    # and keeps the pre-roll only if the peak per-chunk speech probability reaches this
+    # threshold. Lower to confirm quieter/marginal speech; raise to reject more noise.
+    "capture_vad_threshold": 0.5,
     "voice_model": "en_US-lessac-medium",
     # Live audio device selection by case-insensitive name substring (see audio.py).
     # Empty string means the system default device. Per-host values belong in
@@ -390,7 +397,47 @@ def stream_detect_wake(frames, model, threshold: float, preroll=None) -> float |
     return None
 
 
-def capture_request(frames, preroll=None) -> np.ndarray:
+_vad_model = None
+
+
+def _get_vad():
+    """Cache the bundled silero VAD across calls (one resident instance, like
+    _get_oww_model / _get_whisper). The ONNX ships with openWakeWord, so there is no
+    download and no extra dependency."""
+    global _vad_model
+    if _vad_model is None:
+        from openwakeword.vad import VAD
+        _vad_model = VAD()
+    return _vad_model
+
+
+def _confirm_speech(pcm: np.ndarray, threshold: float) -> bool:
+    """True if `pcm` (post-fire command audio, int16 16 kHz) holds real speech.
+
+    Runs the silero VAD over 480-sample (30 ms) chunks and keeps the PEAK chunk
+    probability, not the mean the model returns over a whole buffer -- a short command
+    must not be diluted to a non-speech average by trailing silence or noise in the
+    capture. Reset the RNN state once, then feed chunks in order so state carries across
+    them. Pass the command audio ONLY, never the pre-roll: the pre-roll holds the wake
+    word, which is speech, so including it would always confirm and defeat the gate.
+    silero rejects coughs, claps, echoes, and sustained noise where an energy threshold
+    cannot (#54).
+    """
+    vad = _get_vad()
+    vad.reset_states()
+    frame = 480
+    pad = (-len(pcm)) % frame  # silero needs a length that is a multiple of frame
+    if pad:
+        pcm = np.concatenate([pcm, np.zeros(pad, dtype=np.int16)])
+    peak = 0.0
+    for i in range(0, len(pcm), frame):
+        prob = float(vad.predict(pcm[i:i + frame], frame_size=frame))
+        if prob > peak:
+            peak = prob
+    return peak >= threshold
+
+
+def capture_request(frames, preroll=None, vad_threshold=None) -> np.ndarray:
     """Collect request frames after a wake fire until a trailing-silence endpoint.
 
     Energy-based endpointing: once speech has been seen, stop after
@@ -412,6 +459,15 @@ def capture_request(frames, preroll=None) -> np.ndarray:
     a click, a cough edge, a speaker echo -- does not count as speech. A wake with no
     sustained speech after it still returns empty, so the wake word held in the pre-roll
     is never prepended and transcribed as a phantom request (#54).
+
+    The energy onset is a cheap first filter: it rejects a 1-2 frame transient without
+    running a model and bounds how long an abandoned wake holds the mic. It cannot tell
+    a *sustained* noise (a long cough, a fan, room rumble past _SPEECH_ONSET_FRAMES)
+    from speech, though, so when `vad_threshold` is given the captured command audio is
+    confirmed by the silero VAD (_confirm_speech) before the pre-roll is kept. Energy
+    that the VAD rejects is treated as an abandoned wake and returns empty, closing the
+    phantom path the energy gate alone leaves open (#54). With `vad_threshold` None the
+    VAD step is skipped and only the energy gate runs.
     """
     captured: list[np.ndarray] = []
     quiet = 0
@@ -444,9 +500,15 @@ def capture_request(frames, preroll=None) -> np.ndarray:
         # (the wake consumed the rest) is dropped here too -- the cost of not being able to
         # tell it from a transient -- and is tracked as its own problem (#53).
         return np.zeros(0, dtype=np.int16)
+    command = np.concatenate(captured)
+    if vad_threshold is not None and not _confirm_speech(command, vad_threshold):
+        # Energy was sustained but the VAD says it is not speech (a long cough, a fan,
+        # room rumble). Treat it as an abandoned wake: drop the pre-roll so the wake word
+        # it holds is never prepended and transcribed as a phantom command (#54).
+        return np.zeros(0, dtype=np.int16)
     if preroll:
-        return np.concatenate([*preroll, *captured])
-    return np.concatenate(captured)
+        return np.concatenate([*preroll, command])
+    return command
 
 
 # --------------------------------------------------------------------------- #
@@ -755,7 +817,8 @@ def run_turn(frames, model_name: str | None = None,
     if score is None:
         return None
 
-    request_pcm = capture_request(frames, preroll=list(preroll))
+    request_pcm = capture_request(frames, preroll=list(preroll),
+                                  vad_threshold=cfg["capture_vad_threshold"])
     # Listening for this turn is done. Let a live loop stop the mic now, before the
     # slow stages below, so it does not buffer (then throw away) input recorded
     # while the assistant is thinking and speaking.

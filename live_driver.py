@@ -134,7 +134,8 @@ def run_turn(frames, model, threshold: float, out_wav: str,
         return False
     log(f"wake fired (score={score:.3f})")
 
-    request_pcm = pipeline.capture_request(frames, preroll=list(preroll))
+    request_pcm = pipeline.capture_request(frames, preroll=list(preroll),
+                                           vad_threshold=cfg["capture_vad_threshold"])
     if request_pcm.size == 0:
         log("wake fired but no speech followed — ignoring")
         return True

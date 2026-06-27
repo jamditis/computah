@@ -152,6 +152,48 @@ def main() -> int:
     check("no pre-roll behaves like the original capture", nframes(cap_none) == 15,
           f"got {nframes(cap_none)} frames, want 15")
 
+    # ----- capture_request confirms speech (VAD) before prepending --------- #
+    # The energy onset rejects a 1-2 frame transient, but a *sustained* >=240 ms noise
+    # (a long cough, a fan spinning up, room rumble) clears the energy gate exactly like
+    # speech does -- energy cannot tell them apart. When a vad_threshold is supplied,
+    # capture_request runs voice-activity detection over the POST-FIRE audio only and
+    # keeps the pre-roll (which holds the wake word) only if real speech is confirmed,
+    # closing the phantom path the energy gate leaves open (#54). The VAD verdict is
+    # faked here so the check stays model-free; the real-model proof is test_vad_gate.py.
+    print("\n=== capture_request confirms speech (VAD) before prepending the pre-roll ===")
+    real_confirm = pipeline._confirm_speech
+    try:
+        pipeline._confirm_speech = lambda pcm, threshold: True
+        cap_ok = pipeline.capture_request(iter(loud(5) + silent(15)),
+                                          preroll=loud(2), vad_threshold=0.5)
+        check("confirmed speech captures and keeps its pre-roll",
+              nframes(cap_ok) == 17, f"got {nframes(cap_ok)} frames, want 17 (2 seed + 5 + 10)")
+
+        pipeline._confirm_speech = lambda pcm, threshold: False
+        cap_noise = pipeline.capture_request(iter(loud(5) + silent(15)),
+                                             preroll=loud(2), vad_threshold=0.5)
+        check("sustained noise the VAD rejects stays empty (no phantom command)",
+              cap_noise.size == 0, f"got {cap_noise.size} samples, want 0")
+
+        # The crux: the gate must run on the command audio ONLY, never the pre-roll. The
+        # pre-roll holds the wake word, which IS speech, so feeding it to the VAD would
+        # always-confirm and defeat the gate.
+        seen = {}
+        pipeline._confirm_speech = lambda pcm, threshold: (seen.update(n=len(pcm)) or True)
+        pipeline.capture_request(iter(loud(5) + silent(15)), preroll=loud(2), vad_threshold=0.5)
+        check("VAD sees only the post-fire command audio, not the pre-roll",
+              seen.get("n") == 15 * FRAME_SIZE,
+              f"VAD saw {seen.get('n')} samples, want {15 * FRAME_SIZE} (5 speech + 10 endpoint, no pre-roll)")
+
+        # vad_threshold=None (the default) skips the gate entirely, so the energy-only
+        # callers above keep their existing behavior.
+        pipeline._confirm_speech = lambda pcm, threshold: False  # would reject if consulted
+        cap_skip = pipeline.capture_request(iter(loud(5) + silent(15)), preroll=loud(2))
+        check("no vad_threshold skips the VAD gate (energy-only path unchanged)",
+              nframes(cap_skip) == 17, f"got {nframes(cap_skip)} frames, want 17")
+    finally:
+        pipeline._confirm_speech = real_confirm
+
     # ----- run_turn wires detection pre-roll into capture ------------------ #
     print("\n=== run_turn threads the detection pre-roll into capture_request ===")
     seen = {"preroll": "unset"}
@@ -165,7 +207,7 @@ def main() -> int:
             preroll.extend(loud(2))  # two frames "consumed during detection"
         return 0.9
 
-    def fake_capture(frames, preroll=None):
+    def fake_capture(frames, preroll=None, vad_threshold=None):
         seen["preroll"] = preroll
         return np.full(4 * FRAME_SIZE, 4000, dtype=np.int16)
 
