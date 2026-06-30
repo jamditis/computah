@@ -33,8 +33,8 @@ import soundfile as sf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline
+import chime
 
-FRAME_BYTES = pipeline.FRAME_SIZE * 2  # 1280 int16 = 2560 bytes (80 ms)
 _DRAIN_FRAMES = 25  # ~2 s discarded after a turn: clears stale/echo audio from the
                     # pipe buffer so the spoken reply is not re-heard as the next wake
 
@@ -69,18 +69,65 @@ def _play_wav(path: str, device: str | None) -> None:
                        stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-def frames_from_stdin(stream):
-    """Yield writable 80 ms int16 frames from a raw S16_LE stdin stream.
+class StdinMic:
+    """The arecord stdin pipe as a flushable stream of 80 ms / 16 kHz / mono int16
+    frames — live_driver's counterpart to audio.Microphone, with the same
+    frames()/flush() contract on the raw-pipe path.
 
-    .copy() because np.frombuffer is read-only and aliases the pipe buffer; the wake
-    model's predict path and capture_request both expect a normal writable array.
-    Ends (returns) on EOF or a short final read, i.e. when arecord exits.
+    Reads the raw fd directly (os.read), not sys.stdin.buffer, so there is a single
+    place to flush: the OS pipe, plus a sub-frame byte remainder kept on the instance
+    (self._buf) so flush() can drop it too. Reading through a BufferedReader would add a
+    second, Python-level buffer that an fd-level flush cannot reach, leaving stale bytes
+    to prefix the next frame. flush() is the flush-to-now the post-cue drain needs
+    (issue #56); it matches run_loop's mic.flush() semantics.
     """
-    while True:
-        buf = stream.read(FRAME_BYTES)
-        if not buf or len(buf) < FRAME_BYTES:
-            return
-        yield np.frombuffer(buf, dtype=np.int16).copy()
+
+    def __init__(self, fd: int, frame_size: int = pipeline.FRAME_SIZE):
+        self.fd = fd
+        self.frame_bytes = frame_size * 2  # int16: 1280 samples = 2560 bytes (80 ms)
+        self._buf = b""  # sub-frame remainder, on the instance so flush() reaches it
+
+    def frames(self):
+        """Yield writable 80 ms int16 frames from the raw pipe. Ends (returns) on EOF,
+        i.e. when arecord exits. A short os.read is accumulated toward a full frame
+        rather than ending the stream, so a mid-stream partial read is not mistaken
+        for EOF (BufferedReader hid these; the raw fd surfaces them).
+
+        .copy() because np.frombuffer aliases a read-only buffer; the wake model's
+        predict path and capture_request both expect a writable array.
+        """
+        while True:
+            chunk = os.read(self.fd, self.frame_bytes - len(self._buf))
+            if not chunk:  # EOF: arecord exited
+                return
+            self._buf += chunk
+            if len(self._buf) >= self.frame_bytes:
+                frame = np.frombuffer(self._buf[:self.frame_bytes], dtype=np.int16).copy()
+                self._buf = self._buf[self.frame_bytes:]
+                yield frame
+
+    def flush(self) -> None:
+        """Flush-to-now: drop everything buffered up to this instant — the sub-frame
+        remainder and the whole OS pipe backlog — without blocking, so the next frame
+        is built only from audio captured after the flush. Mirrors
+        audio.Microphone.flush.
+
+        Sets the fd non-blocking and reads until EAGAIN (no data buffered) or EOF, then
+        restores blocking mode. Safe to call only while frames() is suspended (between
+        detection and capture, or between turns), which is how run_turn uses it — there
+        is no concurrent os.read to race the non-blocking window.
+        """
+        self._buf = b""
+        os.set_blocking(self.fd, False)
+        try:
+            while True:
+                try:
+                    if not os.read(self.fd, 65536):
+                        break  # EOF: the writer (arecord) closed
+                except BlockingIOError:
+                    break  # pipe drained to now (EAGAIN)
+        finally:
+            os.set_blocking(self.fd, True)
 
 
 def listen_for_wake(frames, model, threshold: float, debug: bool, preroll=None):
@@ -119,12 +166,13 @@ def drain(frames, n: int) -> None:
             return
 
 
-def run_turn(frames, model, threshold: float, out_wav: str,
+def run_turn(frames, mic, model, threshold: float, out_wav: str,
              output_device, cfg: dict, debug: bool) -> bool:
     """Run one full turn off the live frame stream.
 
-    Returns True if a turn ran (or was correctly skipped as noise), False only when
-    the input stream ended and the loop should stop.
+    `mic` is the StdinMic that owns `frames`; its flush() is used to drop the cue's
+    mic bleed (issue #56). Returns True if a turn ran (or was correctly skipped as
+    noise), False only when the input stream ended and the loop should stop.
     """
     # Keep the most recent frames during detection so the request's leading audio,
     # consumed while the detector crossed threshold, is recovered (issue #30).
@@ -133,6 +181,44 @@ def run_turn(frames, model, threshold: float, out_wav: str,
     if score is None:
         return False
     log(f"wake fired (score={score:.3f})")
+
+    # Acknowledge the wake with a cue before capture (issue #41). arecord cannot be
+    # paused, so on a shared mic/speaker device (the PowerConf) the cue bleeds straight
+    # back into the mic; drop the frames buffered while it played so the cue is not
+    # captured as part of the request. Flush-to-now does this (issue #56): mic.flush()
+    # drops, in one non-blocking shot, exactly what is buffered the instant capture
+    # starts -- cue bleed and ambient -- then capture reads only fresh audio.
+    #
+    # This replaces sizing the drop by _play_wav's wall-clock span, which conflated the
+    # cue's audio with subprocess overhead (a failed unprivileged aplay then a sudo
+    # retry, plus device-open and teardown latency). That frame-count guess could
+    # under-drain, leaking a cue tail into the transcript, or -- because drain() blocked
+    # per frame -- over-drain past the buffer and consume the start of a command spoken
+    # after the cue. flush() carries no time estimate and never blocks on or consumes
+    # fresh frames, so a command spoken once _play_wav returns is captured intact.
+    #
+    # It does NOT rescue speech uttered in the narrow window between the cue audio
+    # ending and _play_wav returning (teardown latency): that audio is already buffered
+    # when flush() runs and is dropped with the bleed. That is inherent to a blocking
+    # cue on a half-duplex mic -- capture cannot begin until playback returns -- and
+    # capturing through the cue is the deferred half-duplex fix (the #41 no-pause
+    # regression that keeps the chime opt-in). On a cue failure nothing played and
+    # nothing bled in, so the flush is skipped (the else) and the request is untouched.
+    if cfg.get("wake_chime", False):  # opt-in, default off (issue #41): the cue
+        # regresses the no-pause case on this half-duplex device, so off unless enabled
+        try:
+            _play_wav(chime.wake_cue_wav(), output_device)
+        except Exception as e:  # noqa: BLE001 - the chime is a nicety, not core
+            log(f"wake chime failed ({type(e).__name__}: {e})")
+        else:
+            mic.flush()
+            # The flush established a clean post-cue capture boundary (it dropped the
+            # frames buffered while the cue played). Drop the detection pre-roll with it:
+            # it holds the pre-cue wake-word tail, kept only to recover a no-pause
+            # command's leading audio (issue #30) -- which does not apply once the user
+            # waits for the cue. Without this the stale tail would prepend the post-cue
+            # command and reach the brain (issue #41).
+            preroll.clear()
 
     request_pcm = pipeline.capture_request(frames, preroll=list(preroll),
                                            vad_threshold=cfg["capture_vad_threshold"])
@@ -195,13 +281,16 @@ def main() -> int:
     threshold = cfg["wake_threshold"]
     model = pipeline._get_oww_model(pipeline._resolve_wake_path(name))
 
-    frames = frames_from_stdin(sys.stdin.buffer)
+    # Read the raw stdin fd directly (not sys.stdin.buffer) so the mic's flush() owns
+    # the only buffer between the pipe and a frame — see StdinMic (issue #56).
+    mic = StdinMic(sys.stdin.fileno())
+    frames = mic.frames()
     log(f"listening; wake={name!r} thr={threshold} (say '{name} ...'); ctrl-c to stop")
 
     turn = 0
     try:
         while True:
-            if not run_turn(frames, model, threshold, out_wav,
+            if not run_turn(frames, mic, model, threshold, out_wav,
                             args.output_device, cfg, args.debug):
                 log("input stream ended — exiting")
                 break

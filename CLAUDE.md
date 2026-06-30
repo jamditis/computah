@@ -51,7 +51,16 @@ Four stages, each independently swappable (`pipeline.py`):
    `capture_request` prepends it, so a command spoken with no pause after the wake
    word is not clipped by detection latency (the pre-roll is dropped on an
    abandoned wake, so it never becomes a phantom request). The pre-roll size is
-   tuned to the deployed mic's real wake-detection latency.
+   tuned to the deployed mic's real wake-detection latency. On a live mic the wake
+   fire can also play an acknowledgment chime (`chime.py`, `wake_chime` config key)
+   before capture, fired through `run_turn`'s `on_wake` hook; the loop handles it
+   half-duplex so the cue is not captured into the request, and the detection
+   pre-roll is dropped with it so the pre-cue wake-word tail does not prepend the
+   post-cue command. The chime is opt-in,
+   default off: on a half-duplex device the cue and capture cannot overlap, so when
+   it is on a command spoken in one breath with the wake word loses its leading
+   audio (it lands in the cue window) -- the no-pause pre-roll case. Off keeps that
+   primary flow intact; gating the cue on a pause so both coexist is the deferred fix.
 2. `transcribe` — faster-whisper (CTranslate2, int8). `transcribe_detailed` also
    returns the decoder's confidence (`avg_logprob`, `no_speech_prob`). Both live
    paths (`run_turn` and `live_driver`) gate on it through `guard_transcript` so a
@@ -128,6 +137,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python test_brain_dispatch.py    # config selects the backend — fast, no models
 .venv/bin/python test_confidence_guard.py  # mishear guard decision + aggregation — fast, no models
 .venv/bin/python test_preroll.py           # pre-roll buffer keeps a no-pause request's leading audio — fast, no models
+.venv/bin/python test_chime.py             # wake-acknowledgment cue generator + both-loop wiring — fast, no models
 .venv/bin/python test_live_driver.py       # live_driver hardware path honors the guard — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
 .venv/bin/python test_pipeline.py          # full chain + fallback CLI brain
@@ -165,12 +175,13 @@ bug.
 
 ## File index
 
-- `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`).
-- `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> STT -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
+- `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`). `run_turn` exposes `on_wake` (fires at the wake->capture boundary, for the chime) and `on_capture` (fires after capture, for half-duplex mic pause); `run_loop` is the desktop live loop and wires both.
+- `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> chime -> STT -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
+- `chime.py` — the wake-acknowledgment cue (issue #41): a pure-DSP generator for the two-tone rising chime played the instant the wake fires, before capture. Backend-free (no sounddevice/aplay) so both live loops can render the cue and play it through their own output. Gated by the `wake_chime` config key (opt-in, default off — it regresses the no-pause case on a half-duplex device); half-duplex handling keeps the cue out of the captured request when it is on.
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.
 - `test_*.py` — see Dev commands.
-- `config.json` — wake word, thresholds, model choices, brain backend toggle, and the
-  mishear-guard thresholds (`stt_confidence_guard`, `stt_min_avg_logprob`,
-  `stt_max_no_speech_prob`).
+- `config.json` — wake word, thresholds, the wake-chime toggle (`wake_chime`,
+  opt-in/default off), model choices, brain backend toggle, and the mishear-guard
+  thresholds (`stt_confidence_guard`, `stt_min_avg_logprob`, `stt_max_no_speech_prob`).
 - `config.local.json` (gitignored) / `config.local.example.json` — deployment bridge settings.
