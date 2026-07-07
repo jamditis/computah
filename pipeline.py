@@ -943,7 +943,8 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
 
 
 def _cli() -> int:
-    p = argparse.ArgumentParser(description="jawn-voice pipeline (mic-free)")
+    p = argparse.ArgumentParser(
+        description="jawn-voice pipeline: process a WAV, or run the live mic loop with --listen")
     p.add_argument("input_wav", nargs="?", help="input WAV to process")
     p.add_argument("-o", "--output", help="output WAV path for the spoken reply")
     p.add_argument("-w", "--wake-word", help="override the active wake word")

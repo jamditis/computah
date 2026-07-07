@@ -78,10 +78,11 @@ class _FiringModel:
     def __init__(self, fire_on: int):
         self.fire_on = fire_on
         self.calls = 0
+        self.reset_calls = 0
         self.preprocessor = _FakePreproc()
 
     def reset(self):
-        pass
+        self.reset_calls += 1
 
     def predict(self, frame_in):
         self.calls += 1
@@ -109,6 +110,24 @@ def main() -> int:
           len(preroll) > 0 and int(preroll[0][0]) == fired_frame_value - n + 1,
           f"first pre-roll frame value={int(preroll[0][0]) if preroll else None} "
           f"want {fired_frame_value - n + 1}")
+
+    # ----- stream_detect_wake resets the warm model once, not per frame ---- #
+    # Issue #9 AC #2: a continuous stream reuses the warm model with a SINGLE reset,
+    # unlike detect_wake's per-clip reset+pad. The reset is what separates the two
+    # paths; if _reset_oww ever moved inside stream_detect_wake's frame loop, the
+    # model's ~2 s context would be wiped every 80 ms and the live wake path would
+    # silently stop firing. Feed a long non-firing stream and pin reset==1 while
+    # predict still runs once per frame.
+    print("\n=== stream_detect_wake resets the model once for the whole stream ===")
+    n_frames = 25
+    warm = _FiringModel(fire_on=10_000)  # threshold never reached within the stream
+    none_score = pipeline.stream_detect_wake(
+        iter([frame(i) for i in range(n_frames)]), warm, 0.5)
+    check("a non-firing stream returns None", none_score is None, f"score={none_score}")
+    check("the warm model is reset exactly once for the whole stream, not per frame",
+          warm.reset_calls == 1, f"reset_calls={warm.reset_calls} want 1")
+    check("every frame is scored against that one warm model",
+          warm.calls == n_frames, f"predict calls={warm.calls} want {n_frames}")
 
     # ----- capture_request prepends the pre-roll seed ---------------------- #
     print("\n=== capture_request prepends a pre-roll seed ===")
