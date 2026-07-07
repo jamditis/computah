@@ -49,13 +49,18 @@ GUARD_ON = {"stt_confidence_guard": True,
 GUARD_OFF = dict(GUARD_ON, stt_confidence_guard=False)
 
 
-def drive(cfg: dict, transcript: Transcript) -> dict:
+def drive(cfg: dict, transcript: Transcript, output_device=None,
+          play_error: Exception | None = None) -> dict:
     """Run one live_driver turn with wake/capture/transcribe/brain/playback stubbed.
 
-    Returns what was spoken, whether the brain was called and with what, and the
-    run_turn return value -- with no microphone, model, or audio device.
+    Returns what was spoken, whether the brain was called and with what, the
+    (path, device) args each reply playback was called with, and the run_turn
+    return value -- with no microphone, model, or audio device. Pass play_error to
+    simulate a dead output device (a raising _play_wav) and check the turn degrades
+    instead of crashing.
     """
-    state: dict = {"spoken": None, "brain_called": False, "brain_arg": None}
+    state: dict = {"spoken": None, "brain_called": False, "brain_arg": None,
+                   "played": []}
 
     real = (live_driver.listen_for_wake, pipeline.capture_request,
             pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
@@ -74,12 +79,17 @@ def drive(cfg: dict, transcript: Transcript) -> dict:
         state["spoken"] = text
         return out
 
+    def fake_play(path, dev):
+        state["played"].append((path, dev))
+        if play_error is not None:
+            raise play_error
+
     pipeline.brain = fake_brain
     pipeline.speak = fake_speak
-    live_driver._play_wav = lambda path, dev: None
+    live_driver._play_wav = fake_play
     try:
         state["ran"] = live_driver.run_turn(
-            iter([]), _FakeMic(), object(), 0.5, "/dev/null", None, cfg, False)
+            iter([]), _FakeMic(), object(), 0.5, "/dev/null", output_device, cfg, False)
     finally:
         (live_driver.listen_for_wake, pipeline.capture_request,
          pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
@@ -199,6 +209,28 @@ def main() -> int:
     check("guard disabled: a low-confidence transcript still dispatches",
           s["ran"] is True and s["brain_called"] and s["spoken"] == "Brain answer.",
           f"brain_called={s['brain_called']} spoken={s['spoken']!r}")
+
+    print("\n=== live_driver.run_turn: the reply is played back (issue #11) ===")
+
+    # #11's core guarantee: a live turn must PLAY the reply that speak() produced, not
+    # just leave the WAV on disk, or the user never hears the answer. Pin that run_turn
+    # feeds the reply WAV to the player on the configured output device -- so a refactor
+    # that drops the playback call, or misroutes the device, fails here instead of
+    # silently going mute.
+    s = drive(GUARD_ON, Transcript("file an issue", -0.3, 0.05),
+              output_device="plughw:CARD=PowerConf,DEV=0")
+    check("the spoken reply WAV is played on the configured output device",
+          s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")],
+          f"played={s['played']}")
+
+    # A dead or busy output device must degrade to a logged error, never crash: one
+    # failed aplay cannot take down the always-on loop (live_driver.run_turn wraps the
+    # playback in try/except). The turn still completes and the reply was still spoken.
+    s = drive(GUARD_ON, Transcript("file an issue", -0.3, 0.05),
+              play_error=RuntimeError("aplay: no such device"))
+    check("a playback failure degrades gracefully (the turn still completes)",
+          s["ran"] is True and s["spoken"] == "Brain answer." and len(s["played"]) == 1,
+          f"ran={s['ran']} spoken={s['spoken']!r} played={s['played']}")
 
     n_pass = sum(1 for r in results if r[0] == PASS)
     n_total = len(results)
