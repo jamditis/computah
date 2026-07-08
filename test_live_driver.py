@@ -60,7 +60,7 @@ def drive(cfg: dict, transcript: Transcript, output_device=None,
     instead of crashing.
     """
     state: dict = {"spoken": None, "brain_called": False, "brain_arg": None,
-                   "played": []}
+                   "played": [], "events": []}
 
     real = (live_driver.listen_for_wake, pipeline.capture_request,
             pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
@@ -76,10 +76,14 @@ def drive(cfg: dict, transcript: Transcript, output_device=None,
         return "Brain answer."
 
     def fake_speak(text, out, **_):
+        state["events"].append("speak")
         state["spoken"] = text
         return out
 
     def fake_play(path, dev):
+        # Record playback in call order relative to speak(): a stale-WAV reorder
+        # (play before speak) shows up as ["play", "speak"], not ["speak", "play"].
+        state["events"].append("play")
         state["played"].append((path, dev))
         if play_error is not None:
             raise play_error
@@ -219,9 +223,25 @@ def main() -> int:
     # silently going mute.
     s = drive(GUARD_ON, Transcript("file an issue", -0.3, 0.05),
               output_device="plughw:CARD=PowerConf,DEV=0")
-    check("the spoken reply WAV is played on the configured output device",
-          s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")],
-          f"played={s['played']}")
+    check("the spoken reply WAV is played on the configured output device, after speak()",
+          s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")]
+          and s["events"] == ["speak", "play"],
+          f"played={s['played']} events={s['events']}")
+
+    # The re-prompt is a reply too: a guard-rejected turn must also PLAY what speak()
+    # produced, or the user is re-prompted silently and never knows to try again. Both
+    # the confident case above and this one share run_turn's single speak-then-play tail,
+    # so pin the rejected path on its own -- a refactor that moves _play_wav into the
+    # brain/success branch would leave STT_REPROMPT spoken but unplayed, and only this
+    # check would fail.
+    s = drive(GUARD_ON, Transcript("delete everything", -3.0, 0.1),
+              output_device="plughw:CARD=PowerConf,DEV=0")
+    check("a guard-rejected turn plays the re-prompt WAV on the configured device",
+          not s["brain_called"] and s["spoken"] == pipeline.STT_REPROMPT
+          and s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")]
+          and s["events"] == ["speak", "play"],
+          f"brain_called={s['brain_called']} spoken={s['spoken']!r} "
+          f"played={s['played']} events={s['events']}")
 
     # A dead or busy output device must degrade to a logged error, never crash: one
     # failed aplay cannot take down the always-on loop (live_driver.run_turn wraps the
