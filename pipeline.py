@@ -993,7 +993,15 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
                         print("  low confidence, re-prompting "
                               f"({result.get('reject_reason')})")
                     print(f"  reply: {result['reply']!r}")
-                    audio.play_wav(out_wav, output_name)
+                    # A dead or busy output device on the reply must degrade, never crash
+                    # the always-on loop -- the same guarantee the wake chime above and
+                    # live_driver.run_turn (issue #11) already hold. The reply is saved at
+                    # out_wav, so on failure log it and keep listening rather than propagating.
+                    try:
+                        audio.play_wav(out_wav, output_name)
+                    except Exception as e:  # noqa: BLE001 - degrade to the saved WAV, never crash
+                        print(f"  reply playback failed ({type(e).__name__}: {e}); "
+                              f"reply WAV at {out_wav}")
                 if paused:
                     # A turn was captured (mic stopped before the slow stages).
                     # Flush while the stream is still stopped: no fresh audio is
