@@ -12,13 +12,18 @@ audio with Piper and feeds those WAVs through the real pipeline. It checks:
   6. the wake word is switchable between two pretrained models via config,
      and each model fires only on its own phrase
 
+The harness runs against an isolated, throwaway config (see _isolate_config), so a
+deployment's gitignored config.local.json cannot change the outcome.
+
 Run:  .venv/bin/python test_pipeline.py
 Exit code is 0 only if every check passes.
 """
 
 from __future__ import annotations
 
+import json
 import sys
+import tempfile
 import time
 import wave
 from pathlib import Path
@@ -64,7 +69,33 @@ def synth_clips() -> dict[str, str]:
     return paths
 
 
-def main() -> int:
+def _isolate_config() -> tempfile.TemporaryDirectory:
+    """Point the pipeline at a throwaway config so the test is hermetic.
+
+    load_config() layers config.local.json over config.json, and a real deployment's
+    config.local.json overrides wake_word (this box routes the brain to a persona
+    session and sets its own wake word). That override silently wins over
+    set_wake_word(), so detect_wake scores every clip against the wrong model and the
+    positive-detection checks go red. Seeding a temp config.json from the committed
+    base alone, with no local overlay, makes set_wake_word take effect as designed
+    and reproduces a bare-checkout run. It also stops the test from mutating the real
+    config.json (set_wake_word writes there; a failure before the restore would leave
+    it on the wrong wake word).
+
+    Returns the TemporaryDirectory so the caller can clean it up; the pipeline's
+    config paths are repointed into it for the rest of the run.
+    """
+    base = pipeline._read_base_config()  # committed config.json, no local overlay
+    tmp = tempfile.TemporaryDirectory(prefix="computah-test-config-")
+    root = Path(tmp.name)
+    (root / "config.json").write_text(json.dumps(base))
+    pipeline.CONFIG_PATH = root / "config.json"
+    pipeline.LOCAL_CONFIG_PATH = root / "config.local.json"  # intentionally absent
+    print("config source: isolated throwaway (committed base, no config.local.json overlay)")
+    return tmp
+
+
+def _run_checks() -> int:
     cfg = pipeline.load_config()
     print(f"config: wake_word={cfg['wake_word']} threshold={cfg['wake_threshold']} "
           f"whisper={cfg['whisper_model']}/{cfg['whisper_compute']} "
@@ -133,8 +164,8 @@ def main() -> int:
           a_fired2 and not j_fired2,
           f"jarvis={j_score2:.3f}(fire={j_fired2}) alexa={a_score2:.3f}(fire={a_fired2})")
 
-    # Restore the default so re-runs start clean.
-    pipeline.set_wake_word("hey_jarvis")
+    # No config restore needed: set_wake_word wrote to the throwaway config that
+    # _isolate_config repointed the pipeline at, and main() discards it.
 
     # ----- summary --------------------------------------------------------- #
     print("\n=== timings (seconds, includes one-time model loads) ===")
@@ -149,6 +180,14 @@ def main() -> int:
     for status, name, _ in results:
         print(f"  [{status}] {name}")
     return 0 if n_pass == n_total else 1
+
+
+def main() -> int:
+    tmp_cfg = _isolate_config()
+    try:
+        return _run_checks()
+    finally:
+        tmp_cfg.cleanup()
 
 
 if __name__ == "__main__":
