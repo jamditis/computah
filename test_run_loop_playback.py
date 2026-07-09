@@ -60,6 +60,7 @@ class _FakeMic:
 def main() -> int:
     state = {"turns": 0, "played": []}
     saved_load = pipeline.load_config
+    saved_warm = pipeline.warm_models
     saved_run_turn = pipeline.run_turn
     saved_audio = sys.modules.get("audio")
 
@@ -87,6 +88,10 @@ def main() -> int:
     fake_audio.play_wav = fake_play_wav
 
     pipeline.load_config = fake_load_config
+    # Stub warming so this stays a fast, no-model test: run_loop pre-warms the models
+    # before listening (issue #13), which would otherwise load real models here. The
+    # warm path itself is covered by test_warm_models.py.
+    pipeline.warm_models = lambda cfg=None, wake_word=None: {}
     pipeline.run_turn = fake_run_turn
     sys.modules["audio"] = fake_audio
     try:
@@ -109,6 +114,7 @@ def main() -> int:
         )
     finally:
         pipeline.load_config = saved_load
+        pipeline.warm_models = saved_warm
         pipeline.run_turn = saved_run_turn
         if saved_audio is None:
             sys.modules.pop("audio", None)

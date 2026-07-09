@@ -33,7 +33,7 @@ import warnings
 import wave
 from math import gcd
 from pathlib import Path
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 import brain_bridge
 
@@ -955,6 +955,61 @@ def run_turn(frames, model_name: str | None = None,
     }
 
 
+def warm_models(cfg: dict | None = None, wake_word: str | None = None) -> dict[str, float]:
+    """Load every model the first live turn would otherwise load lazily, up front.
+
+    A live turn touches four models, each loaded lazily on first use: the wake model
+    (_get_oww_model), the capture-time silero VAD (_get_vad, run over the post-wake
+    audio in capture_request), whisper (_get_whisper), and the Piper voice (_get_piper).
+    In a fresh process the first user turn pays all four loads while someone waits on the
+    reply, and only later turns are fast. The live loop calls this at startup, before it
+    listens, to move that one-time cost to a point where no one is waiting. It touches
+    only the models the live loop uses -- the wake word from config, the bundled VAD, the
+    configured whisper model and compute, and the configured Piper voice -- and the file
+    pipeline and the tests never call it, so they still load lazily and pay only for the
+    stages they run.
+
+    Warming is a cache fill, not a separate code path: the loaders populate the same
+    module caches the stages read, so the first real turn reuses these instances. A
+    stage that fails to warm (a missing voice file, say) is logged and skipped rather
+    than stopping the loop before it starts or blocking the other stages from warming;
+    the lazy path raises the same error later if that stage is actually used.
+
+    Returns the warm time in seconds per stage ("wake", "vad", "whisper", "piper"); a
+    stage that failed to warm is absent from the mapping.
+    """
+    cfg = cfg or load_config()
+    wake_word = wake_word or cfg["wake_word"]
+    voice_onnx = VOICES_DIR / f"{cfg['voice_model']}.onnx"
+    # In first-turn order: wake fires, the VAD confirms the captured command, whisper
+    # transcribes it, and Piper speaks the reply.
+    loaders: list[tuple[str, Callable[[], object]]] = [
+        ("wake", lambda: _get_oww_model(_resolve_wake_path(wake_word))),
+        ("vad", lambda: _get_vad()),
+        ("whisper", lambda: _get_whisper(cfg["whisper_model"], cfg["whisper_compute"])),
+        ("piper", lambda: _get_piper(str(voice_onnx))),
+    ]
+    warmed: dict[str, float] = {}
+    for label, load in loaders:
+        t0 = time.time()
+        try:
+            load()
+        except Exception as exc:  # noqa: BLE001 - one bad model must not stop the loop or the others
+            if label == "piper" and not voice_onnx.exists():
+                print(
+                    f"  warm {label}: failed (voice model not found: {voice_onnx}. download with "
+                    f"`python -m piper.download_voices {cfg['voice_model']} --download-dir voices`); "
+                    "will load lazily on first use"
+                )
+            else:
+                print(f"  warm {label}: failed ({type(exc).__name__}: {exc}); "
+                      "will load lazily on first use")
+            continue
+        warmed[label] = time.time() - t0
+        print(f"  warm {label}: {warmed[label]:.2f}s")
+    return warmed
+
+
 def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
              threshold: float | None = None) -> None:
     """Always-on voice loop: listen, wake, capture, answer, speak -- repeat.
@@ -995,6 +1050,13 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
         except Exception as e:  # noqa: BLE001 - the chime is optional, never fatal
             print(f"  wake chime unavailable ({type(e).__name__}: {e}); "
                   "continuing without it")
+
+    # Warm the models before listening so the first turn is as fast as the rest
+    # (issue #13). Each loader caches, so the first real turn reuses these instances.
+    t0 = time.time()
+    warmed = warm_models(cfg, wake_word)
+    elapsed = time.time() - t0
+    print(f"warmed {len(warmed)} models in {elapsed:.1f}s")
 
     print(f"computah listening -- wake word: {wake_word}. Ctrl-C to stop.")
     with audio.Microphone(mic_name) as mic:
