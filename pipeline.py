@@ -30,6 +30,7 @@ import sys
 import tempfile
 import time
 import warnings
+import wave
 from math import gcd
 from pathlib import Path
 from typing import NamedTuple
@@ -149,6 +150,7 @@ STT_REPROMPT = "Sorry, I didn't catch that. Please say that again."
 # Module-level caches so repeated calls in one process do not reload models.
 _oww_cache: dict[str, object] = {}
 _whisper_cache: dict[tuple[str, str], object] = {}
+_piper_cache: dict[str, object] = {}
 
 
 # --------------------------------------------------------------------------- #
@@ -717,8 +719,42 @@ def _brain_cli(text: str, cfg: dict, model: str | None = None,
 # --------------------------------------------------------------------------- #
 # Stage 4: text-to-speech
 # --------------------------------------------------------------------------- #
+def _get_piper(model_path: str):
+    """Load a Piper voice once and reuse it across speak() calls in one process.
+
+    Mirrors _get_oww_model/_get_whisper: the ONNX voice model is the largest
+    per-call cost, so loading it on the first speak and caching it turns every
+    later reply into synth-only work instead of a full model reload. Keyed by the
+    ONNX path so distinct voices cache independently. The sibling <model>.onnx.json
+    config is passed when present; otherwise Piper derives it.
+    """
+    if model_path not in _piper_cache:
+        from piper import PiperVoice
+
+        config_path = model_path + ".json"
+        _piper_cache[model_path] = PiperVoice.load(
+            model_path,
+            config_path=config_path if os.path.exists(config_path) else None,
+        )
+    return _piper_cache[model_path]
+
+
+def _speak_subprocess(text: str, onnx: Path, out_wav_path: str) -> None:
+    """Fallback TTS: shell out to the piper CLI, reloading the voice each call."""
+    subprocess.run(
+        [sys.executable, "-m", "piper", "-m", str(onnx), "-f", out_wav_path],
+        input=text, capture_output=True, text=True, check=True,
+    )
+
+
 def speak(text: str, out_wav_path: str, voice_model: str | None = None) -> str:
-    """Render text to a WAV with Piper. Returns the output path."""
+    """Render text to a WAV with Piper. Returns the output path.
+
+    The voice loads once and is reused across calls (see _get_piper), so only the
+    first reply in a process pays the model-load cost. If the in-process load or
+    synth fails for any reason, fall back to the piper CLI so a bad install still
+    speaks rather than crashing the loop.
+    """
     cfg = load_config()
     voice_model = voice_model or cfg["voice_model"]
     onnx = VOICES_DIR / f"{voice_model}.onnx"
@@ -728,10 +764,24 @@ def speak(text: str, out_wav_path: str, voice_model: str | None = None) -> str:
             f"`python -m piper.download_voices {voice_model} --download-dir voices`"
         )
     out_wav_path = str(out_wav_path)
-    subprocess.run(
-        [sys.executable, "-m", "piper", "-m", str(onnx), "-f", out_wav_path],
-        input=text, capture_output=True, text=True, check=True,
-    )
+    try:
+        voice = _get_piper(str(onnx))
+        with wave.open(out_wav_path, "wb") as wav_file:
+            voice.synthesize_wav(text, wav_file)
+    except Exception as exc:
+        # In-process load or synth failed (bad piper build, unexpected API change).
+        # Evict unconditionally: a voice that failed to load must not stick, and
+        # re-loading a good voice that merely hit a synth error next call is cheap,
+        # so either way the next call starts clean. Warn so the regression is
+        # visible, then fall back to the CLI so the reply still speaks. If the CLI
+        # also fails it raises, surfacing the real problem instead of going silent.
+        _piper_cache.pop(str(onnx), None)
+        warnings.warn(
+            f"piper in-process synth failed ({exc}); using CLI fallback",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        _speak_subprocess(text, onnx, out_wav_path)
     return out_wav_path
 
 
