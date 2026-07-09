@@ -995,8 +995,15 @@ def warm_models(cfg: dict | None = None, wake_word: str | None = None) -> dict[s
         try:
             load()
         except Exception as exc:  # noqa: BLE001 - one bad model must not stop the loop or the others
-            print(f"  warm {label}: failed ({type(exc).__name__}: {exc}); "
-                  "will load lazily on first use")
+            if label == "piper" and not voice_onnx.exists():
+                print(
+                    f"  warm {label}: failed (voice model not found: {voice_onnx}. download with "
+                    f"`python -m piper.download_voices {cfg['voice_model']} --download-dir voices`); "
+                    "will load lazily on first use"
+                )
+            else:
+                print(f"  warm {label}: failed ({type(exc).__name__}: {exc}); "
+                      "will load lazily on first use")
             continue
         warmed[label] = time.time() - t0
         print(f"  warm {label}: {warmed[label]:.2f}s")
