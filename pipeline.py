@@ -1046,9 +1046,10 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
 
     # Warm the models before listening so the first turn is as fast as the rest
     # (issue #13). Each loader caches, so the first real turn reuses these instances.
-    print("warming models...")
+    t0 = time.time()
     warmed = warm_models(cfg, wake_word)
-    print(f"warmed {len(warmed)} models in {sum(warmed.values()):.1f}s")
+    elapsed = time.time() - t0
+    print(f"warmed {len(warmed)} models in {elapsed:.1f}s")
 
     print(f"computah listening -- wake word: {wake_word}. Ctrl-C to stop.")
     with audio.Microphone(mic_name) as mic:
