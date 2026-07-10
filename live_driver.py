@@ -221,7 +221,9 @@ def run_turn(frames, mic, model, threshold: float, out_wav: str,
             preroll.clear()
 
     request_pcm = pipeline.capture_request(frames, preroll=list(preroll),
-                                           vad_threshold=cfg["capture_vad_threshold"])
+                                           vad_threshold=cfg["capture_vad_threshold"],
+                                           endpoint_silence_ms=cfg["endpoint_silence_ms"],
+                                           max_request_ms=cfg["max_request_ms"])
     if request_pcm.size == 0:
         log("wake fired but no speech followed — ignoring")
         return True

@@ -131,7 +131,7 @@ def _run_turn_order(cfg_wake: float, fire: bool, use_hook: bool = True,
             preroll.append(np.full(FRAME_SIZE, 7, dtype=np.int16))
         return 0.9 if fire else None
 
-    def fake_capture(frames, preroll=None, vad_threshold=None):
+    def fake_capture(frames, preroll=None, vad_threshold=None, **_):
         order.append("capture")
         seen_preroll.append(list(preroll) if preroll is not None else [])
         return np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
@@ -203,7 +203,7 @@ def test_live_driver_chime() -> None:
 
     seen_preroll: list[list] = []
 
-    def fake_capture(fr, preroll=None, vad_threshold=None):
+    def fake_capture(fr, preroll=None, vad_threshold=None, **_):
         order.append("capture")
         seen_preroll.append(list(preroll) if preroll is not None else [])
         return np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
@@ -220,7 +220,8 @@ def test_live_driver_chime() -> None:
 
     cfg = {"stt_confidence_guard": True, "stt_min_avg_logprob": -1.0,
            "stt_max_no_speech_prob": 0.6, "wake_chime": True,
-           "capture_vad_threshold": 0.5}
+           "capture_vad_threshold": 0.5,
+           "endpoint_silence_ms": 800, "max_request_ms": 8000}
     try:
         ran = live_driver.run_turn(iter([]), mic, object(), 0.5, os.devnull, None,
                                    cfg, False)
@@ -262,7 +263,7 @@ def test_live_driver_chime_failure_keeps_preroll() -> None:
 
     seen_preroll: list[list] = []
 
-    def fake_capture(fr, preroll=None, vad_threshold=None):
+    def fake_capture(fr, preroll=None, vad_threshold=None, **_):
         order.append("capture")
         seen_preroll.append(list(preroll) if preroll is not None else [])
         return np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
@@ -282,7 +283,8 @@ def test_live_driver_chime_failure_keeps_preroll() -> None:
 
     cfg = {"stt_confidence_guard": True, "stt_min_avg_logprob": -1.0,
            "stt_max_no_speech_prob": 0.6, "wake_chime": True,
-           "capture_vad_threshold": 0.5}
+           "capture_vad_threshold": 0.5,
+           "endpoint_silence_ms": 800, "max_request_ms": 8000}
     try:
         ran = live_driver.run_turn(iter([]), mic, object(), 0.5, os.devnull, None,
                                    cfg, False)
@@ -323,7 +325,7 @@ def test_chime_opt_in_default_off() -> None:
 
         seen_preroll: list[list] = []
 
-        def fake_capture(fr, preroll=None, vad_threshold=None):
+        def fake_capture(fr, preroll=None, vad_threshold=None, **_):
             order.append("capture")
             seen_preroll.append(list(preroll) if preroll is not None else [])
             return np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
@@ -340,6 +342,7 @@ def test_chime_opt_in_default_off() -> None:
 
         cfg = {"stt_confidence_guard": True, "stt_min_avg_logprob": -1.0,
                "stt_max_no_speech_prob": 0.6, "capture_vad_threshold": 0.5,
+               "endpoint_silence_ms": 800, "max_request_ms": 8000,
                **cfg_extra}
         try:
             ran = live_driver.run_turn(iter([]), mic, object(), 0.5, os.devnull, None,
