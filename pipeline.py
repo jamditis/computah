@@ -105,6 +105,16 @@ DEFAULTS = {
     # and keeps the pre-roll only if the peak per-chunk speech probability reaches this
     # threshold. Lower to confirm quieter/marginal speech; raise to reject more noise.
     "capture_vad_threshold": 0.5,
+    # Request endpointing knobs (#15). After a wake fires, capture_request records the
+    # command and stops once the trailing quiet reaches endpoint_silence_ms; max_request_ms
+    # caps a stuck stream so it cannot record forever. Both are milliseconds, rounded to
+    # whole 80 ms capture frames at use. The defaults equal the built-in frame constants
+    # (_ENDPOINT_SILENCE_FRAMES=10 -> 800 ms, _MAX_REQUEST_FRAMES=100 -> 8000 ms), so the
+    # default config leaves capture behavior unchanged; raise endpoint_silence_ms if the
+    # endpoint clips slow talkers, lower it for a snappier turn. The resolution is one
+    # 80 ms frame: a value rounds to the nearest 80 ms and never falls below one frame.
+    "endpoint_silence_ms": 800,
+    "max_request_ms": 8000,
     # Wake-acknowledgment chime (issue #41). Opt-in, default off: on the half-duplex
     # PowerConf the cue cannot play while the mic captures, so when it is on a command
     # spoken in one breath with the wake word loses its leading audio (it lands in the
@@ -364,6 +374,18 @@ _PREROLL_FRAMES = 2            # ~0.16 s of audio kept before the wake fire and
                                # more leading audio but bleeds more of the wake word in.
 
 
+_FRAME_MS = FRAME_SIZE / 16000 * 1000  # 80.0 ms of audio per capture frame
+
+
+def _ms_to_frames(ms: float) -> int:
+    """Round a millisecond duration to a whole number of 80 ms capture frames.
+
+    Capture endpointing counts frames, so a config value in ms is converted here. The
+    floor of 1 keeps a small positive value from rounding to zero frames, which would
+    make an endpoint or cap check fire on the first frame."""
+    return max(1, round(ms / _FRAME_MS))
+
+
 def iter_wav_frames(wav_path: str):
     """Yield consecutive 80 ms int16 frames from a WAV: a file-backed stand-in for
     a live mic. A microphone source yields frames of the same size and dtype, so
@@ -446,17 +468,17 @@ def _confirm_speech(pcm: np.ndarray, threshold: float) -> bool:
     return peak >= threshold
 
 
-def capture_request(frames, preroll=None, vad_threshold=None) -> np.ndarray:
+def capture_request(frames, preroll=None, vad_threshold=None,
+                    endpoint_silence_ms=None, max_request_ms=None) -> np.ndarray:
     """Collect request frames after a wake fire until a trailing-silence endpoint.
 
-    Energy-based endpointing: once speech has been seen, stop after
-    _ENDPOINT_SILENCE_FRAMES consecutive quiet frames. If no speech ever starts,
-    stop after the shorter _NO_SPEECH_ONSET_FRAMES window so a false or abandoned
-    wake frees the listener in ~1.6 s instead of holding it for the full
-    _MAX_REQUEST_FRAMES cap. Returns the captured int16 PCM, or an empty array if
-    no speech followed the wake word. Transcribing that silence would feed whisper
-    room tone, which it tends to hallucinate words for, so the empty return lets
-    the caller ignore the turn instead.
+    Energy-based endpointing: once speech has been seen, stop after a window of
+    consecutive quiet frames. If no speech ever starts, stop after the shorter
+    _NO_SPEECH_ONSET_FRAMES window so a false or abandoned wake frees the listener in
+    ~1.6 s instead of holding it for the full max-request cap. Returns the captured
+    int16 PCM, or an empty array if no speech followed the wake word. Transcribing
+    that silence would feed whisper room tone, which it tends to hallucinate words
+    for, so the empty return lets the caller ignore the turn instead.
 
     `preroll`, if given, is a list of frames captured just before the wake fired
     (see stream_detect_wake). They are prepended to the returned PCM so a request
@@ -477,7 +499,18 @@ def capture_request(frames, preroll=None, vad_threshold=None) -> np.ndarray:
     that the VAD rejects is treated as an abandoned wake and returns empty, closing the
     phantom path the energy gate alone leaves open (#54). With `vad_threshold` None the
     VAD step is skipped and only the energy gate runs.
+
+    `endpoint_silence_ms` and `max_request_ms` (#15), when given, override the built-in
+    trailing-silence window and runaway cap; each is milliseconds, rounded to whole 80 ms
+    frames. Left None they fall back to _ENDPOINT_SILENCE_FRAMES and _MAX_REQUEST_FRAMES,
+    so a caller that does not pass config -- the file-fed tests -- keeps the original
+    behavior. run_turn threads the config values (endpoint_silence_ms, max_request_ms)
+    through so the live loop is tunable without a code change.
     """
+    endpoint_frames = (_ENDPOINT_SILENCE_FRAMES if endpoint_silence_ms is None
+                       else _ms_to_frames(endpoint_silence_ms))
+    max_frames = (_MAX_REQUEST_FRAMES if max_request_ms is None
+                  else _ms_to_frames(max_request_ms))
     captured: list[np.ndarray] = []
     quiet = 0
     voiced_run = 0
@@ -492,11 +525,11 @@ def capture_request(frames, preroll=None, vad_threshold=None) -> np.ndarray:
             voiced_run += 1
             if voiced_run >= _SPEECH_ONSET_FRAMES:
                 speech_seen = True  # sustained energy, not a lone transient
-        if speech_seen and quiet >= _ENDPOINT_SILENCE_FRAMES:
+        if speech_seen and quiet >= endpoint_frames:
             break
         if not speech_seen and quiet >= _NO_SPEECH_ONSET_FRAMES:
             break  # nothing said after the wake — abandon fast, don't wait the cap
-        if len(captured) >= _MAX_REQUEST_FRAMES:
+        if len(captured) >= max_frames:
             break
     if not speech_seen:
         # No sustained speech after the wake fired (silence, or only a transient like a
@@ -902,7 +935,9 @@ def run_turn(frames, model_name: str | None = None,
             preroll.clear()
 
     request_pcm = capture_request(frames, preroll=list(preroll),
-                                  vad_threshold=cfg["capture_vad_threshold"])
+                                  vad_threshold=cfg["capture_vad_threshold"],
+                                  endpoint_silence_ms=cfg["endpoint_silence_ms"],
+                                  max_request_ms=cfg["max_request_ms"])
     # Listening for this turn is done. Let a live loop stop the mic now, before the
     # slow stages below, so it does not buffer (then throw away) input recorded
     # while the assistant is thinking and speaking.

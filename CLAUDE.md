@@ -137,6 +137,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python test_brain_dispatch.py    # config selects the backend — fast, no models
 .venv/bin/python test_confidence_guard.py  # mishear guard decision + aggregation — fast, no models
 .venv/bin/python test_preroll.py           # pre-roll buffer keeps a no-pause request's leading audio — fast, no models
+.venv/bin/python test_endpoint_config.py   # endpoint_silence_ms / max_request_ms tune capture endpointing — fast, no models
 .venv/bin/python test_chime.py             # wake-acknowledgment cue generator + both-loop wiring — fast, no models
 .venv/bin/python test_live_driver.py       # live_driver hardware path honors the guard — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
@@ -182,6 +183,7 @@ bug.
 - `sim_persona.py` — test stand-in for the assistant.
 - `test_*.py` — see Dev commands.
 - `config.json` — wake word, thresholds, the wake-chime toggle (`wake_chime`,
-  opt-in/default off), model choices, brain backend toggle, and the mishear-guard
-  thresholds (`stt_confidence_guard`, `stt_min_avg_logprob`, `stt_max_no_speech_prob`).
+  opt-in/default off), model choices, brain backend toggle, the mishear-guard
+  thresholds (`stt_confidence_guard`, `stt_min_avg_logprob`, `stt_max_no_speech_prob`),
+  and the request-endpointing knobs (`endpoint_silence_ms`, `max_request_ms`).
 - `config.local.json` (gitignored) / `config.local.example.json` — deployment bridge settings.

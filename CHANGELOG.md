@@ -7,6 +7,14 @@ All notable changes to computah are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- Configurable request endpointing (#15): the trailing-silence window that ends a
+  captured request and the max-request cap that bounds a runaway are now config keys
+  (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,
+  so the live loop is tunable without a code change. `run_turn` and the `live_driver`
+  loop thread the config through `capture_request`; both keys default to the built-in
+  values (800 ms endpoint, 8000 ms cap), so the shipped config leaves capture behavior
+  unchanged. `test_endpoint_config.py` covers the conversion, the no-drift default
+  invariant, the tuned endpoint and cap, and the `run_turn` wiring, model-free.
 - Mishear confidence guard: both live paths (`pipeline.run_turn` and the
   `live_driver` hardware loop) now gate the transcript on faster-whisper confidence
   before dispatching to the brain, through a shared `guard_transcript`, so a garbled

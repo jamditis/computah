@@ -226,7 +226,7 @@ def main() -> int:
             preroll.extend(loud(2))  # two frames "consumed during detection"
         return 0.9
 
-    def fake_capture(frames, preroll=None, vad_threshold=None):
+    def fake_capture(frames, preroll=None, vad_threshold=None, **_):
         seen["preroll"] = preroll
         return np.full(4 * FRAME_SIZE, 4000, dtype=np.int16)
 

@@ -142,7 +142,7 @@ def main() -> int:
     called = {"transcribe": False, "brain": False}
     real_cap, real_tx, real_brain = (
         pipeline.capture_request, pipeline.transcribe_detailed, pipeline.brain)
-    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None: np.zeros(0, dtype=np.int16)
+    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None, **_: np.zeros(0, dtype=np.int16)
     pipeline.transcribe_detailed = (
         lambda p: called.__setitem__("transcribe", True)
         or pipeline.Transcript("", 0.0, 0.0))
@@ -162,7 +162,7 @@ def main() -> int:
     brain_hit = {"called": False}
     real_cap2, real_tx2, real_brain2 = (
         pipeline.capture_request, pipeline.transcribe_detailed, pipeline.brain)
-    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
+    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None, **_: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
     pipeline.transcribe_detailed = lambda p: pipeline.Transcript("   ", 0.0, 0.0)
     pipeline.brain = lambda t, **_: brain_hit.__setitem__("called", True) or "x"
     try:
@@ -244,7 +244,7 @@ def main() -> int:
 
     fired_silent = {"n": 0}
     real_cap3 = pipeline.capture_request
-    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None: np.zeros(0, dtype=np.int16)
+    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None, **_: np.zeros(0, dtype=np.int16)
     try:
         si_turn = pipeline.run_turn(
             pipeline.iter_wav_frames(jarvis), model_name="hey_jarvis",
