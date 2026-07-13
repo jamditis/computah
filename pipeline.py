@@ -309,39 +309,56 @@ def _reset_oww(model) -> None:
     pp.feature_buffer = feat.copy()
 
 
+# Leading and trailing silence to fill a freshly reset model's ~2s context window.
+# A one-shot clip must fill that window before the real audio; live audio fills it
+# naturally. Named here so every one-shot scoring path (detect_wake and the
+# threshold-tuning eval) pads identically and cannot drift apart.
+_WAKE_LEAD_SAMPLES = 24000  # 1.5s leading silence
+_WAKE_TAIL_SAMPLES = 8000   # 0.5s trailing silence
+
+
+def wake_frame_scores(wav_path: str, model_name: str | None = None) -> list[float]:
+    """Per-frame wake scores for a one-shot clip, in order.
+
+    Resets the active model to a clean slate and pads the clip with leading (plus a
+    short trailing) silence so the detector's ~2s context window is full before the
+    real audio: the wake word can sit at the very start of a clip of any length, and
+    a freshly reset detector would otherwise under-score the opening. Silence scores
+    ~0, so the pad never raises the score for a clip that already had context. The
+    clip is scanned in 80ms (1280-sample) frames and each frame's highest score is
+    kept. detect_wake takes the peak of these for a fire decision; the
+    threshold-tuning eval keeps the whole list so it can apply any threshold and count
+    fires over the clip.
+    """
+    model_name = model_name or load_config()["wake_word"]
+    model = _get_oww_model(_resolve_wake_path(model_name))
+    _reset_oww(model)  # full clean slate between independent clips
+    pcm = _load_pcm16(wav_path)
+    lead = np.zeros(_WAKE_LEAD_SAMPLES, dtype=np.int16)
+    tail = np.zeros(_WAKE_TAIL_SAMPLES, dtype=np.int16)
+    pcm = np.concatenate([lead, pcm, tail])
+
+    step = 1280  # 80ms at 16kHz — openWakeWord's frame size
+    scores: list[float] = []
+    for i in range(0, len(pcm) - step + 1, step):
+        preds = model.predict(pcm[i:i + step])
+        scores.append(max(float(s) for s in preds.values()))
+    return scores
+
+
 def detect_wake(wav_path: str, model_name: str | None = None,
                 threshold: float | None = None) -> tuple[bool, str, float]:
     """Run audio through the active openWakeWord model.
 
-    Returns (fired, model_name, peak_score). fired is peak_score >= threshold.
-    The audio is scanned in 80ms (1280-sample) frames; the highest score over
+    Returns (fired, model_name, peak_score). fired is peak_score >= threshold. The
+    clip is scored frame by frame (see wake_frame_scores) and the highest score over
     the clip is the detection score.
     """
     cfg = load_config()
     model_name = model_name or cfg["wake_word"]
     threshold = cfg["wake_threshold"] if threshold is None else threshold
-    path = _resolve_wake_path(model_name)
-
-    model = _get_oww_model(path)
-    _reset_oww(model)  # full clean slate between independent clips
-    pcm = _load_pcm16(wav_path)
-    # A one-shot clip file must fill the detector's ~2s context window; live audio
-    # fills it naturally. The wake word can sit at the very start of a clip of any
-    # length, so always prepend leading silence (plus a short trailing pad) rather
-    # than gating on total duration: a long recording whose request runs past 2.5s
-    # still starts the freshly-reset detector with an empty window. Padding gives it
-    # the context to score the wake word the way it was trained; silence scores ~0,
-    # so the extra frames never raise the peak for clips that already had context.
-    lead = np.zeros(24000, dtype=np.int16)  # 1.5s leading silence
-    tail = np.zeros(8000, dtype=np.int16)  # 0.5s trailing silence
-    pcm = np.concatenate([lead, pcm, tail])
-
-    step = 1280  # 80ms at 16kHz — openWakeWord's frame size
-    peak = 0.0
-    for i in range(0, len(pcm) - step + 1, step):
-        preds = model.predict(pcm[i:i + step])
-        for score in preds.values():
-            peak = max(peak, float(score))
+    scores = wake_frame_scores(wav_path, model_name)
+    peak = max(scores) if scores else 0.0
     return peak >= threshold, model_name, peak
 
 
