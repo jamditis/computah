@@ -33,9 +33,14 @@ repo. The evaluation script below is committed; the audio it reads is not.
 ## 2. Run the sweep
 
 ```bash
-.venv/bin/python eval_wake_threshold.py --model hey_jarvis \
+.venv/bin/python eval_wake_threshold.py --model computah \
     --min-threshold 0.1 --max-threshold 0.9 --step 0.05 --max-fa-per-hour 1.0
 ```
+
+`--model` must match the wake word you recorded in step 1: score the `computah`
+takes with the `computah` model. Scoring them with a different model (the shipped
+`hey_jarvis`, say) rejects every real activation and the recommendation collapses to
+a 100% miss rate. Omit `--model` to fall back to the `wake_word` in `config.json`.
 
 It scores every clip once with the same openWakeWord model the live loop uses, then
 sweeps the threshold and prints a table:

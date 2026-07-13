@@ -16,7 +16,7 @@ The script is committed; the recordings are not.
 
 Usage:
   .venv/bin/python eval_wake_threshold.py                      # defaults under samples/
-  .venv/bin/python eval_wake_threshold.py --model hey_jarvis \
+  .venv/bin/python eval_wake_threshold.py --model computah \
       --min-threshold 0.1 --max-threshold 0.9 --step 0.05 --max-fa-per-hour 1.0
 
 Record the recommended value in config.json (wake_threshold) for the shipped model;
@@ -149,10 +149,16 @@ def main() -> int:
     print(f"  at this threshold: false-rejects "
           f"{rec.row.false_rejects_per_activation:.1%} of activations, "
           f"false-accepts {rec.row.false_accepts_per_hour:.2f}/hour")
-    if not rec.meets_budget:
-        print("  warning: no threshold met the budget; collect more or cleaner "
-              "negatives, or accept a higher false-accept rate.")
-    print(f'\nrecord this in config.json:  "wake_threshold": {rec.threshold:.3f},')
+    if rec.meets_budget:
+        print(f'\nrecord this in config.json:  "wake_threshold": {rec.threshold:.3f},')
+    else:
+        # No threshold met the budget, so rec.threshold is only the least-bad value and
+        # still violates it. Don't emit a paste-ready config line a failed run could be
+        # copied into config.json from; point at the two real fixes instead.
+        print("\nno threshold met the false-accept budget, so there is nothing to "
+              "record yet. Collect more or cleaner negatives and re-run, or re-run "
+              f"with a higher --max-fa-per-hour if {rec.row.false_accepts_per_hour:.2f} "
+              f"false-accepts/hour is acceptable (best available was {rec.threshold:.3f}).")
     print("see docs/wake-threshold-tuning.md.")
     return 0
 
