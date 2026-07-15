@@ -182,6 +182,99 @@ def load_config() -> dict:
         except json.JSONDecodeError as e:
             print(f"warning: {label} is not valid JSON ({e}); ignoring it",
                   file=sys.stderr)
+    return validate_config(cfg)
+
+
+def _supported_whisper_compute_types() -> frozenset:
+    """Compute types whisper_compute may take: the "auto"/"default" meta types that let
+    CTranslate2 choose, plus the concrete quantizations the CPU backend actually supports.
+
+    _get_whisper forces device="cpu", and CTranslate2 raises rather than silently falling
+    back when an explicitly requested type is not supported on the backend (float16,
+    bfloat16, int16 on a Pi CPU all raise), so a name that merely spells a real type is not
+    enough -- it has to be one this box can load. get_supported_compute_types adapts to the
+    host, so the same check is correct on an x86 build that supports more types.
+    """
+    types = {"default", "auto"}
+    try:
+        import ctranslate2
+        types |= set(ctranslate2.get_supported_compute_types("cpu"))
+    except Exception:
+        # ctranslate2 missing or too old to report support: cannot validate the type here,
+        # so defer to _get_whisper rather than reject a name that may well load.
+        return frozenset()
+    return frozenset(types)
+
+
+def _is_number(value: object) -> bool:
+    """A real int/float, not a bool. bool is an int subclass, and a JSON true/false is
+    never a valid numeric knob, so it must be rejected here rather than read as 1/0."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def validate_config(cfg: dict) -> dict:
+    """Reject out-of-range or wrong-type config values, falling each bad key back to
+    its default with a clear stderr message naming the key.
+
+    Runs after the DEFAULTS/config.json/config.local.json merge in load_config, so a
+    typo in a committed or local config fails fast and legibly at load rather than deep
+    in detect_wake, _get_whisper, or speak on an unattended box. Only keys with a
+    knowable valid set are checked; free-form keys (whisper_model, device names, paths)
+    are left to the components that consume them, and unknown extra keys are preserved.
+    """
+    def fall_back(key: str, reason: str) -> None:
+        print(
+            f"warning: config {key}={cfg[key]!r} is invalid ({reason}); "
+            f"using default {DEFAULTS[key]!r}",
+            file=sys.stderr,
+        )
+        cfg[key] = DEFAULTS[key]
+
+    # Unit-interval floats: a confidence threshold outside [0, 1] can never fire, or
+    # always fires, which is worse than a legible reject at load. stt_max_no_speech_prob
+    # is faster-whisper's no-speech probability, bounded the same way as the two thresholds.
+    for key in ("wake_threshold", "capture_vad_threshold", "stt_max_no_speech_prob"):
+        if key in cfg and not (_is_number(cfg[key]) and 0.0 <= cfg[key] <= 1.0):
+            fall_back(key, "must be a number in [0, 1]")
+
+    # Positive-int timeouts: a zero or negative timeout would return instantly or hang.
+    for key in ("claude_timeout_s", "brain_timeout_s"):
+        if key in cfg and not _is_positive_int(cfg[key]):
+            fall_back(key, "must be a positive integer")
+
+    # Whisper compute type: a typo, or a type this CPU backend can't load, otherwise
+    # surfaces deep in _get_whisper. Reject non-strings before the membership test, since a
+    # JSON array/object is unhashable and would raise TypeError instead of falling back.
+    if "whisper_compute" in cfg:
+        if not isinstance(cfg["whisper_compute"], str):
+            fall_back("whisper_compute", "must be a string compute type")
+        else:
+            supported = _supported_whisper_compute_types()
+            if supported and cfg["whisper_compute"] not in supported:
+                fall_back("whisper_compute", f"must be one of {sorted(supported)}")
+
+    # Wake word must resolve to an installed model, reported here instead of at first
+    # detection. A non-string can never name a model, so it falls back unconditionally;
+    # otherwise the check is deferred on an empty library (a fresh clone without models
+    # cannot validate anything) rather than spuriously rewriting a word a later install
+    # will supply.
+    if "wake_word" in cfg:
+        if not isinstance(cfg["wake_word"], str):
+            fall_back("wake_word", "must be a string model name")
+        else:
+            lib = available_wake_models()
+            if lib and cfg["wake_word"] not in lib:
+                print(
+                    f"warning: config wake_word={cfg['wake_word']!r} is not an installed "
+                    f"model (available: {sorted(lib)}); using default {DEFAULTS['wake_word']!r}",
+                    file=sys.stderr,
+                )
+                cfg["wake_word"] = DEFAULTS["wake_word"]
+
     return cfg
 
 
