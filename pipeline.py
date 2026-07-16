@@ -24,6 +24,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -771,6 +772,78 @@ def guard_transcript(heard: Transcript, cfg: dict) -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 # Stage 3: the brain (persistent session via the bridge, or the claude CLI)
 # --------------------------------------------------------------------------- #
+# A reply is model output going straight to Piper, so VOICE_SYSTEM_PROMPT asking
+# for short plain text is a request, not a guarantee: a confused or truncated
+# model still emits markdown, emoji, control bytes, or pages of prose. These
+# bound what can reach speak() regardless of what the model did.
+MAX_SPOKEN_CHARS = 600
+EMPTY_REPLY_FALLBACK = "Sorry, I don't have an answer for that."
+# A whole ANSI escape sequence, not just its ESC byte: _brain_cli returns the
+# claude CLI's stdout, so colour codes are a realistic reply. Dropping only the
+# ESC would leave "[31m" behind to be read aloud.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]"      # CSI (colour, cursor moves)
+    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)?"   # OSC (window title), terminated or not
+    r"|[@-Z\\-_])"                       # two-character escapes
+)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+_EMOJI_RE = re.compile(
+    "[\U0001f000-\U0001faff\U00002600-\U000027bf\U00002b00-\U00002bff"
+    "\U00002190-\U000021ff\ufe0f\u200d]"
+)
+
+
+def _strip_markdown(text: str) -> str:
+    """Reduce the markdown the VOICE_SYSTEM_PROMPT forbids to plain spoken text."""
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)  # complete fenced blocks
+    text = re.sub(r"```.*", " ", text, flags=re.DOTALL)      # unterminated trailing fence
+    text = text.replace("`", "")                              # inline code ticks
+    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)    # links/images -> label
+    text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)]|#{1,6}|>)\s+", "", text)  # list/heading/quote markers
+    # Strip *, **, ___ emphasis and ~~ strikethrough only where a run hugs a word on
+    # exactly one side (an opening or closing delimiter), so a glob (*.py), math
+    # (5 * 6), and snake_case identifiers keep their literal symbols: their
+    # punctuation touches a word on neither side, or (snake_case) on both.
+    text = re.sub(r"(?<!\w)(\*{1,3}|_{1,3}|~~)(?=\w)", "", text)  # opening emphasis
+    text = re.sub(r"(?<=\w)(\*{1,3}|_{1,3}|~~)(?!\w)", "", text)  # closing emphasis
+    return text
+
+
+def _truncate_spoken(text: str, max_chars: int) -> str:
+    """Clip to max_chars on a sentence end when there is one, else a word break."""
+    clipped = text[:max_chars]
+    # The LAST sentence end of any kind, not the first kind that happens to match:
+    # checking ". " before "! " would cut at an earlier period and drop everything
+    # up to a later exclamation, throwing away speakable text we had room for.
+    idx = max(clipped.rfind(end) for end in (". ", "! ", "? "))
+    if idx >= max_chars // 2:
+        return clipped[:idx + 1].rstrip()
+    space = clipped.rfind(" ")
+    return (clipped[:space] if space > 0 else clipped).rstrip()
+
+
+def sanitize_reply(reply: str, max_chars: int = MAX_SPOKEN_CHARS,
+                   empty_fallback: str = EMPTY_REPLY_FALLBACK) -> str:
+    """Make a brain reply safe to hand to speak().
+
+    Bounds length, drops markdown/emoji/control characters, and turns an empty
+    reply into a spoken sentence so a silent failure is audible rather than a
+    turn that just does nothing.
+    """
+    if not reply or not reply.strip():
+        return empty_fallback
+    text = _ANSI_ESCAPE_RE.sub("", reply)
+    text = _strip_markdown(text)
+    text = _EMOJI_RE.sub("", text)
+    text = _CONTROL_CHARS_RE.sub("", text)
+    text = " ".join(text.split())
+    if not text:
+        return empty_fallback
+    if len(text) > max_chars:
+        text = _truncate_spoken(text, max_chars)
+    return text
+
+
 def brain(text: str, model: str | None = None,
           timeout_s: int | None = None) -> str:
     """Answer transcribed text using the configured brain backend.
@@ -780,11 +853,16 @@ def brain(text: str, model: str | None = None,
     else uses the local `claude` CLI fallback. Either way the reply is short
     spoken text, and no network LLM API is called. Never raises for an expected
     failure — the caller is a voice loop, so it returns a spoken error instead.
+
+    Both backends return through sanitize_reply(), so this is the single place a
+    reply becomes speakable and no raw model output can reach speak().
     """
     cfg = load_config()
     if cfg["brain_backend"] == "bridge":
-        return _brain_bridge(text, cfg)
-    return _brain_cli(text, cfg, model=model, timeout_s=timeout_s)
+        reply = _brain_bridge(text, cfg)
+    else:
+        reply = _brain_cli(text, cfg, model=model, timeout_s=timeout_s)
+    return sanitize_reply(reply)
 
 
 # One reply cursor per reply file, kept for the life of the process so the
