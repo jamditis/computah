@@ -211,6 +211,24 @@ def test_a_long_tick_run_does_not_stall_the_loop() -> None:
     check("`" not in out, f"ticks still swept: {out!r}")
 
 
+def test_many_unclosed_runs_do_not_stall_the_loop() -> None:
+    """Runs that nothing closes must not each rescan the runs behind them.
+
+    Pairing by run length fixed the cubic pattern but left a second route to the same
+    stall: searching forward per opener re-walks the whole tail for every run that never
+    closes. 400 runs of distinct lengths -- 80KB -- took 2.0s that way. Indexing runs by
+    length once, with a cursor per length that only moves forward, is what makes an
+    opener's cost independent of how many runs sit behind it.
+    """
+    reply = "Before " + "".join("`" * n + "x" for n in range(1, 401)) + " After."
+    start = time.perf_counter()
+    out = pipeline.sanitize_reply(reply)
+    elapsed = time.perf_counter() - start
+    check(elapsed < 1.0, f"400 distinct unclosed runs took {elapsed:.1f}s (was 2.0s)")
+    check(out.startswith("Before ") and out.endswith("After."),
+          f"the prose around them still speaks: {out[:12]!r}..{out[-8:]!r}")
+
+
 def test_an_unpaired_run_opens_nothing_and_keeps_its_line() -> None:
     """A tick run with no run of its own length is literal text, not an opener.
 
@@ -566,6 +584,7 @@ def main() -> int:
     test_code_span_content_is_literal()
     test_a_quote_marker_without_a_space_still_holds_a_block()
     test_a_long_tick_run_does_not_stall_the_loop()
+    test_many_unclosed_runs_do_not_stall_the_loop()
     test_an_unpaired_run_opens_nothing_and_keeps_its_line()
     test_inner_ticks_belong_to_the_span_the_outer_run_opened()
     test_paired_dunder_speaks_as_its_content()

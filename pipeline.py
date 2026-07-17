@@ -850,44 +850,54 @@ def _tick_run_end(text: str, start: int) -> int:
     return i
 
 
-def _find_tick_run(text: str, start: int, length: int) -> int:
-    """Index of the first backtick run of exactly `length` at or after `start`, else -1."""
-    pos = start
-    while True:
-        i = text.find("`", pos)
-        if i < 0:
-            return -1
-        end = _tick_run_end(text, i)
-        if end - i == length:
-            return i
-        pos = end
-
-
 def _iter_code_spans(text: str):
     """Yield (start, end, contents) for each code span, left to right.
 
     Markdown closes a backtick run with the next run of exactly the same length, and a run
     that never finds its match is literal text rather than an opener. Comparing runs is a
     direct reading of that rule; the pattern this replaces, (`+)(.+?)\\1, could only
-    approximate it by trying every opener length against every closing position, which costs
-    cubic time in the length of a run -- 4,000 ticks took 2.3s here and 8,000 about 18s. A
-    reply is model output arriving at a loop that is always listening, so a long enough run of
-    one character was enough to stop it answering at all. Scanning runs also settles the case
-    the pattern read backwards: in "`a``b`" the outer single ticks pair, so the inner pair is
-    part of what is spoken.
+    approximate it by trying every opener length against every closing position, which cost
+    cubic time in a run's length -- 4,000 ticks took 2.3s and 8,000 about 18s. A reply is
+    model output arriving at a loop that is always listening, so a long enough run of one
+    character was enough to stop it answering at all.
+
+    Runs are indexed by length up front, and each length keeps a cursor that only moves
+    forward, so a run is examined once no matter how many openers look past it. Searching
+    forward per opener instead was still superlinear, because an opener that nothing closes
+    rescans every run behind it: 400 runs of distinct lengths -- "`"*n + "x" for n in 1..400,
+    80KB -- took 2.0s, which is the same stall by another route.
+
+    Scanning runs also settles the case the pattern read backwards: in "`a``b`" the outer
+    single ticks pair, so the inner pair is content, not a delimiter.
     """
+    runs: list[tuple[int, int]] = []      # (start, length), left to right
+    by_length: dict[int, list[int]] = {}  # length -> indices into runs
     pos = 0
-    while pos < len(text):
+    while True:
         start = text.find("`", pos)
         if start < 0:
-            return
-        opener = _tick_run_end(text, start)
-        close = _find_tick_run(text, opener, opener - start)
-        if close < 0:
-            pos = opener  # an unpaired run opens nothing; the tick sweep takes it
+            break
+        pos = _tick_run_end(text, start)
+        by_length.setdefault(pos - start, []).append(len(runs))
+        runs.append((start, pos - start))
+
+    seek = dict.fromkeys(by_length, 0)
+    i = 0
+    while i < len(runs):
+        start, length = runs[i]
+        candidates = by_length[length]
+        # Only ever forward: i never goes back, so a candidate already behind it is behind
+        # every later opener too, and skipping it here is skipping it for good.
+        k = seek[length]
+        while k < len(candidates) and candidates[k] <= i:
+            k += 1
+        seek[length] = k
+        if k == len(candidates):
+            i += 1  # nothing of its length closes it; the tick sweep takes it
             continue
-        yield start, close + (opener - start), text[opener:close]
-        pos = close + (opener - start)
+        close = runs[candidates[k]][0]
+        yield start, close + length, text[start + length:close]
+        i = candidates[k] + 1
 
 
 def _strip_emphasis(text: str) -> str:
