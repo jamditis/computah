@@ -799,8 +799,26 @@ _EMOJI_RE = re.compile(
 )
 
 
-_CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1", re.DOTALL)
 _LINK_HEAD_RE = re.compile(r"!?\[([^\]]*)\]\(")
+_WHITESPACE_RE = re.compile(r"\s")
+# Quote and list markers, the two containers a fenced block can sit inside. Headings are not
+# containers and are handled separately, after fences.
+_CONTAINER_RE = re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|\d+[.)]|>)[ \t]+")
+# A complete fenced block: an opener at a line start (up to 3 spaces, as markdown allows),
+# closed by a run of the SAME character at least as long. Either character opens a block, so a
+# stray "~~~" inside a backtick block cannot close it early.
+#
+# (?!\2) forces the opener to take its whole run. Without it the pattern could give a character
+# back -- matching only three of a "~~~~" opener, letting .*? eat the fourth, and then accepting
+# a later "~~~" as a closer that markdown says is too short to close anything, so what is still
+# code gets spoken.
+#
+# Anchoring to a line start is what keeps a reply that merely MENTIONS ``` mid-sentence from
+# reading as a block, whereupon the unterminated-fence rule would drop every word after it: an
+# answer explaining how to open a code block would lose the explanation, silently, and nothing
+# downstream can tell speech from speech-that-was-cut. An inline run left behind is not spoken
+# anyway -- it pairs off as a code span, or the final tick sweep takes it.
+_FENCED_BLOCK_RE = re.compile(r"(?ms)^[ ]{0,3}((`|~)\2{2,})(?!\2).*?^[ ]{0,3}\1\2*[ \t]*$")
 # Emphasis is a matched pair of identical delimiter runs hugging its content, which is
 # the only thing markdown reads as emphasis. An unpaired run is literal text, and a
 # reply about code is made of unpaired runs (*args, **kwargs, _private, VALUE_) whose
@@ -815,6 +833,54 @@ _EMPHASIS_RES = (
     re.compile(r"(?<!\w)(_{1,3})(?!\s)([^_]+)(?<!\s)\1(?!\w)"),
     re.compile(r"(?<!\w)(~~)(?!\s)([^~]+)(?<!\s)\1(?!\w)"),
 )
+
+
+def _tick_run_end(text: str, start: int) -> int:
+    """Index just past the backtick run beginning at `start`."""
+    i = start
+    while i < len(text) and text[i] == "`":
+        i += 1
+    return i
+
+
+def _find_tick_run(text: str, start: int, length: int) -> int:
+    """Index of the first backtick run of exactly `length` at or after `start`, else -1."""
+    pos = start
+    while True:
+        i = text.find("`", pos)
+        if i < 0:
+            return -1
+        end = _tick_run_end(text, i)
+        if end - i == length:
+            return i
+        pos = end
+
+
+def _iter_code_spans(text: str):
+    """Yield (start, end, contents) for each code span, left to right.
+
+    Markdown closes a backtick run with the next run of exactly the same length, and a run
+    that never finds its match is literal text rather than an opener. Comparing runs is a
+    direct reading of that rule; the pattern this replaces, (`+)(.+?)\\1, could only
+    approximate it by trying every opener length against every closing position, which costs
+    cubic time in the length of a run -- 4,000 ticks took 2.3s here and 8,000 about 18s. A
+    reply is model output arriving at a loop that is always listening, so a long enough run of
+    one character was enough to stop it answering at all. Scanning runs also settles the case
+    the pattern read backwards: in "`a``b`" the outer single ticks pair, so the inner pair is
+    part of what is spoken.
+    """
+    pos = 0
+    while pos < len(text):
+        start = text.find("`", pos)
+        if start < 0:
+            return
+        opener = _tick_run_end(text, start)
+        close = _find_tick_run(text, opener, opener - start)
+        if close < 0:
+            pos = opener  # an unpaired run opens nothing; the tick sweep takes it
+            continue
+        yield start, close + (opener - start), text[opener:close]
+        pos = close + (opener - start)
 
 
 def _strip_emphasis(text: str) -> str:
@@ -851,15 +917,37 @@ def _strip_links(text: str) -> str:
             return "".join(out)
         out.append(text[pos:head.start()])
         out.append(head.group(1))
-        depth = 1
-        i = head.end()
-        while i < len(text) and depth:
-            if text[i] == "(":
-                depth += 1
-            elif text[i] == ")":
-                depth -= 1
-            i += 1
-        pos = i
+        pos = _end_of_destination(text, head.end())
+
+
+def _end_of_destination(text: str, start: int) -> int:
+    """Index just past the destination opened by the "(" before `start`.
+
+    Counting rather than matching is what a pattern cannot do, and a backslash escape is a
+    character in the destination rather than structure -- reading "\\(" as a nesting level runs
+    the count off the end of a link that was balanced all along.
+    """
+    depth = 1
+    i = start
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            i += 2
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    # Never balanced, so this was not a whole link. A destination cannot hold unescaped
+    # whitespace, which bounds how much of the tail an unbalanced "(" may take: enough to
+    # swallow a URL the reply was cut off mid-way through, and no further. Consuming to the end
+    # instead deleted the rest of a reply whenever a "](" was never a link at all -- inside a
+    # code span, say, where this pass runs before the ticks are read.
+    ws = _WHITESPACE_RE.search(text, start)
+    return ws.start() if ws else len(text)
 
 
 def _strip_markdown(text: str) -> str:
@@ -868,39 +956,40 @@ def _strip_markdown(text: str) -> str:
     # mean it. A \r sits between a closing fence and its line end, which reads as "no closer"
     # and hands the rest of the reply to the unterminated-fence rule.
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    # Markers come off before fences are read, because a fence keeps its block-ness inside a
-    # quote or a list item, where its opener sits behind the marker rather than at the margin.
-    # Reading fences first missed exactly those, and the miss did not stop at a leftover
-    # backtick: this rule then exposed the fence, and the code-span rule below read the tick
-    # run as a span and spoke the code inside it. Mangling the interior of a block on the way
-    # past costs nothing -- the block goes next.
-    text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)]|#{1,6}|>)\s+", "", text)  # list/heading/quote markers
-    # Either fence character opens a block, closed by a run of that same character, so a
-    # stray "~~~" inside a backtick block cannot close it early. Markdown lets a closer be
-    # longer than its opener, so the closer is the opener plus any more of that character;
-    # demanding an equal length reads a valid closer as prose, leaves the block unterminated,
-    # and drops every word after it.
-    #
-    # Anchored to a line start (up to 3 spaces, as markdown allows) because a fence is a
-    # block construct, and matching one mid-line reads a reply that merely MENTIONS ``` as
-    # opening a block -- whereupon the trailing-fence rule below drops every word after it.
-    # An answer explaining how to open a code block would lose the explanation, silently:
-    # nothing downstream can tell speech from speech-that-was-cut. An inline run left behind
-    # here is not spoken anyway -- it pairs off as a code span below, or the final tick sweep
-    # takes it.
-    text = re.sub(r"(?ms)^[ ]{0,3}((`|~)\2{2,}).*?^[ ]{0,3}\1\2*[ \t]*$", " ", text)  # complete fenced blocks
-    text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)                      # unterminated trailing fence
-    text = _strip_links(text)                                                         # links/images -> label
+    # A block at the margin is read BEFORE any marker comes off, and the containers below are
+    # read after, because each pass is wrong in the other's absence. Taking markers off first
+    # alone exposed a block's own interior: a body line like "> ```" is code, but with the
+    # quote marker gone it reads as this block's closer, so the real closer became an opener
+    # and the rest of the reply was deleted as an unterminated block -- while the code it was
+    # supposed to hide got spoken. Removing the whole margin block first means its interior is
+    # never on the page for the container pass to misread.
+    text = _FENCED_BLOCK_RE.sub(" ", text)
+    # Only quotes and list items can hold a block. A heading cannot, and stripping "#" here
+    # would promote its content to a line start, inventing a fence out of a heading that merely
+    # names one; it comes off further down, once fences have been decided. Looped because
+    # re.sub does not rescan what it just exposed, so a single pass leaves the inner marker of
+    # "> > ```" in place and the fence unrecognised. Whitespace is [ \t] rather than \s: \s
+    # matches a newline, so a bare marker could swallow its line ending and glue the next line
+    # onto a marker line -- promoting an indented backtick run to a fence that was never there.
+    while True:
+        stripped = _CONTAINER_RE.sub("", text)
+        if stripped == text:
+            break
+        text = stripped
+    text = _FENCED_BLOCK_RE.sub(" ", text)                        # blocks that sat behind a container
+    text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)  # unterminated trailing fence
+    text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text)       # heading markers, once fences are settled
+    text = _strip_links(text)                                     # links/images -> label
     # A code span's content is literal: `__init__` is the identifier, not bold "init".
     # Emphasis therefore applies only between the spans, and the ticks come off after
     # it -- peeling them first would hand the emphasis rule an identifier it has no way
     # to tell from emphasis.
     spoken: list[str] = []
     pos = 0
-    for span in _CODE_SPAN_RE.finditer(text):
-        spoken.append(_strip_emphasis(text[pos:span.start()]))
-        spoken.append(span.group(2))
-        pos = span.end()
+    for start, end, contents in _iter_code_spans(text):
+        spoken.append(_strip_emphasis(text[pos:start]))
+        spoken.append(contents)
+        pos = end
     spoken.append(_strip_emphasis(text[pos:]))
     return "".join(spoken).replace("`", "")                   # unpaired inline code ticks
 

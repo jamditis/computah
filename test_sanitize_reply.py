@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pipeline
@@ -174,6 +175,49 @@ def test_code_span_content_is_literal() -> None:
         out = pipeline.sanitize_reply(reply)
         check(kept in out, f"code span stays literal: {reply!r} -> {out!r}")
         check("`" not in out, f"backticks still stripped: {out!r}")
+
+
+def test_a_long_tick_run_does_not_stall_the_loop() -> None:
+    """A run of ticks must cost time in its length, not in its length cubed.
+
+    The reply is model output and the loop is always listening, so a sanitizer that can be
+    made to think for 18 seconds is a sanitizer that can be made to stop answering. The
+    pattern this replaced tried every opener length against every closing position, which
+    measured 7.8x for each doubling; a run of one character was the whole exploit. The
+    budget is deliberately far above a linear scan of this input and far below the old
+    cost at this size, so it fails on a return to that shape rather than on a slow host.
+    """
+    reply = "Before. " + "`" * 8000 + " After."
+    start = time.perf_counter()
+    out = pipeline.sanitize_reply(reply)
+    elapsed = time.perf_counter() - start
+    check(elapsed < 1.0, f"8k ticks took {elapsed:.1f}s (was ~18s before)")
+    check("`" not in out, f"ticks still swept: {out!r}")
+
+
+def test_an_unpaired_run_opens_nothing_and_keeps_its_line() -> None:
+    """A tick run with no run of its own length is literal text, not an opener.
+
+    Reading it as an opener would delete the rest of the reply, which is the failure the
+    whole ordering above exists to prevent -- and speech that is silently cut is
+    indistinguishable downstream from speech that was never said.
+    """
+    for reply in ("Use ``` to open a block.", "A ` tick and text after it.",
+                  "Two `` ticks and more text."):
+        out = pipeline.sanitize_reply(reply)
+        check(out.rstrip(".").endswith(("block", "it", "text")), f"tail kept: {reply!r} -> {out!r}")
+
+
+def test_inner_ticks_belong_to_the_span_the_outer_run_opened() -> None:
+    """In "`a``b`" the single ticks pair, so the pair between them is content.
+
+    Markdown closes a run with the next run of its own length, so the inner "``" is not a
+    delimiter at all here. The old pattern closed the first tick at the nearest tick
+    instead, reading one span as two.
+    """
+    out = pipeline.sanitize_reply("Call `a``b` now.")
+    check("a" in out and "b" in out, f"span content spoken: {out!r}")
+    check("`" not in out, f"no ticks reach piper: {out!r}")
 
 
 def test_paired_dunder_speaks_as_its_content() -> None:
@@ -368,6 +412,50 @@ def test_fence_inside_a_container_is_still_a_block() -> None:
         check("That is it" in out, f"prose after a contained block survives: {out!r}")
 
 
+def test_a_blocks_own_interior_is_never_read_as_markup() -> None:
+    """A body line that looks like a marked-up fence is code, not this block's closer.
+
+    Taking markers off before reading blocks turned "> ```" inside a body into a closer: the
+    real closer then read as an opener, the rest of the reply went as an unterminated block,
+    and the code the block was hiding got spoken. Reading the margin block whole, first, is
+    what keeps its interior off the page.
+    """
+    out = pipeline.sanitize_reply("Before.\n```\n> ```\nsecret\n```\nAfter.")
+    check("secret" not in out, f"the block's contents are not spoken: {out!r}")
+    check("Before" in out and "After" in out, f"prose survives on both sides: {out!r}")
+
+
+def test_fence_inside_nested_containers_is_still_a_block() -> None:
+    """Containers nest, so stripping them once is not stripping them.
+
+    re.sub does not rescan what it exposed, so one pass over "> > ```" leaves a marker in
+    front of the fence and the block goes unrecognised -- then the code-span rule speaks it.
+    """
+    out = pipeline.sanitize_reply("Here:\n> > ```\n> > print('secret')\n> > ```\nAfter.")
+    check("secret" not in out, f"doubly-quoted fenced code is not spoken: {out!r}")
+    check("After" in out, f"prose after it survives: {out!r}")
+
+
+def test_a_heading_that_names_a_fence_opens_nothing() -> None:
+    """A heading is not a container: no block can sit inside one.
+
+    Stripping "#" before fences are settled promotes heading content to a line start, so a
+    heading that merely mentions ``` becomes an unterminated opener and eats the reply.
+    """
+    out = pipeline.sanitize_reply("# ```\nAll of this speech must survive.")
+    check("All of this speech must survive." in out, f"prose after the heading survives: {out!r}")
+
+
+def test_a_bare_marker_does_not_swallow_its_line_ending() -> None:
+    """Marker whitespace stays on the marker's line.
+
+    \\s matches a newline, so a bare marker could glue the next line onto its own -- promoting
+    an indented backtick run to a fence at a line start and deleting every word after it.
+    """
+    out = pipeline.sanitize_reply("- \n    ```\nAll of this speech must survive.")
+    check("All of this speech must survive." in out, f"prose survives a bare marker: {out!r}")
+
+
 def test_crlf_input_is_stripped_like_lf() -> None:
     """CRLF is normal input, not a reason to drop the rest of the reply.
 
@@ -405,6 +493,39 @@ def test_link_destination_nests_to_any_depth() -> None:
     check("x.test" not in out, f"no destination reaches the speaker: {out!r}")
 
 
+def test_a_closer_must_be_as_long_as_its_opener() -> None:
+    """A run shorter than the opener closes nothing, so what follows it is still code.
+
+    The opener must take its whole run rather than give a character back, or "~~~~" matches as
+    "~~~" and a later "~~~" closes a block markdown says is still open.
+    """
+    out = pipeline.sanitize_reply("Before.\n~~~~\nstill code\n~~~\nmore code\n~~~~\nAfter.")
+    check("still code" not in out and "more code" not in out,
+          f"nothing inside the block is spoken: {out!r}")
+    check("Before" in out and "After" in out, f"prose survives on both sides: {out!r}")
+
+
+def test_escaped_parens_in_a_destination_are_characters() -> None:
+    """A backslash-escaped paren is part of the URL, not a nesting level.
+
+    Counting it as structure runs the scan off the end of a link that balanced all along,
+    which then eats the rest of the reply as if the destination were truncated.
+    """
+    out = pipeline.sanitize_reply(r"See [docs](https://x.test/a\(b) and this tail.")
+    check("and this tail" in out, f"the tail after an escaped paren survives: {out!r}")
+    check("x.test" not in out, f"no destination reaches the speaker: {out!r}")
+
+
+def test_an_unbalanced_head_that_was_never_a_link_keeps_the_tail() -> None:
+    """"](" is ordinary text in a code span, and links are read before the ticks are.
+
+    A destination cannot hold unescaped whitespace, which bounds how much an unbalanced "("
+    may take. Consuming to the end instead deleted the rest of the reply.
+    """
+    out = pipeline.sanitize_reply("Use `[x](ordinary prose` and keep this tail.")
+    check("keep this tail" in out, f"the tail survives a head that was not a link: {out!r}")
+
+
 def test_truncated_link_destination_is_not_spoken() -> None:
     """A destination cut off mid-flight takes the tail with it rather than being read out.
 
@@ -427,6 +548,9 @@ def main() -> int:
     test_markdown_edge_cases()
     test_unpaired_emphasis_runs_are_literal()
     test_code_span_content_is_literal()
+    test_a_long_tick_run_does_not_stall_the_loop()
+    test_an_unpaired_run_opens_nothing_and_keeps_its_line()
+    test_inner_ticks_belong_to_the_span_the_outer_run_opened()
     test_paired_dunder_speaks_as_its_content()
     test_nested_emphasis_fully_stripped()
     test_ansi_csi_takes_all_parameter_bytes()
@@ -434,6 +558,13 @@ def main() -> int:
     test_inline_fence_mention_is_not_a_block()
     test_keycap_emoji_fully_stripped()
     test_link_destination_with_parens_consumed_whole()
+    test_a_blocks_own_interior_is_never_read_as_markup()
+    test_fence_inside_nested_containers_is_still_a_block()
+    test_a_heading_that_names_a_fence_opens_nothing()
+    test_a_bare_marker_does_not_swallow_its_line_ending()
+    test_a_closer_must_be_as_long_as_its_opener()
+    test_escaped_parens_in_a_destination_are_characters()
+    test_an_unbalanced_head_that_was_never_a_link_keeps_the_tail()
     test_fence_inside_a_container_is_still_a_block()
     test_crlf_input_is_stripped_like_lf()
     test_closing_fence_may_be_longer_than_its_opener()
