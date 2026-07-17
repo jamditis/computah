@@ -176,6 +176,27 @@ def test_code_span_content_is_literal() -> None:
         check("`" not in out, f"backticks still stripped: {out!r}")
 
 
+def test_paired_dunder_speaks_as_its_content() -> None:
+    """A bare "__init__" speaks as "init", because that is what the grammar makes it.
+
+    Nothing separates "__init__" from "__bold__": each is one paired "__" run hugging
+    content, and CommonMark renders both as strong emphasis. So the delimiters cannot
+    be kept around the identifier without also reading them aloud around real bold
+    text, and speech loses nothing by dropping them -- an underscore is not
+    pronounced. A reply that needs the identifier verbatim asks with a code span
+    (test_code_span_content_is_literal), which is the only thing that distinguishes
+    the two cases. Both are pinned here together because they are one decision:
+    whatever keeps the underscores on "__init__" puts them on "__bold__" too.
+    """
+    for reply, spoken in (("__init__", "init"),
+                          ("The __init__ method runs first.",
+                           "The init method runs first."),
+                          ("__bold__", "bold"),
+                          ("__really important__", "really important")):
+        out = pipeline.sanitize_reply(reply)
+        check(out == spoken, f"paired dunder speaks as its content: {reply!r} -> {out!r}")
+
+
 def test_nested_emphasis_fully_stripped() -> None:
     """Emphasis inside emphasis leaves no delimiter behind for TTS to read."""
     out = pipeline.sanitize_reply("This is **bold with *italic* inside** it.")
@@ -271,6 +292,7 @@ def main() -> int:
     test_markdown_edge_cases()
     test_unpaired_emphasis_runs_are_literal()
     test_code_span_content_is_literal()
+    test_paired_dunder_speaks_as_its_content()
     test_nested_emphasis_fully_stripped()
     test_ansi_csi_takes_all_parameter_bytes()
     test_tilde_fenced_code_is_dropped()
