@@ -799,7 +799,7 @@ _EMOJI_RE = re.compile(
 )
 
 
-_LINK_HEAD_RE = re.compile(r"!?\[([^\]]*)\]\(")
+_LINK_OPEN_RE = re.compile(r"!?\[")
 _WHITESPACE_RE = re.compile(r"\s")
 # Quote and list markers, the two containers a fenced block can sit inside. Headings are not
 # containers and are handled separately, after fences.
@@ -932,16 +932,66 @@ def _strip_links(text: str) -> str:
     rest of the text with it, which is the call the unterminated-fence rule already makes:
     the reply was cut mid-link, and what follows an unclosed "(" is the URL.
     """
+    closes = _label_ends(text)
     out: list[str] = []
     pos = 0
     while True:
-        head = _LINK_HEAD_RE.search(text, pos)
+        head = _LINK_OPEN_RE.search(text, pos)
         if head is None:
             out.append(text[pos:])
             return "".join(out)
+        label_end = closes.get(head.end() - 1, -1)
+        if label_end < 0 or not text.startswith("(", label_end + 1):
+            # A "[" that opens no link is ordinary text ("[1]", a stray bracket). Emit it
+            # and resume just past it: the next "[" on the line may still open a real link,
+            # and treating this one as a failed head would hide it.
+            out.append(text[pos:head.end()])
+            pos = head.end()
+            continue
         out.append(text[pos:head.start()])
-        out.append(head.group(1))
-        pos = _end_of_destination(text, head.end())
+        out.append(text[head.end():label_end])
+        pos = _end_of_destination(text, label_end + 2)
+
+
+def _label_ends(text: str) -> dict[int, int]:
+    """Map each "[" to the "]" that closes it, for the whole text in one pass.
+
+    A label may hold brackets of its own -- "[the [docs]](url)" is one link whose label
+    markdown reads as "the [docs]". Reading a label as "everything up to the first ]" stops
+    at the inner bracket, finds no "(" after it, and does not see the link at all, so the
+    whole URL is spoken: a worse failure than the stray punctuation the destination counting
+    already exists to avoid.
+
+    Pairing with a stack, once, is what keeps that from costing a rescan per bracket.
+    Counting forward from each "[" instead re-walks the tail for every bracket that nothing
+    closes -- "["*8000 + "](url)" took 5.2s that way, the same stall the tick and container
+    rules each call out, and the reply is model output arriving at a loop that is always
+    listening.
+
+    A backslash escape reads differently on each bracket, because the two choices that miss
+    a link are not the same choice. CommonMark says "\\[" opens nothing, but every link this
+    pass fails to see is a destination spoken in full, so an escaped "[" is still a head
+    worth reading -- an escape is the reply's own markup, not a request to hear a URL. An
+    escaped "]" is skipped for the same reason from the other side: it does not close the
+    label, so "[a\\]b](url)" pairs at the real "]" and speaks its label instead of its URL.
+    Both rules err toward finding the link, which is the only direction that is quiet.
+    """
+    closes: dict[int, int] = {}
+    opens: list[int] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            if text[i + 1] == "[":
+                opens.append(i + 1)
+            i += 2
+            continue
+        if c == "[":
+            opens.append(i)
+        elif c == "]" and opens:
+            closes[opens.pop()] = i
+        i += 1
+    return closes
 
 
 def _end_of_destination(text: str, start: int) -> int:
@@ -968,8 +1018,7 @@ def _end_of_destination(text: str, start: int) -> int:
     # Never balanced, so this was not a whole link. A destination cannot hold unescaped
     # whitespace, which bounds how much of the tail an unbalanced "(" may take: enough to
     # swallow a URL the reply was cut off mid-way through, and no further. Consuming to the end
-    # instead deleted the rest of a reply whenever a "](" was never a link at all -- inside a
-    # code span, say, where this pass runs before the ticks are read.
+    # instead deleted the rest of a reply whenever a "](" was never a link at all.
     ws = _WHITESPACE_RE.search(text, start)
     return ws.start() if ws else len(text)
 
@@ -1000,18 +1049,17 @@ def _strip_markdown(text: str) -> str:
     text = _FENCED_BLOCK_RE.sub(" ", text)                        # blocks that sat behind a container
     text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)  # unterminated trailing fence
     text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text)       # heading markers, once fences are settled
-    text = _strip_links(text)                                     # links/images -> label
-    # A code span's content is literal: `__init__` is the identifier, not bold "init".
-    # Emphasis therefore applies only between the spans, and the ticks come off after
-    # it -- peeling them first would hand the emphasis rule an identifier it has no way
-    # to tell from emphasis.
+    # A code span's content is literal: `__init__` is the identifier, not bold "init", and
+    # `[label](url)` is the syntax being described, not a link to follow. Both rules
+    # therefore apply only BETWEEN the spans, and the ticks come off after them -- peeling
+    # them first would hand each rule content it has no way to tell from markup.
     spoken: list[str] = []
     pos = 0
     for start, end, contents in _iter_code_spans(text):
-        spoken.append(_strip_emphasis(text[pos:start]))
+        spoken.append(_strip_emphasis(_strip_links(text[pos:start])))
         spoken.append(contents)
         pos = end
-    spoken.append(_strip_emphasis(text[pos:]))
+    spoken.append(_strip_emphasis(_strip_links(text[pos:])))
     return "".join(spoken).replace("`", "")                   # unpaired inline code ticks
 
 

@@ -588,6 +588,75 @@ def test_truncated_link_destination_is_not_spoken() -> None:
     check("See docs" in out, f"the label still survives: {out!r}")
 
 
+def test_a_label_that_holds_brackets_is_still_a_link() -> None:
+    """A label may hold brackets, and missing the link speaks the URL aloud.
+
+    "[the [docs]](url)" is one link whose label happens to contain a bracket pair.
+    A head pattern that reads a label as "no ] until the ]" cannot see it, and a
+    link the pass does not see is not a stray character -- it is a whole URL read
+    out, which is the failure the destination counting already exists to avoid.
+    """
+    spoken = pipeline.sanitize_reply("See [the [docs]](https://example.com/x) now.")
+    check("https" not in spoken, f"url not spoken: {spoken!r}")
+    check(spoken == "See the [docs] now.", f"label survives: {spoken!r}")
+    # An image whose alt text carries brackets is the same shape.
+    spoken = pipeline.sanitize_reply("![a [red] car](https://example.com/c.png)")
+    check(spoken == "a [red] car", f"image alt survives: {spoken!r}")
+
+
+def test_link_syntax_in_a_code_span_is_literal() -> None:
+    """A code span holds link syntax the same way it holds __init__: literally.
+
+    Asking how to write a markdown link is a reasonable thing to ask a voice
+    assistant, and an answer that silently deletes the syntax it is describing
+    answers a different question.
+    """
+    spoken = pipeline.sanitize_reply("Use `[label](url)` in markdown.")
+    check(spoken == "Use [label](url) in markdown.", f"span is literal: {spoken!r}")
+    spoken = pipeline.sanitize_reply("The syntax is `![alt](src)` for images.")
+    check(spoken == "The syntax is ![alt](src) for images.", f"image span: {spoken!r}")
+    # The span is protected, but a real link outside one is still reduced.
+    spoken = pipeline.sanitize_reply("Write `[x](y)` to link [docs](https://example.com).")
+    check(spoken == "Write [x](y) to link docs.", f"both at once: {spoken!r}")
+
+
+def test_an_escaped_bracket_still_hides_its_destination() -> None:
+    """An escape is the reply's own markup, never a request to hear a URL.
+
+    A renderer reads "\\[" as "this opens nothing". Doing that here means the link is not
+    seen, and a link that is not seen is a destination read out in full -- so an escaped
+    "[" still opens a head, and an escaped "]" still does not close one. Both rules err
+    toward finding the link, because that is the only direction that stays quiet.
+    """
+    spoken = pipeline.sanitize_reply(r"See \[docs](https://example.com/x) now.")
+    check("https" not in spoken, f"escaped head hides its url: {spoken!r}")
+    check("docs" in spoken, f"escaped head keeps its label: {spoken!r}")
+    # From the other side: the escaped "]" is not the label's end, so the link still pairs.
+    spoken = pipeline.sanitize_reply(r"[a\]b](https://example.com)")
+    check("https" not in spoken, f"escaped ] does not end the label: {spoken!r}")
+
+
+def test_a_wall_of_brackets_does_not_stall_the_loop() -> None:
+    """Pairing brackets must cost a pass, not a pass per bracket.
+
+    Counting forward from each "[" re-walks the tail for every bracket nothing closes, which
+    is the tick rule's mistake in another alphabet: "["*8000 + "](url)" measured 5.2s that
+    way on this Pi, and the reply is model output arriving at a loop that is always
+    listening. Pairing with one stack pass is what removes the curve. The budget is far
+    above a linear scan of this input and far below the cost of a rescan per bracket, so it
+    fails on a return to that shape rather than on a slow host.
+    """
+    for name, reply in (("nothing closes them", "[" * 8000 + " hello"),
+                        ("one closer at the end", "[" * 8000 + "](url) hello")):
+        start = time.perf_counter()
+        pipeline.sanitize_reply(reply)
+        elapsed = time.perf_counter() - start
+        check(elapsed < 1.0, f"8k brackets, {name}: {elapsed:.2f}s")
+    # The pairing is there to find a link, so prove it still does under the same shape.
+    check(pipeline.sanitize_reply("[" * 20 + "x" + "]" * 20 + " hi") == "[" * 20 + "x" + "]" * 20 + " hi",
+          "unbalanced brackets stay literal")
+
+
 def main() -> int:
     test_empty_and_whitespace()
     test_oversized_is_capped()
@@ -623,6 +692,10 @@ def main() -> int:
     test_closing_fence_may_be_longer_than_its_opener()
     test_link_destination_nests_to_any_depth()
     test_truncated_link_destination_is_not_spoken()
+    test_a_label_that_holds_brackets_is_still_a_link()
+    test_link_syntax_in_a_code_span_is_literal()
+    test_an_escaped_bracket_still_hides_its_destination()
+    test_a_wall_of_brackets_does_not_stall_the_loop()
     test_truncated_csi_is_dropped()
     test_emoji_stripped()
     test_clean_text_unchanged()
