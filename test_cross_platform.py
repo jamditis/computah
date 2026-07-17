@@ -46,6 +46,7 @@ import pipeline
 # narrow on purpose: a real defect in audio.py (e.g. a SyntaxError) still propagates.
 try:
     import audio
+
     _AUDIO_IMPORT_ERROR: Exception | None = None
 except (ImportError, OSError) as e:
     audio = None  # type: ignore[assignment]
@@ -71,6 +72,7 @@ def skip(name: str, reason: str) -> None:
 
 class _FakeCompleted:
     """Stand-in for subprocess.CompletedProcess so _brain_cli sees a clean exit."""
+
     returncode = 0
     stdout = "ok"
     stderr = ""
@@ -93,12 +95,16 @@ def test_brain_cli_tempdir() -> None:
         pipeline.subprocess.run = real_run
 
     cwd = captured.get("cwd")
-    check("brain cli runs in this OS's temp dir",
-          cwd == tempfile.gettempdir(),
-          f"cwd={cwd!r} expected={tempfile.gettempdir()!r}")
-    check("brain cli temp dir actually exists",
-          bool(cwd) and os.path.isdir(str(cwd)),
-          f"isdir({cwd!r})={bool(cwd) and os.path.isdir(str(cwd))}")
+    check(
+        "brain cli runs in this OS's temp dir",
+        cwd == tempfile.gettempdir(),
+        f"cwd={cwd!r} expected={tempfile.gettempdir()!r}",
+    )
+    check(
+        "brain cli temp dir actually exists",
+        bool(cwd) and os.path.isdir(str(cwd)),
+        f"isdir({cwd!r})={bool(cwd) and os.path.isdir(str(cwd))}",
+    )
 
 
 def test_claude_bin_fallback() -> None:
@@ -112,13 +118,19 @@ def test_claude_bin_fallback() -> None:
 
     if os.name == "posix":
         expected = str(Path.home() / ".local/bin/claude")
-        check("claude fallback is the POSIX per-user path on POSIX",
-              resolved == expected, f"{resolved!r} (expected {expected!r})")
+        check(
+            "claude fallback is the POSIX per-user path on POSIX",
+            resolved == expected,
+            f"{resolved!r} (expected {expected!r})",
+        )
     else:
         # On Windows a POSIX path is meaningless; defer to the bare name so the
         # OS resolver (or the graceful FileNotFoundError path) handles absence.
-        check("claude fallback is not a POSIX-style path on Windows",
-              "/" not in resolved and "\\" not in resolved, f"{resolved!r}")
+        check(
+            "claude fallback is not a POSIX-style path on Windows",
+            "/" not in resolved and "\\" not in resolved,
+            f"{resolved!r}",
+        )
 
 
 def test_flush_drops_subframe_remainder() -> None:
@@ -127,9 +139,11 @@ def test_flush_drops_subframe_remainder() -> None:
     pre-pause samples that flush() (queue-only) could not reach. Device-free: feed
     blocks straight into the queue; never open a real stream."""
     if audio is None:
-        skip("Microphone.flush() drops the sub-frame remainder",
-             f"PortAudio backend unavailable "
-             f"({type(_AUDIO_IMPORT_ERROR).__name__}: {_AUDIO_IMPORT_ERROR})")
+        skip(
+            "Microphone.flush() drops the sub-frame remainder",
+            f"PortAudio backend unavailable "
+            f"({type(_AUDIO_IMPORT_ERROR).__name__}: {_AUDIO_IMPORT_ERROR})",
+        )
         return
     fs = audio.FRAME_SIZE
     mic = audio.Microphone(queue_timeout_s=0.05)
@@ -141,15 +155,21 @@ def test_flush_drops_subframe_remainder() -> None:
     mic._q.put(np.full((fs + 500, 1), 1000, dtype=np.int16))
     f1 = next(gen)
     check("frames() yields a full frame", f1.shape == (fs,), f"shape={f1.shape}")
-    check("a sub-frame remainder is buffered on the instance, not a local",
-          mic._buf.size > 0, f"buf={mic._buf.size} samples")
+    check(
+        "a sub-frame remainder is buffered on the instance, not a local",
+        mic._buf.size > 0,
+        f"buf={mic._buf.size} samples",
+    )
 
     # flush() must clear the queued blocks AND the buffered remainder.
     mic._q.put(np.zeros((fs, 1), dtype=np.int16))
     mic.flush()
     check("flush drops queued callback blocks", mic._q.empty(), "queue empty")
-    check("flush drops the buffered sub-frame remainder", mic._buf.size == 0,
-          f"buf={mic._buf.size}")
+    check(
+        "flush drops the buffered sub-frame remainder",
+        mic._buf.size == 0,
+        f"buf={mic._buf.size}",
+    )
 
     # The next frame must be built only from post-flush audio (the half-duplex
     # guarantee): no stale prefix from before the flush.
@@ -157,20 +177,26 @@ def test_flush_drops_subframe_remainder() -> None:
     mic._q.put(fresh)
     f2 = next(gen)
     expected = audio._to_int16(audio._to_mono_float(fresh, 1))
-    check("the post-flush frame is fresh audio, not the stale remainder",
-          np.array_equal(f2, expected) and not np.array_equal(f2, f1),
-          f"f2[0]={int(f2[0])} fresh~={int(expected[0])} stale={int(f1[0])}")
+    check(
+        "the post-flush frame is fresh audio, not the stale remainder",
+        np.array_equal(f2, expected) and not np.array_equal(f2, f1),
+        f"f2[0]={int(f2[0])} fresh~={int(expected[0])} stale={int(f1[0])}",
+    )
 
 
 def main() -> int:
     print("=== cross-platform pipeline checks ===")
-    for test in (test_brain_cli_tempdir, test_claude_bin_fallback,
-                 test_flush_drops_subframe_remainder):
+    for test in (
+        test_brain_cli_tempdir,
+        test_claude_bin_fallback,
+        test_flush_drops_subframe_remainder,
+    ):
         try:
             test()
         except Exception as e:  # noqa: BLE001 - report, don't abort the suite
-            check(f"{test.__name__} ran without error", False,
-                  f"{type(e).__name__}: {e}")
+            check(
+                f"{test.__name__} ran without error", False, f"{type(e).__name__}: {e}"
+            )
     n_pass = sum(1 for r in results if r)
     skip_note = f", {len(skipped)} skipped" if skipped else ""
     print(f"\n=== SUMMARY: {n_pass}/{len(results)} checks passed{skip_note} ===")

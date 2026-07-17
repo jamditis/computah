@@ -59,7 +59,7 @@ _DELIVERY_RE = re.compile(
 # turn's correlation id (#19); a transport that can carry it stamps it into the inbound
 # event so the reply can echo it, others accept and ignore it (positional fallback).
 SendFn = Callable[..., None]
-ReplyReader = Callable[[], str]       # () -> full reply-file text ("" if absent)
+ReplyReader = Callable[[], str]  # () -> full reply-file text ("" if absent)
 
 
 def _delivery_blocks(reply_text: str) -> list[tuple[str, str | None, str]]:
@@ -75,7 +75,7 @@ def _delivery_blocks(reply_text: str) -> list[tuple[str, str | None, str]]:
     blocks: list[tuple[str, str | None, str]] = []
     for i, m in enumerate(matches):
         end = matches[i + 1].start() if i + 1 < len(matches) else len(reply_text)
-        blocks.append((m.group(1), m.group(2), reply_text[m.end():end].strip("\n")))
+        blocks.append((m.group(1), m.group(2), reply_text[m.end() : end].strip("\n")))
     return blocks
 
 
@@ -194,8 +194,9 @@ def brain_via_bridge(
 # --------------------------------------------------------------------------- #
 # Concrete transports
 # --------------------------------------------------------------------------- #
-def _send_argv(bot_spren_bin: str, working_dir: str | None,
-               persona: str, prompt: str) -> list[str]:
+def _send_argv(
+    bot_spren_bin: str, working_dir: str | None, persona: str, prompt: str
+) -> list[str]:
     """Build the `bot-spren send` argv, inserting -d when a working dir is set.
 
     bot-spren resolves the persona's inbox from its working directory (--working-dir,
@@ -212,8 +213,9 @@ def _send_argv(bot_spren_bin: str, working_dir: str | None,
     return argv
 
 
-def cli_send(bot_spren_bin: str = "bot-spren",
-             working_dir: str | None = None) -> SendFn:
+def cli_send(
+    bot_spren_bin: str = "bot-spren", working_dir: str | None = None
+) -> SendFn:
     """Send via the local bot-spren CLI (persona on this host).
 
     event_id is accepted for the SendFn contract but not yet forwarded: bot-spren has
@@ -221,14 +223,22 @@ def cli_send(bot_spren_bin: str = "bot-spren",
     is a separate, held step. Until it lands these sends are unstamped and the bridge
     matches them positionally.
     """
+
     def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
-        subprocess.run(_send_argv(bot_spren_bin, working_dir, persona, prompt),
-                       capture_output=True, text=True, timeout=30, check=True)
+        subprocess.run(
+            _send_argv(bot_spren_bin, working_dir, persona, prompt),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+
     return _send
 
 
-def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren",
-                 working_dir: str | None = None) -> SendFn:
+def ssh_cli_send(
+    host: str, bot_spren_bin: str = "bot-spren", working_dir: str | None = None
+) -> SendFn:
     """Send via bot-spren on a remote host over ssh.
 
     ssh does not preserve argv boundaries past the host: everything after it is
@@ -237,6 +247,7 @@ def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren",
     untrusted (transcribed speech), so this prevents both word-splitting and
     shell-metacharacter execution on the brain host.
     """
+
     def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
         # event_id accepted but not forwarded yet — see cli_send. The held #19 producer
         # step adds the remote --event-id flow plus the FileOutbound stamp.
@@ -244,8 +255,12 @@ def ssh_cli_send(host: str, bot_spren_bin: str = "bot-spren",
         remote = " ".join(shlex.quote(p) for p in argv)
         subprocess.run(
             ["ssh", "-o", "ConnectTimeout=15", host, remote],
-            capture_output=True, text=True, timeout=40, check=True,
+            capture_output=True,
+            text=True,
+            timeout=40,
+            check=True,
         )
+
     return _send
 
 
@@ -257,11 +272,13 @@ def file_reply_reader(reply_path: str | Path) -> ReplyReader:
     falls through to its own spoken timeout rather than crashing the voice loop.
     """
     reply_path = Path(reply_path)
+
     def _read() -> str:
         try:
             return reply_path.read_text(encoding="utf-8")
         except OSError:
             return ""
+
     return _read
 
 
@@ -272,15 +289,26 @@ def ssh_reply_reader(host: str, reply_path: str) -> ReplyReader:
     timeout, non-zero exit, transport error) returns "" so the poll keeps trying
     and a bad host degrades to a spoken timeout instead of an exception.
     """
+
     def _read() -> str:
         try:
             proc = subprocess.run(
-                ["ssh", "-o", "ConnectTimeout=15", host, "cat", shlex.quote(reply_path)],
-                capture_output=True, text=True, timeout=40,
+                [
+                    "ssh",
+                    "-o",
+                    "ConnectTimeout=15",
+                    host,
+                    "cat",
+                    shlex.quote(reply_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=40,
             )
         except (subprocess.TimeoutExpired, OSError):
             return ""
         return proc.stdout if proc.returncode == 0 else ""
+
     return _read
 
 
@@ -294,13 +322,17 @@ def local_sim_send(inbox_path: str | Path) -> SendFn:
     sim_persona watcher, with no bot-spren CLI and no persona deployed.
     """
     inbox_path = Path(inbox_path)
+
     def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
         inbox_path.parent.mkdir(parents=True, exist_ok=True)
         entry = {
-            "type": "manual", "source": "cli", "payload": prompt,
+            "type": "manual",
+            "source": "cli",
+            "payload": prompt,
             "event_id": event_id or str(uuid.uuid4()),
             "sent_at": datetime.now(timezone.utc).isoformat(),
         }
         with inbox_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
+
     return _send

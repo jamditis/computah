@@ -45,6 +45,7 @@ class Activation(NamedTuple):
     first frame that crosses the evaluated threshold; None means latency was not
     measured, and the sweep then judges the activation on peak alone.
     """
+
     peak: float
     latency_s: float | None = None
 
@@ -56,12 +57,14 @@ class NonWakeClip(NamedTuple):
     without stopping at the first fire, so any threshold can be applied afterward).
     seconds is the clip's real duration, the denominator for the per-hour rate.
     """
+
     frame_scores: Sequence[float]
     seconds: float
 
 
 class ThresholdRow(NamedTuple):
     """The measured behavior at one threshold."""
+
     threshold: float
     activations: int
     false_rejects: int
@@ -73,14 +76,16 @@ class ThresholdRow(NamedTuple):
 
 class Recommendation(NamedTuple):
     """The chosen default threshold, the row it came from, and why."""
+
     threshold: float
     row: ThresholdRow
     meets_budget: bool
     reason: str
 
 
-def threshold_grid(start: float = 0.1, stop: float = 0.9,
-                   step: float = 0.05) -> list[float]:
+def threshold_grid(
+    start: float = 0.1, stop: float = 0.9, step: float = 0.05
+) -> list[float]:
     """Inclusive threshold sweep [start, stop] in `step` increments.
 
     Rounded to 4 decimals so floating-point accumulation does not leave a value
@@ -101,8 +106,9 @@ def threshold_grid(start: float = 0.1, stop: float = 0.9,
     return [round(start + i * step, 4) for i in range(n + 1)]
 
 
-def _activation_accepted(a: Activation, threshold: float,
-                         latency_tolerance_s: float | None) -> bool:
+def _activation_accepted(
+    a: Activation, threshold: float, latency_tolerance_s: float | None
+) -> bool:
     """True when this activation fires within the peak and (optional) latency budget.
 
     Peak below threshold is always a miss. When a latency tolerance is set AND this
@@ -118,8 +124,9 @@ def _activation_accepted(a: Activation, threshold: float,
     return True
 
 
-def count_false_accepts(frame_scores: Sequence[float], threshold: float,
-                        refractory_frames: int) -> int:
+def count_false_accepts(
+    frame_scores: Sequence[float], threshold: float, refractory_frames: int
+) -> int:
     """Count refractory-gapped threshold crossings in one non-wake clip.
 
     A live detector that fires does not immediately re-arm on the same noise, so a
@@ -135,10 +142,15 @@ def count_false_accepts(frame_scores: Sequence[float], threshold: float,
     return fires
 
 
-def sweep(positives: Sequence[Activation], nonwake: Sequence[NonWakeClip],
-          thresholds: Sequence[float], *, refractory_s: float = 1.0,
-          frame_hop_s: float = DEFAULT_FRAME_HOP_S,
-          latency_tolerance_s: float | None = None) -> list[ThresholdRow]:
+def sweep(
+    positives: Sequence[Activation],
+    nonwake: Sequence[NonWakeClip],
+    thresholds: Sequence[float],
+    *,
+    refractory_s: float = 1.0,
+    frame_hop_s: float = DEFAULT_FRAME_HOP_S,
+    latency_tolerance_s: float | None = None,
+) -> list[ThresholdRow]:
     """Measure false-reject and false-accept behavior at each threshold.
 
     Scores are computed once by the caller; this only compares them against each
@@ -156,30 +168,35 @@ def sweep(positives: Sequence[Activation], nonwake: Sequence[NonWakeClip],
 
     rows: list[ThresholdRow] = []
     for t in sorted(thresholds):
-        fr = sum(1 for a in positives
-                 if not _activation_accepted(a, t, latency_tolerance_s))
-        fa = sum(count_false_accepts(c.frame_scores, t, refractory_frames)
-                 for c in nonwake)
+        fr = sum(
+            1 for a in positives if not _activation_accepted(a, t, latency_tolerance_s)
+        )
+        fa = sum(
+            count_false_accepts(c.frame_scores, t, refractory_frames) for c in nonwake
+        )
         # With no non-wake audio the rate is undefined: report inf if anything
         # fired (so it never looks safe) and 0.0 only when nothing did.
         if total_hours > 0:
             fa_per_hour = fa / total_hours
         else:
             fa_per_hour = inf if fa else 0.0
-        rows.append(ThresholdRow(
-            threshold=t,
-            activations=n_act,
-            false_rejects=fr,
-            false_rejects_per_activation=(fr / n_act if n_act else 0.0),
-            false_accepts=fa,
-            nonwake_hours=total_hours,
-            false_accepts_per_hour=fa_per_hour,
-        ))
+        rows.append(
+            ThresholdRow(
+                threshold=t,
+                activations=n_act,
+                false_rejects=fr,
+                false_rejects_per_activation=(fr / n_act if n_act else 0.0),
+                false_accepts=fa,
+                nonwake_hours=total_hours,
+                false_accepts_per_hour=fa_per_hour,
+            )
+        )
     return rows
 
 
-def recommend(rows: Sequence[ThresholdRow], *,
-              max_false_accepts_per_hour: float) -> Recommendation:
+def recommend(
+    rows: Sequence[ThresholdRow], *, max_false_accepts_per_hour: float
+) -> Recommendation:
     """Pick the lowest false-reject threshold within the false-accept budget.
 
     Among thresholds whose false-accept rate is within budget, choose the smallest
@@ -190,20 +207,29 @@ def recommend(rows: Sequence[ThresholdRow], *,
     """
     if not rows:
         raise ValueError("no rows to recommend from")
-    within = [r for r in rows
-              if r.false_accepts_per_hour <= max_false_accepts_per_hour]
+    within = [r for r in rows if r.false_accepts_per_hour <= max_false_accepts_per_hour]
     if within:
-        best = min(within,
-                   key=lambda r: (r.false_rejects_per_activation, r.threshold))
+        best = min(within, key=lambda r: (r.false_rejects_per_activation, r.threshold))
         return Recommendation(
-            best.threshold, best, True,
+            best.threshold,
+            best,
+            True,
             f"lowest false-reject threshold within "
-            f"{max_false_accepts_per_hour:g} false accepts/hour")
-    fallback = min(rows, key=lambda r: (r.false_accepts_per_hour,
-                                        r.false_rejects_per_activation,
-                                        r.threshold))
+            f"{max_false_accepts_per_hour:g} false accepts/hour",
+        )
+    fallback = min(
+        rows,
+        key=lambda r: (
+            r.false_accepts_per_hour,
+            r.false_rejects_per_activation,
+            r.threshold,
+        ),
+    )
     return Recommendation(
-        fallback.threshold, fallback, False,
+        fallback.threshold,
+        fallback,
+        False,
         f"no threshold met the {max_false_accepts_per_hour:g}/hour budget; "
         f"this is the lowest achievable false-accept rate "
-        f"({fallback.false_accepts_per_hour:g}/hour)")
+        f"({fallback.false_accepts_per_hour:g}/hour)",
+    )

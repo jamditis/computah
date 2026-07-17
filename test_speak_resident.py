@@ -158,7 +158,11 @@ def test_falls_back_to_cli_when_inprocess_fails() -> None:
         len(fell_back) == 1,
         f"fallback calls={len(fell_back)}",
     )
-    check("fallback produced the output wav", Path(out).exists(), f"exists={Path(out).exists()}")
+    check(
+        "fallback produced the output wav",
+        Path(out).exists(),
+        f"exists={Path(out).exists()}",
+    )
 
 
 def test_evicts_and_falls_back_when_synth_fails() -> None:
@@ -222,7 +226,9 @@ def test_evicts_and_falls_back_when_synth_fails() -> None:
         len(calls) == 1,
         f"load calls={len(calls)}",
     )
-    check("synth failure after load does not crash speak()", err is None, f"err={err!r}")
+    check(
+        "synth failure after load does not crash speak()", err is None, f"err={err!r}"
+    )
     check(
         "the failed voice entry was evicted from the cache",
         cached_after is False,
@@ -233,7 +239,11 @@ def test_evicts_and_falls_back_when_synth_fails() -> None:
         len(fell_back) == 1,
         f"fallback calls={len(fell_back)}",
     )
-    check("fallback produced the output wav", Path(out).exists(), f"exists={Path(out).exists()}")
+    check(
+        "fallback produced the output wav",
+        Path(out).exists(),
+        f"exists={Path(out).exists()}",
+    )
 
 
 def main() -> int:
@@ -247,7 +257,9 @@ def main() -> int:
         try:
             test()
         except Exception as e:  # noqa: BLE001 - report, don't abort the suite
-            check(f"{test.__name__} ran without error", False, f"{type(e).__name__}: {e}")
+            check(
+                f"{test.__name__} ran without error", False, f"{type(e).__name__}: {e}"
+            )
     n_pass = sum(1 for r in results if r)
     print(f"\n=== SUMMARY: {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

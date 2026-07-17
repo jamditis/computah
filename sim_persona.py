@@ -37,8 +37,9 @@ def canned_reply(text: str) -> str:
     return f"You said: {text.strip()}"
 
 
-def file_outbound_append(reply_path: Path, payload: str, delivery_id: str,
-                         event_id: str | None = None) -> None:
+def file_outbound_append(
+    reply_path: Path, payload: str, delivery_id: str, event_id: str | None = None
+) -> None:
     """Append one block in FileOutbound's exact on-disk format. When event_id is
     given, stamp it into the header so the bridge can match the reply to its request
     by identity (#19) — models the future stamped producer."""
@@ -81,7 +82,7 @@ class SimPersona:
         data = self.inbox.read_bytes()
         if len(data) <= self._offset:
             return
-        new = data[self._offset:]
+        new = data[self._offset :]
         nl = new.rfind(b"\n")
         if nl == -1:
             return  # only a partial line so far
@@ -98,12 +99,14 @@ class SimPersona:
             # Strip the optional "system\n\nUser: <text>" wrapper to get the words.
             text = payload.split("User: ", 1)[-1] if "User: " in payload else payload
             eid = entry.get("event_id") if self.echo_event_id else None
-            file_outbound_append(self.reply, self.reply_fn(text),
-                                 str(uuid.uuid4()), event_id=eid)
+            file_outbound_append(
+                self.reply, self.reply_fn(text), str(uuid.uuid4()), event_id=eid
+            )
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True,
-                                        name="sim-persona")
+        self._thread = threading.Thread(
+            target=self._run, daemon=True, name="sim-persona"
+        )
         self._thread.start()
 
     def _run(self) -> None:

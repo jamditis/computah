@@ -30,7 +30,7 @@ SR = 16000  # 16 kHz mono int16, matching the pipeline's audio format.
 # Cue design. Each note is (frequency Hz, duration ms, amplitude 0..1). The notes
 # rise in pitch. Amplitude is modest so the cue is a soft prompt, not a jolt.
 _NOTES: tuple[tuple[float, float, float], ...] = (
-    (880.0, 90.0, 0.25),    # A5
+    (880.0, 90.0, 0.25),  # A5
     (1318.0, 110.0, 0.25),  # E6 -- a rising perfect fifth, the classic "ready" cue
 )
 _FADE_MS = 10.0  # raised-cosine fade in/out per tone; long enough to kill clicks

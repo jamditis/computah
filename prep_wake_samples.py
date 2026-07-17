@@ -50,9 +50,19 @@ def _ffmpeg_decode(path: Path) -> tuple[np.ndarray, int]:
         )
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
         subprocess.run(
-            ["ffmpeg", "-y", "-i", str(path), "-ac", "1", "-ar", str(TARGET_SR),
-             tmp.name],
-            capture_output=True, check=True,
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(path),
+                "-ac",
+                "1",
+                "-ar",
+                str(TARGET_SR),
+                tmp.name,
+            ],
+            capture_output=True,
+            check=True,
         )
         audio, sr = sf.read(tmp.name, dtype="float32", always_2d=False)
     return audio, sr
@@ -85,7 +95,9 @@ def _write_clip(out_dir: Path, stem: str, idx: int, audio: np.ndarray) -> Path:
 # --------------------------------------------------------------------------- #
 # Silence-based segmentation
 # --------------------------------------------------------------------------- #
-def _frame_rms(audio: np.ndarray, frame: int, hop: int) -> tuple[np.ndarray, np.ndarray]:
+def _frame_rms(
+    audio: np.ndarray, frame: int, hop: int
+) -> tuple[np.ndarray, np.ndarray]:
     """RMS per frame, plus the sample index each frame starts at.
 
     Uses a prefix sum of squares so the whole file is one vectorized pass.
@@ -112,8 +124,8 @@ def segment_on_silence(
     to each recording's level. Regions closer together than min_gap_s are merged;
     regions outside [min_dur_s, max_dur_s] are dropped (reported as too short/long).
     """
-    frame = int(0.02 * TARGET_SR)   # 20 ms
-    hop = int(0.01 * TARGET_SR)     # 10 ms
+    frame = int(0.02 * TARGET_SR)  # 20 ms
+    hop = int(0.01 * TARGET_SR)  # 10 ms
     rms, starts = _frame_rms(audio, frame, hop)
     if rms.size == 0:
         return [], {"kept": 0, "too_short": 0, "too_long": 0}
@@ -179,8 +191,9 @@ def _inputs(paths: list[Path]) -> list[Path]:
     out: list[Path] = []
     for path in paths:
         if path.is_dir():
-            out.extend(sorted(p for p in path.iterdir()
-                              if p.suffix.lower() in AUDIO_EXTS))
+            out.extend(
+                sorted(p for p in path.iterdir() if p.suffix.lower() in AUDIO_EXTS)
+            )
         else:
             out.append(path)
     seen: set[Path] = set()
@@ -193,8 +206,14 @@ def _inputs(paths: list[Path]) -> list[Path]:
     return uniq
 
 
-def process(inputs: list[Path], out_dir: Path, label: str,
-            min_gap_s: float, min_dur_s: float, max_dur_s: float) -> int:
+def process(
+    inputs: list[Path],
+    out_dir: Path,
+    label: str,
+    min_gap_s: float,
+    min_dur_s: float,
+    max_dur_s: float,
+) -> int:
     """Process every input file; return the total clip count written."""
     files = _inputs(inputs)
     if not files:
@@ -227,8 +246,10 @@ def process(inputs: list[Path], out_dir: Path, label: str,
     print(f"\nwrote {total} {label} clip(s) to {out_dir}")
     if all_durs:
         a = np.array(all_durs)
-        print(f"clip duration s: min {a.min():.2f}, mean {a.mean():.2f}, "
-              f"max {a.max():.2f}")
+        print(
+            f"clip duration s: min {a.min():.2f}, mean {a.mean():.2f}, "
+            f"max {a.max():.2f}"
+        )
         if a.mean() > 1.5:
             print("note: clips run long for a single word — check the silence gaps")
     return total
@@ -236,21 +257,41 @@ def process(inputs: list[Path], out_dir: Path, label: str,
 
 def main() -> int:
     p = argparse.ArgumentParser(description="prep wake-word recordings for training")
-    p.add_argument("--input", required=True, nargs="+",
-                   help="audio file(s), a shell glob, or a folder of them")
+    p.add_argument(
+        "--input",
+        required=True,
+        nargs="+",
+        help="audio file(s), a shell glob, or a folder of them",
+    )
     p.add_argument("--output", required=True, help="output directory for clips")
-    p.add_argument("--label", choices=("positive", "negative", "background"),
-                   default="positive", help="how to treat the input")
-    p.add_argument("--min-gap", type=float, default=0.3,
-                   help="silence (s) that separates utterances")
-    p.add_argument("--min-dur", type=float, default=0.2,
-                   help="drop segments shorter than this (s)")
-    p.add_argument("--max-dur", type=float, default=3.0,
-                   help="drop segments longer than this (s)")
+    p.add_argument(
+        "--label",
+        choices=("positive", "negative", "background"),
+        default="positive",
+        help="how to treat the input",
+    )
+    p.add_argument(
+        "--min-gap",
+        type=float,
+        default=0.3,
+        help="silence (s) that separates utterances",
+    )
+    p.add_argument(
+        "--min-dur", type=float, default=0.2, help="drop segments shorter than this (s)"
+    )
+    p.add_argument(
+        "--max-dur", type=float, default=3.0, help="drop segments longer than this (s)"
+    )
     args = p.parse_args()
 
-    total = process([Path(p) for p in args.input], Path(args.output), args.label,
-                    args.min_gap, args.min_dur, args.max_dur)
+    total = process(
+        [Path(p) for p in args.input],
+        Path(args.output),
+        args.label,
+        args.min_gap,
+        args.min_dur,
+        args.max_dur,
+    )
     return 0 if total > 0 else 1
 
 

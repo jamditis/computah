@@ -30,7 +30,6 @@ import argparse
 import queue
 import sys
 from math import gcd
-from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -91,7 +90,8 @@ def find_device(name, kind: str) -> tuple[int, dict, str]:
             best = (rank, i, d, host)
     if best is None:
         raise RuntimeError(
-            f"no {kind} device matching {subs}. run `python audio.py --list`")
+            f"no {kind} device matching {subs}. run `python audio.py --list`"
+        )
     return best[1], best[2], best[3]
 
 
@@ -129,8 +129,13 @@ class Microphone:
     raw devices have no echo cancellation, so don't capture and play at once).
     """
 
-    def __init__(self, name=None, frame_size: int = FRAME_SIZE,
-                 target_sr: int = TARGET_SR, queue_timeout_s: float = 0.5):
+    def __init__(
+        self,
+        name=None,
+        frame_size: int = FRAME_SIZE,
+        target_sr: int = TARGET_SR,
+        queue_timeout_s: float = 0.5,
+    ):
         self.name = name
         self.frame_size = frame_size
         self.target_sr = target_sr
@@ -165,8 +170,14 @@ class Microphone:
         for sr, ch, ex in attempts:
             try:
                 stream = sd.InputStream(
-                    device=idx, samplerate=sr, channels=ch, dtype="int16",
-                    blocksize=0, callback=self._callback, extra_settings=ex)
+                    device=idx,
+                    samplerate=sr,
+                    channels=ch,
+                    dtype="int16",
+                    blocksize=0,
+                    callback=self._callback,
+                    extra_settings=ex,
+                )
                 return stream, sr, ch
             except Exception as e:  # noqa: BLE001 - try the next fallback config
                 last = e
@@ -243,10 +254,12 @@ class Microphone:
             mono = _to_mono_float(block, self._open_ch)
             if need_resample:
                 mono = resample_poly(mono, up, down)
-            self._buf = mono if self._buf.size == 0 else np.concatenate([self._buf, mono])
+            self._buf = (
+                mono if self._buf.size == 0 else np.concatenate([self._buf, mono])
+            )
             while self._buf.size >= self.frame_size:
-                yield _to_int16(self._buf[:self.frame_size])
-                self._buf = self._buf[self.frame_size:]
+                yield _to_int16(self._buf[: self.frame_size])
+                self._buf = self._buf[self.frame_size :]
 
 
 def play_wav(path, name=None) -> None:
@@ -275,8 +288,10 @@ def list_devices() -> None:
         if d["max_output_channels"] > 0:
             io.append(f"OUT x{d['max_output_channels']}")
         host = sd.query_hostapis(d["hostapi"])["name"]
-        print(f"[{i:2d}] {d['name'][:44]:44s} {','.join(io):10s} "
-              f"{host:18s} @{int(d['default_samplerate'])}")
+        print(
+            f"[{i:2d}] {d['name'][:44]:44s} {','.join(io):10s} "
+            f"{host:18s} @{int(d['default_samplerate'])}"
+        )
 
 
 def _test_mic(name: str, seconds: float) -> int:
@@ -289,11 +304,13 @@ def _test_mic(name: str, seconds: float) -> int:
     n_samples = 0
     target = int(seconds * TARGET_SR / FRAME_SIZE)
     with Microphone(subs) as mic:
-        print(f"device: {mic.device_label}  open_sr={mic._open_sr} "
-              f"open_ch={mic._open_ch}")
+        print(
+            f"device: {mic.device_label}  open_sr={mic._open_sr} open_ch={mic._open_ch}"
+        )
         for frame in mic.frames():
-            assert frame.dtype == np.int16 and frame.shape == (FRAME_SIZE,), \
+            assert frame.dtype == np.int16 and frame.shape == (FRAME_SIZE,), (
                 f"bad frame: dtype={frame.dtype} shape={frame.shape}"
+            )
             n_frames += 1
             peak = max(peak, int(np.max(np.abs(frame))))
             sumsq += float(np.sum(frame.astype(np.float32) ** 2))
@@ -301,8 +318,10 @@ def _test_mic(name: str, seconds: float) -> int:
             if n_frames >= target:
                 break
     rms = (sumsq / n_samples) ** 0.5 if n_samples else 0.0
-    print(f"captured {n_frames} frames ({n_frames * FRAME_SIZE / TARGET_SR:.1f}s "
-          f"at {TARGET_SR} Hz)  RMS={rms:.1f}  peak={peak}")
+    print(
+        f"captured {n_frames} frames ({n_frames * FRAME_SIZE / TARGET_SR:.1f}s "
+        f"at {TARGET_SR} Hz)  RMS={rms:.1f}  peak={peak}"
+    )
     if peak == 0:
         print("RESULT: dead stream (only zeros) - check the mic's source")
         return 2
@@ -313,13 +332,23 @@ def _test_mic(name: str, seconds: float) -> int:
 def _cli() -> int:
     p = argparse.ArgumentParser(description="computah live audio I/O")
     p.add_argument("--list", action="store_true", help="list audio devices")
-    p.add_argument("--test-mic", metavar="NAME", nargs="?", const="",
-                   help="capture from a mic (name substring; empty = default)")
+    p.add_argument(
+        "--test-mic",
+        metavar="NAME",
+        nargs="?",
+        const="",
+        help="capture from a mic (name substring; empty = default)",
+    )
     p.add_argument("--play", metavar="WAV", help="play a WAV through an output device")
-    p.add_argument("--out", metavar="NAME", default=None,
-                   help="output device name substring for --play")
-    p.add_argument("--seconds", type=float, default=3.0,
-                   help="capture duration for --test-mic")
+    p.add_argument(
+        "--out",
+        metavar="NAME",
+        default=None,
+        help="output device name substring for --play",
+    )
+    p.add_argument(
+        "--seconds", type=float, default=3.0, help="capture duration for --test-mic"
+    )
     args = p.parse_args()
 
     if args.list:

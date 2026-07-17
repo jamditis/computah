@@ -43,15 +43,23 @@ class _FakeMic:
         self.flushed += 1
 
 
-GUARD_ON = {"stt_confidence_guard": True,
-            "stt_min_avg_logprob": -1.0, "stt_max_no_speech_prob": 0.6,
-            "capture_vad_threshold": 0.5,
-            "endpoint_silence_ms": 800, "max_request_ms": 8000}
+GUARD_ON = {
+    "stt_confidence_guard": True,
+    "stt_min_avg_logprob": -1.0,
+    "stt_max_no_speech_prob": 0.6,
+    "capture_vad_threshold": 0.5,
+    "endpoint_silence_ms": 800,
+    "max_request_ms": 8000,
+}
 GUARD_OFF = dict(GUARD_ON, stt_confidence_guard=False)
 
 
-def drive(cfg: dict, transcript: Transcript, output_device=None,
-          play_error: Exception | None = None) -> dict:
+def drive(
+    cfg: dict,
+    transcript: Transcript,
+    output_device=None,
+    play_error: Exception | None = None,
+) -> dict:
     """Run one live_driver turn with wake/capture/transcribe/brain/playback stubbed.
 
     Returns what was spoken, whether the brain was called and with what, the
@@ -60,15 +68,26 @@ def drive(cfg: dict, transcript: Transcript, output_device=None,
     simulate a dead output device (a raising _play_wav) and check the turn degrades
     instead of crashing.
     """
-    state: dict = {"spoken": None, "brain_called": False, "brain_arg": None,
-                   "played": [], "events": []}
+    state: dict = {
+        "spoken": None,
+        "brain_called": False,
+        "brain_arg": None,
+        "played": [],
+        "events": [],
+    }
 
-    real = (live_driver.listen_for_wake, pipeline.capture_request,
-            pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-            live_driver._play_wav)
+    real = (
+        live_driver.listen_for_wake,
+        pipeline.capture_request,
+        pipeline.transcribe_detailed,
+        pipeline.brain,
+        pipeline.speak,
+        live_driver._play_wav,
+    )
     live_driver.listen_for_wake = lambda fr, m, t, d, preroll=None: 0.9
-    pipeline.capture_request = (
-        lambda fr, preroll=None, vad_threshold=None, **_: np.full(8 * FRAME_SIZE, 4000, dtype=np.int16))
+    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None, **_: (
+        np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
+    )
     pipeline.transcribe_detailed = lambda p: transcript
 
     def fake_brain(text, **_):
@@ -94,11 +113,17 @@ def drive(cfg: dict, transcript: Transcript, output_device=None,
     live_driver._play_wav = fake_play
     try:
         state["ran"] = live_driver.run_turn(
-            iter([]), _FakeMic(), object(), 0.5, "/dev/null", output_device, cfg, False)
+            iter([]), _FakeMic(), object(), 0.5, "/dev/null", output_device, cfg, False
+        )
     finally:
-        (live_driver.listen_for_wake, pipeline.capture_request,
-         pipeline.transcribe_detailed, pipeline.brain, pipeline.speak,
-         live_driver._play_wav) = real
+        (
+            live_driver.listen_for_wake,
+            pipeline.capture_request,
+            pipeline.transcribe_detailed,
+            pipeline.brain,
+            pipeline.speak,
+            live_driver._play_wav,
+        ) = real
     return state
 
 
@@ -119,11 +144,16 @@ def test_stdin_mic() -> None:
         gen = live_driver.StdinMic(r).frames()
         os.write(w, _frame_bytes(111) + _frame_bytes(222))
         f1, f2 = next(gen), next(gen)
-        check("frames() yields written frames in order at full width",
-              f1.shape == (FRAME_SIZE,) and int(f1[0]) == 111 and int(f2[0]) == 222,
-              f"f1[0]={int(f1[0])} f2[0]={int(f2[0])} shape={f1.shape}")
-        check("yielded frames are writable (the wake model needs a writable array)",
-              f1.flags.writeable, f"writeable={f1.flags.writeable}")
+        check(
+            "frames() yields written frames in order at full width",
+            f1.shape == (FRAME_SIZE,) and int(f1[0]) == 111 and int(f2[0]) == 222,
+            f"f1[0]={int(f1[0])} f2[0]={int(f2[0])} shape={f1.shape}",
+        )
+        check(
+            "yielded frames are writable (the wake model needs a writable array)",
+            f1.flags.writeable,
+            f"writeable={f1.flags.writeable}",
+        )
     finally:
         os.close(r)
         os.close(w)
@@ -134,15 +164,17 @@ def test_stdin_mic() -> None:
     try:
         mic = live_driver.StdinMic(r)
         gen = mic.frames()
-        os.write(w, _frame_bytes(1000))            # one frame consumed during detection
+        os.write(w, _frame_bytes(1000))  # one frame consumed during detection
         next(gen)
         os.write(w, _frame_bytes(1000) + _frame_bytes(1000))  # cue bleed now buffered
-        mic.flush()                                # flush-to-now drops the backlog
-        os.write(w, _frame_bytes(5000))            # the command, spoken after the cue
+        mic.flush()  # flush-to-now drops the backlog
+        os.write(w, _frame_bytes(5000))  # the command, spoken after the cue
         nxt = next(gen)
-        check("flush-to-now drops the buffered backlog (next frame is post-flush only)",
-              int(nxt[0]) == 5000,
-              f"want 5000 (fresh); got {int(nxt[0])} (1000 == stale bleed leaked through)")
+        check(
+            "flush-to-now drops the buffered backlog (next frame is post-flush only)",
+            int(nxt[0]) == 5000,
+            f"want 5000 (fresh); got {int(nxt[0])} (1000 == stale bleed leaked through)",
+        )
     finally:
         os.close(r)
         os.close(w)
@@ -155,8 +187,11 @@ def test_stdin_mic() -> None:
         mic.flush()  # empty pipe
         os.write(w, _frame_bytes(7))
         nxt = next(mic.frames())
-        check("flush-to-now returns at once on an empty pipe and keeps later audio",
-              int(nxt[0]) == 7, f"got {int(nxt[0])}")
+        check(
+            "flush-to-now returns at once on an empty pipe and keeps later audio",
+            int(nxt[0]) == 7,
+            f"got {int(nxt[0])}",
+        )
     finally:
         os.close(r)
         os.close(w)
@@ -168,9 +203,11 @@ def test_stdin_mic() -> None:
         mic = live_driver.StdinMic(r)
         mic._buf = b"\x01\x02\x03\x04"  # a partial-frame remainder
         mic.flush()
-        check("flush() clears the sub-frame remainder and restores blocking mode",
-              mic._buf == b"" and os.get_blocking(r) is True,
-              f"buf={mic._buf!r} blocking={os.get_blocking(r)}")
+        check(
+            "flush() clears the sub-frame remainder and restores blocking mode",
+            mic._buf == b"" and os.get_blocking(r) is True,
+            f"buf={mic._buf!r} blocking={os.get_blocking(r)}",
+        )
     finally:
         os.close(r)
         os.close(w)
@@ -182,8 +219,11 @@ def test_stdin_mic() -> None:
         os.write(w, _frame_bytes(9))
         os.close(w)  # arecord exits
         got = list(mic.frames())
-        check("frames() ends at EOF (the writer closed)",
-              len(got) == 1 and int(got[0][0]) == 9, f"n={len(got)}")
+        check(
+            "frames() ends at EOF (the writer closed)",
+            len(got) == 1 and int(got[0][0]) == 9,
+            f"n={len(got)}",
+        )
     finally:
         os.close(r)
 
@@ -195,25 +235,34 @@ def main() -> int:
     # A low-confidence transcript on the hardware path must be re-prompted, not
     # dispatched: the brain is skipped and the re-prompt is spoken.
     s = drive(GUARD_ON, Transcript("delete everything", -3.0, 0.1))
-    check("low-confidence transcript skips the brain and speaks the re-prompt",
-          s["ran"] is True and not s["brain_called"]
-          and s["spoken"] == pipeline.STT_REPROMPT,
-          f"ran={s['ran']} brain_called={s['brain_called']} spoken={s['spoken']!r}")
+    check(
+        "low-confidence transcript skips the brain and speaks the re-prompt",
+        s["ran"] is True
+        and not s["brain_called"]
+        and s["spoken"] == pipeline.STT_REPROMPT,
+        f"ran={s['ran']} brain_called={s['brain_called']} spoken={s['spoken']!r}",
+    )
 
     # A confident transcript reaches the brain unchanged, and its reply is spoken.
     s = drive(GUARD_ON, Transcript("file an issue", -0.3, 0.05))
-    check("confident transcript reaches the brain and speaks its reply",
-          s["ran"] is True and s["brain_called"]
-          and s["brain_arg"] == "file an issue" and s["spoken"] == "Brain answer.",
-          f"brain_called={s['brain_called']} brain_arg={s['brain_arg']!r} "
-          f"spoken={s['spoken']!r}")
+    check(
+        "confident transcript reaches the brain and speaks its reply",
+        s["ran"] is True
+        and s["brain_called"]
+        and s["brain_arg"] == "file an issue"
+        and s["spoken"] == "Brain answer.",
+        f"brain_called={s['brain_called']} brain_arg={s['brain_arg']!r} "
+        f"spoken={s['spoken']!r}",
+    )
 
     # With the guard disabled, even a low-confidence transcript dispatches (the knob
     # is honored on the hardware path too).
     s = drive(GUARD_OFF, Transcript("delete everything", -3.0, 0.99))
-    check("guard disabled: a low-confidence transcript still dispatches",
-          s["ran"] is True and s["brain_called"] and s["spoken"] == "Brain answer.",
-          f"brain_called={s['brain_called']} spoken={s['spoken']!r}")
+    check(
+        "guard disabled: a low-confidence transcript still dispatches",
+        s["ran"] is True and s["brain_called"] and s["spoken"] == "Brain answer.",
+        f"brain_called={s['brain_called']} spoken={s['spoken']!r}",
+    )
 
     print("\n=== live_driver.run_turn: the reply is played back (issue #11) ===")
 
@@ -222,12 +271,17 @@ def main() -> int:
     # feeds the reply WAV to the player on the configured output device -- so a refactor
     # that drops the playback call, or misroutes the device, fails here instead of
     # silently going mute.
-    s = drive(GUARD_ON, Transcript("file an issue", -0.3, 0.05),
-              output_device="plughw:CARD=PowerConf,DEV=0")
-    check("the spoken reply WAV is played on the configured output device, after speak()",
-          s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")]
-          and s["events"] == ["speak", "play"],
-          f"played={s['played']} events={s['events']}")
+    s = drive(
+        GUARD_ON,
+        Transcript("file an issue", -0.3, 0.05),
+        output_device="plughw:CARD=PowerConf,DEV=0",
+    )
+    check(
+        "the spoken reply WAV is played on the configured output device, after speak()",
+        s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")]
+        and s["events"] == ["speak", "play"],
+        f"played={s['played']} events={s['events']}",
+    )
 
     # The re-prompt is a reply too: a guard-rejected turn must also PLAY what speak()
     # produced, or the user is re-prompted silently and never knows to try again. Both
@@ -235,23 +289,34 @@ def main() -> int:
     # so pin the rejected path on its own -- a refactor that moves _play_wav into the
     # brain/success branch would leave STT_REPROMPT spoken but unplayed, and only this
     # check would fail.
-    s = drive(GUARD_ON, Transcript("delete everything", -3.0, 0.1),
-              output_device="plughw:CARD=PowerConf,DEV=0")
-    check("a guard-rejected turn plays the re-prompt WAV on the configured device",
-          not s["brain_called"] and s["spoken"] == pipeline.STT_REPROMPT
-          and s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")]
-          and s["events"] == ["speak", "play"],
-          f"brain_called={s['brain_called']} spoken={s['spoken']!r} "
-          f"played={s['played']} events={s['events']}")
+    s = drive(
+        GUARD_ON,
+        Transcript("delete everything", -3.0, 0.1),
+        output_device="plughw:CARD=PowerConf,DEV=0",
+    )
+    check(
+        "a guard-rejected turn plays the re-prompt WAV on the configured device",
+        not s["brain_called"]
+        and s["spoken"] == pipeline.STT_REPROMPT
+        and s["played"] == [("/dev/null", "plughw:CARD=PowerConf,DEV=0")]
+        and s["events"] == ["speak", "play"],
+        f"brain_called={s['brain_called']} spoken={s['spoken']!r} "
+        f"played={s['played']} events={s['events']}",
+    )
 
     # A dead or busy output device must degrade to a logged error, never crash: one
     # failed aplay cannot take down the always-on loop (live_driver.run_turn wraps the
     # playback in try/except). The turn still completes and the reply was still spoken.
-    s = drive(GUARD_ON, Transcript("file an issue", -0.3, 0.05),
-              play_error=RuntimeError("aplay: no such device"))
-    check("a playback failure degrades gracefully (the turn still completes)",
-          s["ran"] is True and s["spoken"] == "Brain answer." and len(s["played"]) == 1,
-          f"ran={s['ran']} spoken={s['spoken']!r} played={s['played']}")
+    s = drive(
+        GUARD_ON,
+        Transcript("file an issue", -0.3, 0.05),
+        play_error=RuntimeError("aplay: no such device"),
+    )
+    check(
+        "a playback failure degrades gracefully (the turn still completes)",
+        s["ran"] is True and s["spoken"] == "Brain answer." and len(s["played"]) == 1,
+        f"ran={s['ran']} spoken={s['spoken']!r} played={s['played']}",
+    )
 
     n_pass = sum(1 for r in results if r[0] == PASS)
     n_total = len(results)

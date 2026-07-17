@@ -45,12 +45,14 @@ def validate(cfg: dict) -> tuple[dict, str]:
 
 # --- unit-interval floats ---------------------------------------------------- #
 
+
 def test_wake_threshold_out_of_range() -> None:
     for bad in (1.5, -0.1, 2, "high", True):
         cfg, err = validate({"wake_threshold": bad})
         check(
             f"wake_threshold {bad!r} -> default",
-            cfg["wake_threshold"] == DEFAULTS["wake_threshold"] and "wake_threshold" in err,
+            cfg["wake_threshold"] == DEFAULTS["wake_threshold"]
+            and "wake_threshold" in err,
             f"got {cfg['wake_threshold']!r}, stderr names key: {'wake_threshold' in err}",
         )
 
@@ -94,6 +96,7 @@ def test_stt_max_no_speech_prob_sibling() -> None:
 
 # --- positive-int timeouts --------------------------------------------------- #
 
+
 def test_timeout_bad_values() -> None:
     for bad in (0, -5, 1.5, True, "60"):
         cfg, err = validate({"claude_timeout_s": bad})
@@ -116,11 +119,13 @@ def test_timeout_valid_untouched() -> None:
 
 # --- whisper_compute enum ---------------------------------------------------- #
 
+
 def test_whisper_compute_unknown() -> None:
     cfg, err = validate({"whisper_compute": "int9"})
     check(
         "whisper_compute 'int9' -> default",
-        cfg["whisper_compute"] == DEFAULTS["whisper_compute"] and "whisper_compute" in err,
+        cfg["whisper_compute"] == DEFAULTS["whisper_compute"]
+        and "whisper_compute" in err,
         f"got {cfg['whisper_compute']!r}",
     )
 
@@ -143,22 +148,32 @@ def test_whisper_compute_unsupported_backend_type_falls_back() -> None:
     # those, not just typos. Host-independent: skip a type this box happens to support.
     supported = pipeline._supported_whisper_compute_types()
     if not supported:
-        check("whisper_compute deferred when support is unknown", True,
-              "ctranslate2 unavailable; nothing to validate against")
+        check(
+            "whisper_compute deferred when support is unknown",
+            True,
+            "ctranslate2 unavailable; nothing to validate against",
+        )
         return
     unsupported = next(
-        (t for t in ("float16", "bfloat16", "int16", "int8_float16", "int8_bfloat16")
-         if t not in supported),
+        (
+            t
+            for t in ("float16", "bfloat16", "int16", "int8_float16", "int8_bfloat16")
+            if t not in supported
+        ),
         None,
     )
     if unsupported is None:
-        check("whisper_compute CPU-unsupported path", True,
-              "this backend supports all candidate types; skipped")
+        check(
+            "whisper_compute CPU-unsupported path",
+            True,
+            "this backend supports all candidate types; skipped",
+        )
         return
     cfg, err = validate({"whisper_compute": unsupported})
     check(
         f"CPU-unsupported whisper_compute {unsupported!r} -> default",
-        cfg["whisper_compute"] == DEFAULTS["whisper_compute"] and "whisper_compute" in err,
+        cfg["whisper_compute"] == DEFAULTS["whisper_compute"]
+        and "whisper_compute" in err,
         f"got {cfg['whisper_compute']!r}, stderr names key: {'whisper_compute' in err}",
     )
 
@@ -170,12 +185,14 @@ def test_whisper_compute_non_string_falls_back() -> None:
         cfg, err = validate({"whisper_compute": bad})
         check(
             f"whisper_compute {bad!r} -> default (non-string)",
-            cfg["whisper_compute"] == DEFAULTS["whisper_compute"] and "whisper_compute" in err,
+            cfg["whisper_compute"] == DEFAULTS["whisper_compute"]
+            and "whisper_compute" in err,
             f"got {cfg['whisper_compute']!r}",
         )
 
 
 # --- wake_word resolution ---------------------------------------------------- #
+
 
 def test_wake_word_unknown_falls_back(monkeypatch_lib) -> None:
     monkeypatch_lib({"hey_jarvis": "/x", "alexa": "/y"})
@@ -224,6 +241,7 @@ def test_wake_word_non_string_falls_back(monkeypatch_lib) -> None:
 
 # --- integration: load_config wires validation ------------------------------- #
 
+
 def test_load_config_integration(tmp_dir) -> None:
     bad = tmp_dir / "config.json"
     bad.write_text(json.dumps({"wake_threshold": 5, "claude_timeout_s": 0}))
@@ -241,7 +259,8 @@ def test_load_config_integration(tmp_dir) -> None:
         "load_config falls both bad keys back to defaults",
         cfg["wake_threshold"] == DEFAULTS["wake_threshold"]
         and cfg["claude_timeout_s"] == DEFAULTS["claude_timeout_s"]
-        and "wake_threshold" in err and "claude_timeout_s" in err,
+        and "wake_threshold" in err
+        and "claude_timeout_s" in err,
         f"wake_threshold={cfg['wake_threshold']!r}, claude_timeout_s={cfg['claude_timeout_s']!r}",
     )
 
@@ -253,6 +272,7 @@ def main() -> int:
         pipeline.available_wake_models = lambda: lib
 
     import tempfile
+
     try:
         test_wake_threshold_out_of_range()
         test_wake_threshold_valid_untouched()
