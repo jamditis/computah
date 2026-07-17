@@ -177,6 +177,22 @@ def test_code_span_content_is_literal() -> None:
         check("`" not in out, f"backticks still stripped: {out!r}")
 
 
+def test_a_quote_marker_without_a_space_still_holds_a_block() -> None:
+    """">" alone opens a quote, so ">```" is a fence inside one and its body is code.
+
+    A list marker needs its space to be a marker ("-foo" is a word), but a quote marker does
+    not. Sharing one whitespace rule between them left the ">" in place, so the fence never
+    reached a line start, the block was never recognised, and its body was spoken -- which is
+    the one thing this stage exists to stop.
+    """
+    for reply in ("Before.\n>```\nsecret\n>```\nAfter.",
+                  "Before.\n>>```\nsecret\n>>```\nAfter.",
+                  "Before.\n> ```\nsecret\n> ```\nAfter."):
+        out = pipeline.sanitize_reply(reply)
+        check("secret" not in out, f"block body not spoken: {reply!r} -> {out!r}")
+        check("After." in out, f"prose after the block survives: {out!r}")
+
+
 def test_a_long_tick_run_does_not_stall_the_loop() -> None:
     """A run of ticks must cost time in its length, not in its length cubed.
 
@@ -548,6 +564,7 @@ def main() -> int:
     test_markdown_edge_cases()
     test_unpaired_emphasis_runs_are_literal()
     test_code_span_content_is_literal()
+    test_a_quote_marker_without_a_space_still_holds_a_block()
     test_a_long_tick_run_does_not_stall_the_loop()
     test_an_unpaired_run_opens_nothing_and_keeps_its_line()
     test_inner_ticks_belong_to_the_span_the_outer_run_opened()

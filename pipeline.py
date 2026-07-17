@@ -803,7 +803,14 @@ _LINK_HEAD_RE = re.compile(r"!?\[([^\]]*)\]\(")
 _WHITESPACE_RE = re.compile(r"\s")
 # Quote and list markers, the two containers a fenced block can sit inside. Headings are not
 # containers and are handled separately, after fences.
-_CONTAINER_RE = re.compile(r"(?m)^[ \t]{0,3}(?:[-*+]|\d+[.)]|>)[ \t]+")
+#
+# A list marker needs a space to be a marker at all ("-foo" is a word), but a quote marker does
+# not: ">" alone opens a quote, so ">```" is a fenced block inside one. Requiring a space after
+# ">" left that marker in place, the fence never reached a line start, and the block's body was
+# spoken -- the exact failure the ordering above exists to prevent. So the two take separate
+# branches rather than sharing one whitespace rule. The space stays optional-but-single, which
+# is what markdown counts as the marker; any further indent belongs to the content.
+_CONTAINER_RE = re.compile(r"(?m)^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]?)")
 # A complete fenced block: an opener at a line start (up to 3 spaces, as markdown allows),
 # closed by a run of the SAME character at least as long. Either character opens a block, so a
 # stray "~~~" inside a backtick block cannot close it early.
