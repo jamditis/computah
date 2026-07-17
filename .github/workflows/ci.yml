@@ -1,0 +1,83 @@
+name: ci
+
+# Lint and the fast, no-model tests. Runs on pull requests and on pushes to
+# main. Tests that load a model binary are excluded by design: the Whisper,
+# Piper, and openWakeWord weights are gitignored, and loading them needs more
+# memory than a hosted runner has. Excluded for that reason: test_pipeline.py,
+# test_pipeline_bridge.py, test_stream_turn.py, and test_vad_gate.py (it loads
+# the Piper voice to build the reprompt).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A newer push to the same branch cancels an in-flight run for it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-fast-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      # soundfile loads libsndfile at import; the fast tests import it, so the
+      # system library has to be present even though no audio is played.
+      - name: Install libsndfile
+        run: sudo apt-get update && sudo apt-get install -y libsndfile1
+
+      # requirements-dev pulls in the full runtime stack. The fast tests load no
+      # model weights, but they still import pipeline (numpy, scipy, openWakeWord)
+      # and introspect ctranslate2 for supported compute types, so the stack must
+      # be installed even though the models themselves never load.
+      - name: Install dev dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Format check
+        run: ruff format --check .
+
+      # The fast tests are standalone scripts, not pytest modules (several define
+      # no test_ functions, so pytest would collect nothing and pass vacuously).
+      # Run each as a script; a non-zero exit fails the job. The loop runs the
+      # whole set regardless of individual failures so one run shows every failing
+      # test. test_cross_platform self-skips its audio check on a headless runner.
+      - name: Fast no-model tests
+        run: |
+          set +e
+          fail=0
+          for t in \
+            test_brain_bridge.py \
+            test_brain_dispatch.py \
+            test_chime.py \
+            test_config_validation.py \
+            test_confidence_guard.py \
+            test_cross_platform.py \
+            test_endpoint_config.py \
+            test_live_driver.py \
+            test_preroll.py \
+            test_prep_wake_samples.py \
+            test_run_loop_playback.py \
+            test_speak_resident.py \
+            test_warm_models.py \
+            test_wake_eval.py; do
+            echo "::group::$t"
+            python "$t"
+            [ $? -eq 0 ] || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail

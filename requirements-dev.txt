@@ -1,0 +1,6 @@
+# Development dependencies: the pinned runtime stack plus the linter/formatter.
+# CI installs this file so ruff and the fast, no-model tests run against the
+# same versions used locally. ruff is pinned because `ruff format` output can
+# change between releases, which would otherwise flip the format-check gate.
+-r requirements.txt
+ruff==0.15.12
