@@ -800,6 +800,7 @@ _EMOJI_RE = re.compile(
 
 
 _CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1", re.DOTALL)
+_LINK_HEAD_RE = re.compile(r"!?\[([^\]]*)\]\(")
 # Emphasis is a matched pair of identical delimiter runs hugging its content, which is
 # the only thing markdown reads as emphasis. An unpaired run is literal text, and a
 # reply about code is made of unpaired runs (*args, **kwargs, _private, VALUE_) whose
@@ -830,10 +831,55 @@ def _strip_emphasis(text: str) -> str:
         text = stripped
 
 
+def _strip_links(text: str) -> str:
+    """Reduce [label](dest) and ![alt](dest) to the label, at any nesting depth.
+
+    A destination may carry balanced parens ("/wiki/Foo_(bar)"), and stopping at the first
+    ")" leaves the outer one to be spoken as punctuation after the label. Counting them is
+    the part a pattern cannot do: every nesting depth a pattern spells out has a next one,
+    and a link the pattern misses entirely is a whole URL read aloud -- a worse failure than
+    the stray punctuation the nesting was added to fix. An unbalanced destination takes the
+    rest of the text with it, which is the call the unterminated-fence rule already makes:
+    the reply was cut mid-link, and what follows an unclosed "(" is the URL.
+    """
+    out: list[str] = []
+    pos = 0
+    while True:
+        head = _LINK_HEAD_RE.search(text, pos)
+        if head is None:
+            out.append(text[pos:])
+            return "".join(out)
+        out.append(text[pos:head.start()])
+        out.append(head.group(1))
+        depth = 1
+        i = head.end()
+        while i < len(text) and depth:
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+            i += 1
+        pos = i
+
+
 def _strip_markdown(text: str) -> str:
     """Reduce the markdown the VOICE_SYSTEM_PROMPT forbids to plain spoken text."""
-    # Either fence character opens a block, closed by a run of that same character, so
-    # a stray "~~~" inside a backtick block cannot close it early.
+    # Line endings first, so every line-anchored rule below can spell its line end "$" and
+    # mean it. A \r sits between a closing fence and its line end, which reads as "no closer"
+    # and hands the rest of the reply to the unterminated-fence rule.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # Markers come off before fences are read, because a fence keeps its block-ness inside a
+    # quote or a list item, where its opener sits behind the marker rather than at the margin.
+    # Reading fences first missed exactly those, and the miss did not stop at a leftover
+    # backtick: this rule then exposed the fence, and the code-span rule below read the tick
+    # run as a span and spoke the code inside it. Mangling the interior of a block on the way
+    # past costs nothing -- the block goes next.
+    text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)]|#{1,6}|>)\s+", "", text)  # list/heading/quote markers
+    # Either fence character opens a block, closed by a run of that same character, so a
+    # stray "~~~" inside a backtick block cannot close it early. Markdown lets a closer be
+    # longer than its opener, so the closer is the opener plus any more of that character;
+    # demanding an equal length reads a valid closer as prose, leaves the block unterminated,
+    # and drops every word after it.
     #
     # Anchored to a line start (up to 3 spaces, as markdown allows) because a fence is a
     # block construct, and matching one mid-line reads a reply that merely MENTIONS ``` as
@@ -842,13 +888,9 @@ def _strip_markdown(text: str) -> str:
     # nothing downstream can tell speech from speech-that-was-cut. An inline run left behind
     # here is not spoken anyway -- it pairs off as a code span below, or the final tick sweep
     # takes it.
-    text = re.sub(r"(?ms)^[ ]{0,3}(`{3,}|~{3,}).*?^[ ]{0,3}\1[ ]*$", " ", text)  # complete fenced blocks
-    text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)                 # unterminated trailing fence
-    # A destination may carry balanced parens ("/wiki/Foo_(bar)"), and stopping at the first
-    # ")" leaves the outer one to be spoken as punctuation after the label. One nesting level
-    # is what markdown links in prose actually use.
-    text = re.sub(r"!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)", r"\1", text)   # links/images -> label
-    text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)]|#{1,6}|>)\s+", "", text)  # list/heading/quote markers
+    text = re.sub(r"(?ms)^[ ]{0,3}((`|~)\2{2,}).*?^[ ]{0,3}\1\2*[ \t]*$", " ", text)  # complete fenced blocks
+    text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)                      # unterminated trailing fence
+    text = _strip_links(text)                                                         # links/images -> label
     # A code span's content is literal: `__init__` is the identifier, not bold "init".
     # Emphasis therefore applies only between the spans, and the ticks come off after
     # it -- peeling them first would hand the emphasis rule an identifier it has no way

@@ -350,6 +350,73 @@ def test_brain_routes_both_paths(d: Path) -> None:
          pipeline._brain_cli, pipeline._brain_bridge) = saved
 
 
+def test_fence_inside_a_container_is_still_a_block() -> None:
+    """A fence carries its block-ness into a quote or a list item.
+
+    Markers are decoration; a fence behind one opens a block exactly as it does at the
+    margin. Recognising fences before the markers came off missed these, and the miss was
+    not a leftover backtick: the marker rule then exposed the fence, and the code-span
+    rule read the tick run as a span and spoke its contents.
+    """
+    for reply in (
+        "Here:\n> ```\n> print('secret')\n> ```\nThat is it.",
+        "Here:\n- ```\n  print('secret')\n  ```\nThat is it.",
+        "Here:\n1. ```\n   print('secret')\n   ```\nThat is it.",
+    ):
+        out = pipeline.sanitize_reply(reply)
+        check("secret" not in out, f"contained fenced code is not spoken: {out!r}")
+        check("That is it" in out, f"prose after a contained block survives: {out!r}")
+
+
+def test_crlf_input_is_stripped_like_lf() -> None:
+    """CRLF is normal input, not a reason to drop the rest of the reply.
+
+    A trailing \\r sits between the closing fence and the line end, so a closer-anchored
+    rule does not see a closer; the unterminated-fence rule then eats every word after
+    the opener.
+    """
+    out = pipeline.sanitize_reply("Before.\r\n~~~\r\nsecret\r\n~~~\r\nAfter.")
+    check("secret" not in out, f"CRLF fenced code is not spoken: {out!r}")
+    check("Before" in out and "After" in out, f"CRLF prose survives on both sides: {out!r}")
+
+
+def test_closing_fence_may_be_longer_than_its_opener() -> None:
+    """Markdown closes a fence with a run at least as long as the opener.
+
+    Requiring an exact-length match reads a valid closer as ordinary text, leaving the
+    block unterminated -- and the unterminated rule deletes the rest of the reply.
+    """
+    out = pipeline.sanitize_reply("Before.\n~~~\nsecret\n~~~~\nAfter.")
+    check("secret" not in out, f"long-closer fenced code is not spoken: {out!r}")
+    check("Before" in out and "After" in out, f"prose survives a longer closer: {out!r}")
+
+
+def test_link_destination_nests_to_any_depth() -> None:
+    """A destination's parens nest arbitrarily, so counting beats a fixed pattern.
+
+    A pattern that spells out one level of nesting fails to match at two -- and a link
+    that does not match at all is a whole URL handed to the speaker, which is worse than
+    the stray punctuation the nesting rule was added to fix.
+    """
+    out = pipeline.sanitize_reply("See [docs](https://x.test/a(b(c))) now.")
+    check(out.strip() == "See docs now.", f"depth-2 destination consumed whole: {out!r}")
+    out = pipeline.sanitize_reply("See [docs](https://x.test/(((x)))) now.")
+    check(out.strip() == "See docs now.", f"depth-3 destination consumed whole: {out!r}")
+    check("x.test" not in out, f"no destination reaches the speaker: {out!r}")
+
+
+def test_truncated_link_destination_is_not_spoken() -> None:
+    """A destination cut off mid-flight takes the tail with it rather than being read out.
+
+    The reply was already truncated; what follows an unclosed "(" is the URL. Speaking it
+    is the failure this sanitizer exists to prevent, so an unbalanced destination consumes
+    to the end -- the same call the unterminated-fence rule makes.
+    """
+    out = pipeline.sanitize_reply("See [docs](https://x.test/(((x")
+    check("x.test" not in out, f"truncated destination is not spoken: {out!r}")
+    check("See docs" in out, f"the label still survives: {out!r}")
+
+
 def main() -> int:
     test_empty_and_whitespace()
     test_oversized_is_capped()
@@ -367,6 +434,11 @@ def main() -> int:
     test_inline_fence_mention_is_not_a_block()
     test_keycap_emoji_fully_stripped()
     test_link_destination_with_parens_consumed_whole()
+    test_fence_inside_a_container_is_still_a_block()
+    test_crlf_input_is_stripped_like_lf()
+    test_closing_fence_may_be_longer_than_its_opener()
+    test_link_destination_nests_to_any_depth()
+    test_truncated_link_destination_is_not_spoken()
     test_truncated_csi_is_dropped()
     test_emoji_stripped()
     test_clean_text_unchanged()
