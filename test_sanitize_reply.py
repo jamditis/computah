@@ -193,6 +193,22 @@ def test_a_quote_marker_without_a_space_still_holds_a_block() -> None:
         check("After." in out, f"prose after the block survives: {out!r}")
 
 
+def test_a_wall_of_quote_markers_does_not_stall_the_loop() -> None:
+    """Marker stripping must cost a pass, not a pass per marker.
+
+    Letting ">" stand alone as a marker made a line of nothing but ">" strippable one
+    character at a time, and the strip-until-stable loop rescanned the whole reply each
+    time: 8,000 of them took 0.29s and scaled as the square. Taking a line's whole marker
+    run in one match is what removes both the loop and the curve.
+    """
+    reply = ">" * 20000 + " hello"
+    start = time.perf_counter()
+    out = pipeline.sanitize_reply(reply)
+    elapsed = time.perf_counter() - start
+    check(elapsed < 1.0, f"20k quote markers took {elapsed:.2f}s")
+    check("hello" in out, f"the quoted text still speaks: {out!r}")
+
+
 def test_a_long_tick_run_does_not_stall_the_loop() -> None:
     """A run of ticks must cost time in its length, not in its length cubed.
 
@@ -583,6 +599,7 @@ def main() -> int:
     test_unpaired_emphasis_runs_are_literal()
     test_code_span_content_is_literal()
     test_a_quote_marker_without_a_space_still_holds_a_block()
+    test_a_wall_of_quote_markers_does_not_stall_the_loop()
     test_a_long_tick_run_does_not_stall_the_loop()
     test_many_unclosed_runs_do_not_stall_the_loop()
     test_an_unpaired_run_opens_nothing_and_keeps_its_line()

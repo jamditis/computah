@@ -810,7 +810,14 @@ _WHITESPACE_RE = re.compile(r"\s")
 # spoken -- the exact failure the ordering above exists to prevent. So the two take separate
 # branches rather than sharing one whitespace rule. The space stays optional-but-single, which
 # is what markdown counts as the marker; any further indent belongs to the content.
-_CONTAINER_RE = re.compile(r"(?m)^[ \t]{0,3}(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]?)")
+#
+# The trailing + takes a line's whole marker run in one match, which is what lets the caller do
+# a single pass. Stripping one marker per pass and re-running until the text stopped changing
+# read the same, and cost a pass per marker with a full rescan each time: ">"*8000 took 0.29s
+# and scaled as the square, so a reply that was nothing but quote markers could stall a loop
+# that is always listening. Each repetition consumes at least its marker character, so the run
+# cannot match empty and the + cannot spin.
+_CONTAINER_RE = re.compile(r"(?m)^(?:[ \t]{0,3}(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]?))+")
 # A complete fenced block: an opener at a line start (up to 3 spaces, as markdown allows),
 # closed by a run of the SAME character at least as long. Either character opens a block, so a
 # stray "~~~" inside a backtick block cannot close it early.
@@ -983,16 +990,13 @@ def _strip_markdown(text: str) -> str:
     text = _FENCED_BLOCK_RE.sub(" ", text)
     # Only quotes and list items can hold a block. A heading cannot, and stripping "#" here
     # would promote its content to a line start, inventing a fence out of a heading that merely
-    # names one; it comes off further down, once fences have been decided. Looped because
-    # re.sub does not rescan what it just exposed, so a single pass leaves the inner marker of
-    # "> > ```" in place and the fence unrecognised. Whitespace is [ \t] rather than \s: \s
-    # matches a newline, so a bare marker could swallow its line ending and glue the next line
-    # onto a marker line -- promoting an indented backtick run to a fence that was never there.
-    while True:
-        stripped = _CONTAINER_RE.sub("", text)
-        if stripped == text:
-            break
-        text = stripped
+    # names one; it comes off further down, once fences have been decided. One pass: the
+    # pattern takes a line's whole marker run, so the inner marker of "> > ```" comes off with
+    # the outer one and re.sub never needs to rescan what it exposed. Whitespace is [ \t]
+    # rather than \s: \s matches a newline, so a bare marker could swallow its line ending and
+    # glue the next line onto a marker line -- promoting an indented backtick run to a fence
+    # that was never there.
+    text = _CONTAINER_RE.sub("", text)
     text = _FENCED_BLOCK_RE.sub(" ", text)                        # blocks that sat behind a container
     text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)  # unterminated trailing fence
     text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text)       # heading markers, once fences are settled
