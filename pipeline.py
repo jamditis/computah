@@ -785,14 +785,17 @@ EMPTY_REPLY_FALLBACK = "Sorry, I don't have an answer for that."
 # before the final byte, so a colon-separated true-colour SGR ("\x1b[38:2::255:0:0m")
 # is one sequence, and a narrower pattern leaves its parameters to be spoken.
 _ANSI_ESCAPE_RE = re.compile(
-    r"\x1b(?:\[[0-?]*[ -/]*[@-~]"        # CSI (colour, cursor moves)
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]?"       # CSI (colour, cursor moves), terminated or not
     r"|\][^\x07\x1b]*(?:\x07|\x1b\\)?"   # OSC (window title), terminated or not
     r"|[@-Z\\-_])"                       # two-character escapes
 )
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+# U+20E3 is the enclosing keycap: "1" + U+FE0F + U+20E3 is one glyph, so taking only the
+# variation selector leaves the digit still wearing a combining mark, which is the emoji
+# this class promises never reaches Piper. U+FE0E is its text-presentation twin.
 _EMOJI_RE = re.compile(
     "[\U0001f000-\U0001faff\U00002600-\U000027bf\U00002b00-\U00002bff"
-    "\U00002190-\U000021ff\ufe0f\u200d]"
+    "\U00002190-\U000021ff\ufe0e\ufe0f\u20e3\u200d]"
 )
 
 
@@ -831,9 +834,20 @@ def _strip_markdown(text: str) -> str:
     """Reduce the markdown the VOICE_SYSTEM_PROMPT forbids to plain spoken text."""
     # Either fence character opens a block, closed by a run of that same character, so
     # a stray "~~~" inside a backtick block cannot close it early.
-    text = re.sub(r"(`{3,}|~{3,}).*?\1", " ", text, flags=re.DOTALL)  # complete fenced blocks
-    text = re.sub(r"(?:`{3,}|~{3,}).*", " ", text, flags=re.DOTALL)   # unterminated trailing fence
-    text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)    # links/images -> label
+    #
+    # Anchored to a line start (up to 3 spaces, as markdown allows) because a fence is a
+    # block construct, and matching one mid-line reads a reply that merely MENTIONS ``` as
+    # opening a block -- whereupon the trailing-fence rule below drops every word after it.
+    # An answer explaining how to open a code block would lose the explanation, silently:
+    # nothing downstream can tell speech from speech-that-was-cut. An inline run left behind
+    # here is not spoken anyway -- it pairs off as a code span below, or the final tick sweep
+    # takes it.
+    text = re.sub(r"(?ms)^[ ]{0,3}(`{3,}|~{3,}).*?^[ ]{0,3}\1[ ]*$", " ", text)  # complete fenced blocks
+    text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)                 # unterminated trailing fence
+    # A destination may carry balanced parens ("/wiki/Foo_(bar)"), and stopping at the first
+    # ")" leaves the outer one to be spoken as punctuation after the label. One nesting level
+    # is what markdown links in prose actually use.
+    text = re.sub(r"!?\[([^\]]*)\]\((?:[^()]|\([^()]*\))*\)", r"\1", text)   # links/images -> label
     text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)]|#{1,6}|>)\s+", "", text)  # list/heading/quote markers
     # A code span's content is literal: `__init__` is the identifier, not bold "init".
     # Emphasis therefore applies only between the spans, and the ticks come off after

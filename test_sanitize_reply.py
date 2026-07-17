@@ -231,6 +231,74 @@ def test_tilde_fenced_code_is_dropped() -> None:
     check("Run this" in broken, "text before the broken tilde fence survives")
 
 
+def test_inline_fence_mention_is_not_a_block() -> None:
+    """A fence delimiter named mid-sentence opens nothing.
+
+    Fences are block constructs: an opener sits at the start of its line. Matching one
+    anywhere reads a reply that merely mentions ``` as opening a block, and the
+    unterminated-fence rule then drops every word after it -- so an answer explaining how
+    to open a code block loses the explanation. Deleting speech is worse than leaving
+    markup in it, because nothing downstream can tell the reply was cut.
+    """
+    out = pipeline.sanitize_reply("To open a block, type ``` and then your code. That is the whole trick.")
+    check("the whole trick" in out, f"prose after an inline fence mention survives: {out!r}")
+    check("`" not in out, f"no fence characters survive: {out!r}")
+    # Two mentions in one sentence must not pair into a block that eats the words between.
+    pair = pipeline.sanitize_reply("Use ``` to start and ``` to end. Got it?")
+    check("to start" in pair and "to end" in pair, f"text between two mentions survives: {pair!r}")
+    # An indented mention is still a mention: only up to 3 spaces makes a real opener, and
+    # this sits mid-line regardless.
+    tilde = pipeline.sanitize_reply("A ~~~ marks a fence too. Remember that.")
+    check("Remember that" in tilde, f"prose after an inline tilde mention survives: {tilde!r}")
+    # The guarantee the anchor must not cost: a real block still goes.
+    real = pipeline.sanitize_reply("Before.\n```python\nprint('hi')\n```\nAfter.")
+    check("print" not in real, f"a real fenced block is still dropped: {real!r}")
+    check("Before." in real and "After." in real, f"prose around a real block survives: {real!r}")
+
+
+def test_keycap_emoji_fully_stripped() -> None:
+    """A keycap sequence leaves its digit, not a combining enclosure.
+
+    '1' + U+FE0F + U+20E3 is one glyph. Removing only the variation selector leaves the
+    digit wearing U+20E3, so the emoji-free guarantee hands Piper a combining mark anyway.
+    """
+    out = pipeline.sanitize_reply("Step 1️⃣ then step 2️⃣.")
+    check("⃣" not in out, f"no combining keycap survives: {out!r}")
+    check("️" not in out, f"no variation selector survives: {out!r}")
+    check("1" in out and "2" in out, f"the digits are still spoken: {out!r}")
+    # A bare keycap mark, with the variation selector already absent, goes too.
+    bare = pipeline.sanitize_reply("Step 3⃣.")
+    check("⃣" not in bare, f"no bare keycap mark survives: {bare!r}")
+
+
+def test_link_destination_with_parens_consumed_whole() -> None:
+    """A destination containing parentheses is consumed to its real closing paren.
+
+    Markdown allows balanced parens in a destination, so a Wikipedia-style
+    '.../Foo_(bar)' stops a non-nesting pattern at the inner ')' and leaves the outer one
+    behind to be spoken as punctuation after the label.
+    """
+    out = pipeline.sanitize_reply("See [Wikipedia](https://en.wikipedia.org/wiki/Foo_(bar)) for more.")
+    check(out == "See Wikipedia for more.", f"paren-bearing link reduced to its label: {out!r}")
+    check("wikipedia.org" not in out, f"no URL survives: {out!r}")
+    plain = pipeline.sanitize_reply("See [Wikipedia](https://en.wikipedia.org/wiki/Foo) for more.")
+    check(plain == "See Wikipedia for more.", f"a plain link still reduces to its label: {plain!r}")
+
+
+def test_truncated_csi_is_dropped() -> None:
+    """A CSI sequence cut off mid-parameters leaves nothing to speak.
+
+    Output truncated inside an escape carries no final byte, so the CSI pattern misses it
+    and the control pass takes only the ESC -- leaving '[31' to be read aloud. The OSC
+    branch already tolerates an unterminated sequence; CSI is the gap.
+    """
+    for cut in ("\x1b[31", "\x1b[38:2::255:0:0", "\x1b["):
+        out = pipeline.sanitize_reply(f"Done{cut}")
+        check(out == "Done", f"truncated CSI {cut!r} left nothing behind: {out!r}")
+    # A complete sequence is still taken whole, so the tolerance cost nothing.
+    check(pipeline.sanitize_reply("\x1b[31mred\x1b[0m") == "red", "a terminated CSI still goes")
+
+
 def test_emoji_stripped() -> None:
     """Emoji are stripped without touching accented letters."""
     out = pipeline.sanitize_reply("All done \U0001f44d café résumé")
@@ -296,6 +364,10 @@ def main() -> int:
     test_nested_emphasis_fully_stripped()
     test_ansi_csi_takes_all_parameter_bytes()
     test_tilde_fenced_code_is_dropped()
+    test_inline_fence_mention_is_not_a_block()
+    test_keycap_emoji_fully_stripped()
+    test_link_destination_with_parens_consumed_whole()
+    test_truncated_csi_is_dropped()
     test_emoji_stripped()
     test_clean_text_unchanged()
     with tempfile.TemporaryDirectory(prefix="sanitize-reply-") as tmp:
