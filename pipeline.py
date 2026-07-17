@@ -780,9 +780,12 @@ MAX_SPOKEN_CHARS = 600
 EMPTY_REPLY_FALLBACK = "Sorry, I don't have an answer for that."
 # A whole ANSI escape sequence, not just its ESC byte: _brain_cli returns the
 # claude CLI's stdout, so colour codes are a realistic reply. Dropping only the
-# ESC would leave "[31m" behind to be read aloud.
+# ESC would leave "[31m" behind to be read aloud. The CSI branch is the ECMA-48
+# grammar rather than the parameter bytes seen so far: any of 0x30-0x3f may appear
+# before the final byte, so a colon-separated true-colour SGR ("\x1b[38:2::255:0:0m")
+# is one sequence, and a narrower pattern leaves its parameters to be spoken.
 _ANSI_ESCAPE_RE = re.compile(
-    r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]"      # CSI (colour, cursor moves)
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]"        # CSI (colour, cursor moves)
     r"|\][^\x07\x1b]*(?:\x07|\x1b\\)?"   # OSC (window title), terminated or not
     r"|[@-Z\\-_])"                       # two-character escapes
 )
@@ -793,20 +796,57 @@ _EMOJI_RE = re.compile(
 )
 
 
+_CODE_SPAN_RE = re.compile(r"(`+)(.+?)\1", re.DOTALL)
+# Emphasis is a matched pair of identical delimiter runs hugging its content, which is
+# the only thing markdown reads as emphasis. An unpaired run is literal text, and a
+# reply about code is made of unpaired runs (*args, **kwargs, _private, VALUE_) whose
+# delimiter is part of the name being spoken. A run that whitespace keeps from hugging
+# anything (5 * 6) opens nothing either, and \w on the outer edges keeps an underscore
+# inside a word (snake_case) from reading as a delimiter at all.
+# One pattern per delimiter, each barred from crossing its own character: an unpaired
+# run then gives up at the next candidate rather than rescanning the rest of the
+# reply, which keeps a long reply -- the case this whole stage exists for -- linear.
+_EMPHASIS_RES = (
+    re.compile(r"(?<!\w)(\*{1,3})(?!\s)([^*]+)(?<!\s)\1(?!\w)"),
+    re.compile(r"(?<!\w)(_{1,3})(?!\s)([^_]+)(?<!\s)\1(?!\w)"),
+    re.compile(r"(?<!\w)(~~)(?!\s)([^~]+)(?<!\s)\1(?!\w)"),
+)
+
+
+def _strip_emphasis(text: str) -> str:
+    """Drop matched emphasis pairs, leaving unpaired delimiter runs as literal text."""
+    # Content cannot cross its own delimiter, so a pass takes the innermost pair and
+    # emphasis nested in emphasis needs another; each pass drops two runs, so this
+    # settles.
+    while True:
+        stripped = text
+        for pattern in _EMPHASIS_RES:
+            stripped = pattern.sub(r"\2", stripped)
+        if stripped == text:
+            return text
+        text = stripped
+
+
 def _strip_markdown(text: str) -> str:
     """Reduce the markdown the VOICE_SYSTEM_PROMPT forbids to plain spoken text."""
-    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)  # complete fenced blocks
-    text = re.sub(r"```.*", " ", text, flags=re.DOTALL)      # unterminated trailing fence
-    text = text.replace("`", "")                              # inline code ticks
+    # Either fence character opens a block, closed by a run of that same character, so
+    # a stray "~~~" inside a backtick block cannot close it early.
+    text = re.sub(r"(`{3,}|~{3,}).*?\1", " ", text, flags=re.DOTALL)  # complete fenced blocks
+    text = re.sub(r"(?:`{3,}|~{3,}).*", " ", text, flags=re.DOTALL)   # unterminated trailing fence
     text = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", text)    # links/images -> label
     text = re.sub(r"(?m)^\s{0,3}(?:[-*+]|\d+[.)]|#{1,6}|>)\s+", "", text)  # list/heading/quote markers
-    # Strip *, **, ___ emphasis and ~~ strikethrough only where a run hugs a word on
-    # exactly one side (an opening or closing delimiter), so a glob (*.py), math
-    # (5 * 6), and snake_case identifiers keep their literal symbols: their
-    # punctuation touches a word on neither side, or (snake_case) on both.
-    text = re.sub(r"(?<!\w)(\*{1,3}|_{1,3}|~~)(?=\w)", "", text)  # opening emphasis
-    text = re.sub(r"(?<=\w)(\*{1,3}|_{1,3}|~~)(?!\w)", "", text)  # closing emphasis
-    return text
+    # A code span's content is literal: `__init__` is the identifier, not bold "init".
+    # Emphasis therefore applies only between the spans, and the ticks come off after
+    # it -- peeling them first would hand the emphasis rule an identifier it has no way
+    # to tell from emphasis.
+    spoken: list[str] = []
+    pos = 0
+    for span in _CODE_SPAN_RE.finditer(text):
+        spoken.append(_strip_emphasis(text[pos:span.start()]))
+        spoken.append(span.group(2))
+        pos = span.end()
+    spoken.append(_strip_emphasis(text[pos:]))
+    return "".join(spoken).replace("`", "")                   # unpaired inline code ticks
 
 
 def _truncate_spoken(text: str, max_chars: int) -> str:

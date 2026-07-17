@@ -147,6 +147,69 @@ def test_markdown_edge_cases() -> None:
     check("Run this" in broken, "text before the broken fence survives")
 
 
+def test_unpaired_emphasis_runs_are_literal() -> None:
+    """An unpaired delimiter run is literal text, so it survives to be spoken.
+
+    Markdown only reads a delimiter run as emphasis when a matching run closes it;
+    CommonMark renders "*args", "**kwargs", "_private" and "VALUE_" verbatim. A reply
+    about code is full of these, and dropping the delimiter renames the thing spoken.
+    """
+    for reply, kept in (("Pass *args to it.", "*args"),
+                        ("Pass **kwargs to it.", "**kwargs"),
+                        ("Set _private on the class.", "_private"),
+                        ("Use VALUE_ as the prefix.", "VALUE_")):
+        out = pipeline.sanitize_reply(reply)
+        check(kept in out, f"unpaired run stays literal: {reply!r} -> {out!r}")
+
+
+def test_code_span_content_is_literal() -> None:
+    """A code span's content is literal markdown, so emphasis never applies inside it.
+
+    "`__init__`" is the identifier, not bold "init". The ticks still come off, but only
+    after emphasis, which is the order markdown itself resolves them in.
+    """
+    for reply, kept in (("The `__init__` method runs first.", "__init__"),
+                        ("The `_private` field is internal.", "_private"),
+                        ("Read `VALUE_` from the env.", "VALUE_")):
+        out = pipeline.sanitize_reply(reply)
+        check(kept in out, f"code span stays literal: {reply!r} -> {out!r}")
+        check("`" not in out, f"backticks still stripped: {out!r}")
+
+
+def test_nested_emphasis_fully_stripped() -> None:
+    """Emphasis inside emphasis leaves no delimiter behind for TTS to read."""
+    out = pipeline.sanitize_reply("This is **bold with *italic* inside** it.")
+    check("*" not in out and "bold with italic inside" in out,
+          f"nested emphasis fully stripped: {out!r}")
+
+
+def test_ansi_csi_takes_all_parameter_bytes() -> None:
+    """A CSI sequence ends at its final byte, whatever parameter bytes it carries.
+
+    ECMA-48 allows the whole 0x30-0x3f range as parameter bytes, so a colon-separated
+    true-colour SGR is valid. A pattern stopping at digits and semicolons fails to
+    match it, and the later control-character pass takes only the ESC, leaving the
+    parameters to be read aloud.
+    """
+    out = pipeline.sanitize_reply("\x1b[38:2::255:0:0mred\x1b[0m")
+    check(out == "red", f"colon-separated true-colour SGR stripped whole: {out!r}")
+    check("38:2" not in out, f"no parameter bytes survive as speech: {out!r}")
+
+
+def test_tilde_fenced_code_is_dropped() -> None:
+    """A tilde fence opens a code block exactly as a backtick fence does."""
+    closed = pipeline.sanitize_reply('Before.\n~~~python\nprint("hi")\n~~~\nAfter.')
+    check('print("hi")' not in closed, f"tilde-fenced code not spoken: {closed!r}")
+    check("~" not in closed, f"no fence characters survive: {closed!r}")
+    check("Before." in closed and "After." in closed,
+          f"prose around the fence survives: {closed!r}")
+    # An unterminated tilde fence (a truncated reply) drops to the end, as a backtick
+    # fence does, rather than spilling the code body into speech.
+    broken = pipeline.sanitize_reply("Run this:\n~~~\nrm -rf / --no-preserve-root")
+    check("rm -rf" not in broken, f"unterminated tilde fence dropped: {broken!r}")
+    check("Run this" in broken, "text before the broken tilde fence survives")
+
+
 def test_emoji_stripped() -> None:
     """Emoji are stripped without touching accented letters."""
     out = pipeline.sanitize_reply("All done \U0001f44d café résumé")
@@ -206,6 +269,11 @@ def main() -> int:
     test_ansi_escapes_stripped()
     test_markdown_stripped()
     test_markdown_edge_cases()
+    test_unpaired_emphasis_runs_are_literal()
+    test_code_span_content_is_literal()
+    test_nested_emphasis_fully_stripped()
+    test_ansi_csi_takes_all_parameter_bytes()
+    test_tilde_fenced_code_is_dropped()
     test_emoji_stripped()
     test_clean_text_unchanged()
     with tempfile.TemporaryDirectory(prefix="sanitize-reply-") as tmp:
