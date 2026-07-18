@@ -48,8 +48,7 @@ def _clips(directory: Path) -> list[Path]:
     """Every audio file directly under `directory`, sorted; empty if it is absent."""
     if not directory.is_dir():
         return []
-    return sorted(p for p in directory.iterdir()
-                  if p.suffix.lower() in AUDIO_EXTS)
+    return sorted(p for p in directory.iterdir() if p.suffix.lower() in AUDIO_EXTS)
 
 
 def _positive_peak(path: Path, model_name: str) -> float:
@@ -79,30 +78,46 @@ def _frame_scores(path: Path, model_name: str) -> tuple[list[float], float]:
 
 
 def _print_table(rows: list[wake_eval.ThresholdRow]) -> None:
-    print(f"\n{'thresh':>7}  {'FR/act':>7}  {'FA/hr':>8}  "
-          f"{'rejects':>8}  {'accepts':>8}")
+    print(
+        f"\n{'thresh':>7}  {'FR/act':>7}  {'FA/hr':>8}  {'rejects':>8}  {'accepts':>8}"
+    )
     print("  " + "-" * 44)
     for r in rows:
-        print(f"{r.threshold:>7.3f}  {r.false_rejects_per_activation:>7.3f}  "
-              f"{r.false_accepts_per_hour:>8.2f}  "
-              f"{r.false_rejects:>3}/{r.activations:<4}  {r.false_accepts:>8}")
+        print(
+            f"{r.threshold:>7.3f}  {r.false_rejects_per_activation:>7.3f}  "
+            f"{r.false_accepts_per_hour:>8.2f}  "
+            f"{r.false_rejects:>3}/{r.activations:<4}  {r.false_accepts:>8}"
+        )
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__,
-                                formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--samples", default="samples",
-                   help="root of the labeled sample directories (default: samples)")
-    p.add_argument("--model", default=None,
-                   help="wake model name (default: config.json wake_word)")
+    p = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    p.add_argument(
+        "--samples",
+        default="samples",
+        help="root of the labeled sample directories (default: samples)",
+    )
+    p.add_argument(
+        "--model", default=None, help="wake model name (default: config.json wake_word)"
+    )
     p.add_argument("--min-threshold", type=float, default=0.1)
     p.add_argument("--max-threshold", type=float, default=0.9)
     p.add_argument("--step", type=float, default=0.05)
-    p.add_argument("--max-fa-per-hour", type=float, default=1.0,
-                   help="false-accept budget for the recommendation (default: 1.0)")
-    p.add_argument("--refractory-s", type=float, default=DEFAULT_REFRACTORY_S,
-                   help="post-fire gap before a new false accept can count, seconds "
-                        "(default: the live re-arm floor, ~1.6s)")
+    p.add_argument(
+        "--max-fa-per-hour",
+        type=float,
+        default=1.0,
+        help="false-accept budget for the recommendation (default: 1.0)",
+    )
+    p.add_argument(
+        "--refractory-s",
+        type=float,
+        default=DEFAULT_REFRACTORY_S,
+        help="post-fire gap before a new false accept can count, seconds "
+        "(default: the live re-arm floor, ~1.6s)",
+    )
     args = p.parse_args()
 
     model_name = args.model or pipeline.load_config()["wake_word"]
@@ -119,25 +134,35 @@ def main() -> int:
             f"{neg_dir} + {bg_dir}\n"
             "Record and prep samples first (prep_wake_samples.py; see "
             "docs/recording-computah.md), then re-run.",
-            file=sys.stderr)
+            file=sys.stderr,
+        )
         return 1
 
     print(f"model: {model_name}")
-    print(f"scoring {len(positives_paths)} activations, "
-          f"{len(nonwake_paths)} non-wake clips ...")
+    print(
+        f"scoring {len(positives_paths)} activations, "
+        f"{len(nonwake_paths)} non-wake clips ..."
+    )
 
-    positives = [wake_eval.Activation(peak=_positive_peak(path, model_name))
-                 for path in positives_paths]
+    positives = [
+        wake_eval.Activation(peak=_positive_peak(path, model_name))
+        for path in positives_paths
+    ]
     nonwake = []
     for path in nonwake_paths:
         scores, seconds = _frame_scores(path, model_name)
         nonwake.append(wake_eval.NonWakeClip(frame_scores=scores, seconds=seconds))
 
     thresholds = wake_eval.threshold_grid(
-        args.min_threshold, args.max_threshold, args.step)
-    rows = wake_eval.sweep(positives, nonwake, thresholds,
-                           refractory_s=args.refractory_s,
-                           frame_hop_s=FRAME_HOP_S)
+        args.min_threshold, args.max_threshold, args.step
+    )
+    rows = wake_eval.sweep(
+        positives,
+        nonwake,
+        thresholds,
+        refractory_s=args.refractory_s,
+        frame_hop_s=FRAME_HOP_S,
+    )
     _print_table(rows)
 
     rec = wake_eval.recommend(rows, max_false_accepts_per_hour=args.max_fa_per_hour)
@@ -146,19 +171,23 @@ def main() -> int:
     print(f"\nnon-wake audio evaluated: {total_hours * 60:.1f} min")
     print(f"{label} wake_threshold for {model_name}: {rec.threshold:.3f}")
     print(f"  {rec.reason}")
-    print(f"  at this threshold: false-rejects "
-          f"{rec.row.false_rejects_per_activation:.1%} of activations, "
-          f"false-accepts {rec.row.false_accepts_per_hour:.2f}/hour")
+    print(
+        f"  at this threshold: false-rejects "
+        f"{rec.row.false_rejects_per_activation:.1%} of activations, "
+        f"false-accepts {rec.row.false_accepts_per_hour:.2f}/hour"
+    )
     if rec.meets_budget:
         print(f'\nrecord this in config.json:  "wake_threshold": {rec.threshold:.3f},')
     else:
         # No threshold met the budget, so rec.threshold is only the least-bad value and
         # still violates it. Don't emit a paste-ready config line a failed run could be
         # copied into config.json from; point at the two real fixes instead.
-        print("\nno threshold met the false-accept budget, so there is nothing to "
-              "record yet. Collect more or cleaner negatives and re-run, or re-run "
-              f"with a higher --max-fa-per-hour if {rec.row.false_accepts_per_hour:.2f} "
-              f"false-accepts/hour is acceptable (best available was {rec.threshold:.3f}).")
+        print(
+            "\nno threshold met the false-accept budget, so there is nothing to "
+            "record yet. Collect more or cleaner negatives and re-run, or re-run "
+            f"with a higher --max-fa-per-hour if {rec.row.false_accepts_per_hour:.2f} "
+            f"false-accepts/hour is acceptable (best available was {rec.threshold:.3f})."
+        )
     print("see docs/wake-threshold-tuning.md.")
     return 0
 

@@ -18,6 +18,7 @@ mic with a WAV file and a sim persona. Keep them distinct: that one is a no-hard
 proof of the streaming/endpointing logic; this one drives the actual device against
 the real persistent brain.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,7 +37,7 @@ import pipeline
 import chime
 
 _DRAIN_FRAMES = 25  # ~2 s discarded after a turn: clears stale/echo audio from the
-                    # pipe buffer so the spoken reply is not re-heard as the next wake
+# pipe buffer so the spoken reply is not re-heard as the next wake
 
 
 def log(msg: str) -> None:
@@ -57,16 +58,21 @@ def _play_wav(path: str, device: str | None) -> None:
         cmd += ["-D", device]
     cmd.append(path)
     try:
-        subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL)
+        subprocess.run(
+            cmd, check=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
     except subprocess.CalledProcessError:
         # Retry once under non-interactive sudo: /dev/snd needs root in some launch
         # contexts. -n so a missing or expired sudo timestamp fails fast instead of
         # prompting, and stdin from /dev/null so a prompt can never consume the raw
         # mic pipe that is this process's stdin. Playback then degrades to the logged
         # error in run_turn rather than wedging the loop.
-        subprocess.run(["sudo", "-n", *cmd], check=True,
-                       stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(
+            ["sudo", "-n", *cmd],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
 
 class StdinMic:
@@ -102,8 +108,10 @@ class StdinMic:
                 return
             self._buf += chunk
             if len(self._buf) >= self.frame_bytes:
-                frame = np.frombuffer(self._buf[:self.frame_bytes], dtype=np.int16).copy()
-                self._buf = self._buf[self.frame_bytes:]
+                frame = np.frombuffer(
+                    self._buf[: self.frame_bytes], dtype=np.int16
+                ).copy()
+                self._buf = self._buf[self.frame_bytes :]
                 yield frame
 
     def flush(self) -> None:
@@ -166,8 +174,16 @@ def drain(frames, n: int) -> None:
             return
 
 
-def run_turn(frames, mic, model, threshold: float, out_wav: str,
-             output_device, cfg: dict, debug: bool) -> bool:
+def run_turn(
+    frames,
+    mic,
+    model,
+    threshold: float,
+    out_wav: str,
+    output_device,
+    cfg: dict,
+    debug: bool,
+) -> bool:
     """Run one full turn off the live frame stream.
 
     `mic` is the StdinMic that owns `frames`; its flush() is used to drop the cue's
@@ -220,10 +236,13 @@ def run_turn(frames, mic, model, threshold: float, out_wav: str,
             # command and reach the brain (issue #41).
             preroll.clear()
 
-    request_pcm = pipeline.capture_request(frames, preroll=list(preroll),
-                                           vad_threshold=cfg["capture_vad_threshold"],
-                                           endpoint_silence_ms=cfg["endpoint_silence_ms"],
-                                           max_request_ms=cfg["max_request_ms"])
+    request_pcm = pipeline.capture_request(
+        frames,
+        preroll=list(preroll),
+        vad_threshold=cfg["capture_vad_threshold"],
+        endpoint_silence_ms=cfg["endpoint_silence_ms"],
+        max_request_ms=cfg["max_request_ms"],
+    )
     if request_pcm.size == 0:
         log("wake fired but no speech followed — ignoring")
         return True
@@ -263,13 +282,25 @@ def run_turn(frames, mic, model, threshold: float, out_wav: str,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="computah always-on live voice loop")
-    ap.add_argument("out_wav", nargs="?", default=None,
-                    help="reply WAV path (default: a temp file reused each turn)")
-    ap.add_argument("-v", "--debug", action="store_true",
-                    help="per-frame rms+score telemetry to stderr")
-    ap.add_argument("-o", "--output-device", default=None,
-                    help="ALSA output PCM for aplay -D (e.g. "
-                         "plughw:CARD=PowerConf,DEV=0); default: ALSA default device")
+    ap.add_argument(
+        "out_wav",
+        nargs="?",
+        default=None,
+        help="reply WAV path (default: a temp file reused each turn)",
+    )
+    ap.add_argument(
+        "-v",
+        "--debug",
+        action="store_true",
+        help="per-frame rms+score telemetry to stderr",
+    )
+    ap.add_argument(
+        "-o",
+        "--output-device",
+        default=None,
+        help="ALSA output PCM for aplay -D (e.g. "
+        "plughw:CARD=PowerConf,DEV=0); default: ALSA default device",
+    )
     args = ap.parse_args()
 
     out_wav = args.out_wav
@@ -292,8 +323,16 @@ def main() -> int:
     turn = 0
     try:
         while True:
-            if not run_turn(frames, mic, model, threshold, out_wav,
-                            args.output_device, cfg, args.debug):
+            if not run_turn(
+                frames,
+                mic,
+                model,
+                threshold,
+                out_wav,
+                args.output_device,
+                cfg,
+                args.debug,
+            ):
                 log("input stream ended — exiting")
                 break
             turn += 1

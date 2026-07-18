@@ -55,6 +55,8 @@ LOCAL_CONFIG_PATH = PROJECT_DIR / "config.local.json"
 VOICES_DIR = PROJECT_DIR / "voices"
 WHISPER_DIR = PROJECT_DIR / "whisper_models"
 CUSTOM_MODELS_DIR = PROJECT_DIR / "models"  # custom-trained wake words live here
+
+
 def _resolve_claude_bin() -> str:
     """Locate the claude CLI: prefer PATH, otherwise fall back per OS.
 
@@ -139,12 +141,12 @@ DEFAULTS = {
     # config.local.json — persona/host/path are deployment-specific and stay out
     # of the published config.json.
     "brain_persona": "assistant",
-    "brain_transport": "local",   # "local" (this host) or "ssh" (another host)
-    "brain_host": "",             # ssh host alias, required for transport "ssh"
+    "brain_transport": "local",  # "local" (this host) or "ssh" (another host)
+    "brain_host": "",  # ssh host alias, required for transport "ssh"
     "brain_bot_spren_bin": "bot-spren",
     "brain_bot_spren_workdir": "",  # bot-spren --working-dir; set so the send lands
-                                    # in the session's inbox, not a dead-letter one
-    "brain_reply_path": "",       # path to the persona's FileOutbound reply file
+    # in the session's inbox, not a dead-letter one
+    "brain_reply_path": "",  # path to the persona's FileOutbound reply file
     "brain_timeout_s": 120,
     "brain_poll_s": 0.5,
 }
@@ -174,15 +176,19 @@ def load_config() -> dict:
     non-sensitive), then config.local.json (gitignored deployment overrides).
     """
     cfg = dict(DEFAULTS)
-    for path, label in ((CONFIG_PATH, "config.json"),
-                        (LOCAL_CONFIG_PATH, "config.local.json")):
+    for path, label in (
+        (CONFIG_PATH, "config.json"),
+        (LOCAL_CONFIG_PATH, "config.local.json"),
+    ):
         if not path.exists():
             continue
         try:
             cfg.update(json.loads(path.read_text()))
         except json.JSONDecodeError as e:
-            print(f"warning: {label} is not valid JSON ({e}); ignoring it",
-                  file=sys.stderr)
+            print(
+                f"warning: {label} is not valid JSON ({e}); ignoring it",
+                file=sys.stderr,
+            )
     return validate_config(cfg)
 
 
@@ -199,6 +205,7 @@ def _supported_whisper_compute_types() -> frozenset:
     types = {"default", "auto"}
     try:
         import ctranslate2
+
         types |= set(ctranslate2.get_supported_compute_types("cpu"))
     except Exception:
         # ctranslate2 missing or too old to report support: cannot validate the type here,
@@ -227,6 +234,7 @@ def validate_config(cfg: dict) -> dict:
     knowable valid set are checked; free-form keys (whisper_model, device names, paths)
     are left to the components that consume them, and unknown extra keys are preserved.
     """
+
     def fall_back(key: str, reason: str) -> None:
         print(
             f"warning: config {key}={cfg[key]!r} is invalid ({reason}); "
@@ -314,9 +322,7 @@ def available_wake_models() -> dict[str, str]:
 def _resolve_wake_path(name: str) -> str:
     lib = available_wake_models()
     if name not in lib:
-        raise ValueError(
-            f"unknown wake word {name!r}. available: {sorted(lib)}"
-        )
+        raise ValueError(f"unknown wake word {name!r}. available: {sorted(lib)}")
     return lib[name]
 
 
@@ -372,7 +378,9 @@ def _get_oww_model(model_path: str):
         # them now so _reset_oww can restore a true clean slate cheaply (see there).
         pp = model.preprocessor
         model._blank_buffers = (
-            pp.melspectrogram_buffer.copy(), pp.feature_buffer.copy())
+            pp.melspectrogram_buffer.copy(),
+            pp.feature_buffer.copy(),
+        )
         _oww_cache[model_path] = model
     return _oww_cache[model_path]
 
@@ -408,7 +416,7 @@ def _reset_oww(model) -> None:
 # naturally. Named here so every one-shot scoring path (detect_wake and the
 # threshold-tuning eval) pads identically and cannot drift apart.
 _WAKE_LEAD_SAMPLES = 24000  # 1.5s leading silence
-_WAKE_TAIL_SAMPLES = 8000   # 0.5s trailing silence
+_WAKE_TAIL_SAMPLES = 8000  # 0.5s trailing silence
 
 
 def wake_frame_scores(wav_path: str, model_name: str | None = None) -> list[float]:
@@ -435,13 +443,14 @@ def wake_frame_scores(wav_path: str, model_name: str | None = None) -> list[floa
     step = 1280  # 80ms at 16kHz — openWakeWord's frame size
     scores: list[float] = []
     for i in range(0, len(pcm) - step + 1, step):
-        preds = model.predict(pcm[i:i + step])
+        preds = model.predict(pcm[i : i + step])
         scores.append(max(float(s) for s in preds.values()))
     return scores
 
 
-def detect_wake(wav_path: str, model_name: str | None = None,
-                threshold: float | None = None) -> tuple[bool, str, float]:
+def detect_wake(
+    wav_path: str, model_name: str | None = None, threshold: float | None = None
+) -> tuple[bool, str, float]:
     """Run audio through the active openWakeWord model.
 
     Returns (fired, model_name, peak_score). fired is peak_score >= threshold. The
@@ -464,25 +473,25 @@ def detect_wake(wav_path: str, model_name: str | None = None,
 # detection and capture logic is identical and testable with no hardware. The
 # physical mic and speaker adapters land with the microphone (issues #9, #11).
 FRAME_SIZE = 1280  # 80 ms at 16 kHz — openWakeWord's frame size
-_SILENCE_RMS = 250.0           # int16 RMS below this is room tone, not speech
+_SILENCE_RMS = 250.0  # int16 RMS below this is room tone, not speech
 _ENDPOINT_SILENCE_FRAMES = 10  # ~0.8 s of trailing quiet ends a captured request
-_NO_SPEECH_ONSET_FRAMES = 20   # ~1.6 s; abandon a wake that no speech follows
-_SPEECH_ONSET_FRAMES = 3       # consecutive above-threshold frames before energy counts
-                               # as speech onset; a click/cough/echo is 1-2 frames, so a
-                               # sustained run keeps a transient from tripping onset and
-                               # prepending the wake-word pre-roll as a phantom (#54)
-_MAX_REQUEST_FRAMES = 100      # ~8 s cap so a stuck stream cannot record forever
-_PREROLL_FRAMES = 2            # ~0.16 s of audio kept before the wake fire and
-                               # prepended to the request, so a command spoken with
-                               # no pause after the wake word is not clipped by
-                               # detection latency (issue #30). Tuned on the deployed
-                               # PowerConf with a live voice test: at 8 the wake word
-                               # itself bled into the transcript ("computer file an
-                               # issue..."); at 2 (~160 ms) the no-pause command keeps a
-                               # clip-margin while the wake word stays out. The command
-                               # onset never clipped at any size here, so the real risk
-                               # was over-capture, not under-capture. Larger recovers
-                               # more leading audio but bleeds more of the wake word in.
+_NO_SPEECH_ONSET_FRAMES = 20  # ~1.6 s; abandon a wake that no speech follows
+_SPEECH_ONSET_FRAMES = 3  # consecutive above-threshold frames before energy counts
+# as speech onset; a click/cough/echo is 1-2 frames, so a
+# sustained run keeps a transient from tripping onset and
+# prepending the wake-word pre-roll as a phantom (#54)
+_MAX_REQUEST_FRAMES = 100  # ~8 s cap so a stuck stream cannot record forever
+_PREROLL_FRAMES = 2  # ~0.16 s of audio kept before the wake fire and
+# prepended to the request, so a command spoken with
+# no pause after the wake word is not clipped by
+# detection latency (issue #30). Tuned on the deployed
+# PowerConf with a live voice test: at 8 the wake word
+# itself bled into the transcript ("computer file an
+# issue..."); at 2 (~160 ms) the no-pause command keeps a
+# clip-margin while the wake word stays out. The command
+# onset never clipped at any size here, so the real risk
+# was over-capture, not under-capture. Larger recovers
+# more leading audio but bleeds more of the wake word in.
 
 
 _FRAME_MS = FRAME_SIZE / 16000 * 1000  # 80.0 ms of audio per capture frame
@@ -503,7 +512,7 @@ def iter_wav_frames(wav_path: str):
     everything downstream is identical."""
     pcm = _load_pcm16(wav_path)
     for i in range(0, len(pcm) - FRAME_SIZE + 1, FRAME_SIZE):
-        yield pcm[i:i + FRAME_SIZE]
+        yield pcm[i : i + FRAME_SIZE]
 
 
 def _frame_rms(frame: np.ndarray) -> float:
@@ -549,6 +558,7 @@ def _get_vad():
     global _vad_model
     if _vad_model is None:
         from openwakeword.vad import VAD
+
         _vad_model = VAD()
     return _vad_model
 
@@ -573,14 +583,19 @@ def _confirm_speech(pcm: np.ndarray, threshold: float) -> bool:
         pcm = np.concatenate([pcm, np.zeros(pad, dtype=np.int16)])
     peak = 0.0
     for i in range(0, len(pcm), frame):
-        prob = float(vad.predict(pcm[i:i + frame], frame_size=frame))
+        prob = float(vad.predict(pcm[i : i + frame], frame_size=frame))
         if prob > peak:
             peak = prob
     return peak >= threshold
 
 
-def capture_request(frames, preroll=None, vad_threshold=None,
-                    endpoint_silence_ms=None, max_request_ms=None) -> np.ndarray:
+def capture_request(
+    frames,
+    preroll=None,
+    vad_threshold=None,
+    endpoint_silence_ms=None,
+    max_request_ms=None,
+) -> np.ndarray:
     """Collect request frames after a wake fire until a trailing-silence endpoint.
 
     Energy-based endpointing: once speech has been seen, stop after a window of
@@ -618,10 +633,14 @@ def capture_request(frames, preroll=None, vad_threshold=None,
     behavior. run_turn threads the config values (endpoint_silence_ms, max_request_ms)
     through so the live loop is tunable without a code change.
     """
-    endpoint_frames = (_ENDPOINT_SILENCE_FRAMES if endpoint_silence_ms is None
-                       else _ms_to_frames(endpoint_silence_ms))
-    max_frames = (_MAX_REQUEST_FRAMES if max_request_ms is None
-                  else _ms_to_frames(max_request_ms))
+    endpoint_frames = (
+        _ENDPOINT_SILENCE_FRAMES
+        if endpoint_silence_ms is None
+        else _ms_to_frames(endpoint_silence_ms)
+    )
+    max_frames = (
+        _MAX_REQUEST_FRAMES if max_request_ms is None else _ms_to_frames(max_request_ms)
+    )
     captured: list[np.ndarray] = []
     quiet = 0
     voiced_run = 0
@@ -673,7 +692,9 @@ def _get_whisper(model: str, compute: str):
         from faster_whisper import WhisperModel
 
         _whisper_cache[key] = WhisperModel(
-            model, device="cpu", compute_type=compute,
+            model,
+            device="cpu",
+            compute_type=compute,
             download_root=str(WHISPER_DIR),
         )
     return _whisper_cache[key]
@@ -686,6 +707,7 @@ class Transcript(NamedTuple):
     confident); no_speech_prob is how silence-like the audio looked (higher means
     less likely to be real speech).
     """
+
     text: str
     avg_logprob: float
     no_speech_prob: float
@@ -708,8 +730,7 @@ def _aggregate_segments(segments) -> Transcript:
         return Transcript(text, float("-inf"), 1.0)
     weights = [max(float(s.end) - float(s.start), 1e-3) for s in segs]
     total = sum(weights)
-    avg_logprob = sum(float(s.avg_logprob) * w
-                      for s, w in zip(segs, weights)) / total
+    avg_logprob = sum(float(s.avg_logprob) * w for s, w in zip(segs, weights)) / total
     no_speech_prob = max(float(s.no_speech_prob) for s in segs)
     return Transcript(text, avg_logprob, no_speech_prob)
 
@@ -729,8 +750,9 @@ def transcribe(wav_path: str) -> str:
     return transcribe_detailed(wav_path).text
 
 
-def transcript_confident(t: Transcript, *, min_avg_logprob: float,
-                         max_no_speech_prob: float) -> tuple[bool, str]:
+def transcript_confident(
+    t: Transcript, *, min_avg_logprob: float, max_no_speech_prob: float
+) -> tuple[bool, str]:
     """Is a transcript trustworthy enough to act on?
 
     The brain acts on voice commands -- it files issues, changes things -- so a
@@ -746,10 +768,10 @@ def transcript_confident(t: Transcript, *, min_avg_logprob: float,
     if not t.text.strip():
         return False, "empty transcript"
     if t.avg_logprob < min_avg_logprob:
-        kind = ("silence" if t.no_speech_prob > max_no_speech_prob
-                else "low confidence")
-        return False, (f"{kind}: avg_logprob {t.avg_logprob:.2f} under floor "
-                       f"{min_avg_logprob:.2f}")
+        kind = "silence" if t.no_speech_prob > max_no_speech_prob else "low confidence"
+        return False, (
+            f"{kind}: avg_logprob {t.avg_logprob:.2f} under floor {min_avg_logprob:.2f}"
+        )
     return True, "ok"
 
 
@@ -765,8 +787,10 @@ def guard_transcript(heard: Transcript, cfg: dict) -> tuple[bool, str]:
     if not cfg["stt_confidence_guard"]:
         return True, "guard disabled"
     return transcript_confident(
-        heard, min_avg_logprob=cfg["stt_min_avg_logprob"],
-        max_no_speech_prob=cfg["stt_max_no_speech_prob"])
+        heard,
+        min_avg_logprob=cfg["stt_min_avg_logprob"],
+        max_no_speech_prob=cfg["stt_max_no_speech_prob"],
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -785,9 +809,9 @@ EMPTY_REPLY_FALLBACK = "Sorry, I don't have an answer for that."
 # before the final byte, so a colon-separated true-colour SGR ("\x1b[38:2::255:0:0m")
 # is one sequence, and a narrower pattern leaves its parameters to be spoken.
 _ANSI_ESCAPE_RE = re.compile(
-    r"\x1b(?:\[[0-?]*[ -/]*[@-~]?"       # CSI (colour, cursor moves), terminated or not
-    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)?"   # OSC (window title), terminated or not
-    r"|[@-Z\\-_])"                       # two-character escapes
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]?"  # CSI (colour, cursor moves), terminated or not
+    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC (window title), terminated or not
+    r"|[@-Z\\-_])"  # two-character escapes
 )
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 # U+20E3 is the enclosing keycap: "1" + U+FE0F + U+20E3 is one glyph, so taking only the
@@ -832,7 +856,9 @@ _CONTAINER_RE = re.compile(r"(?m)^(?:[ \t]{0,3}(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]
 # answer explaining how to open a code block would lose the explanation, silently, and nothing
 # downstream can tell speech from speech-that-was-cut. An inline run left behind is not spoken
 # anyway -- it pairs off as a code span, or the final tick sweep takes it.
-_FENCED_BLOCK_RE = re.compile(r"(?ms)^[ ]{0,3}((`|~)\2{2,})(?!\2).*?^[ ]{0,3}\1\2*[ \t]*$")
+_FENCED_BLOCK_RE = re.compile(
+    r"(?ms)^[ ]{0,3}((`|~)\2{2,})(?!\2).*?^[ ]{0,3}\1\2*[ \t]*$"
+)
 # Emphasis is a matched pair of identical delimiter runs hugging its content, which is
 # the only thing markdown reads as emphasis. An unpaired run is literal text, and a
 # reply about code is made of unpaired runs (*args, **kwargs, _private, VALUE_) whose
@@ -877,7 +903,7 @@ def _iter_code_spans(text: str):
     Scanning runs also settles the case the pattern read backwards: in "`a``b`" the outer
     single ticks pair, so the inner pair is content, not a delimiter.
     """
-    runs: list[tuple[int, int]] = []      # (start, length), left to right
+    runs: list[tuple[int, int]] = []  # (start, length), left to right
     by_length: dict[int, list[int]] = {}  # length -> indices into runs
     pos = 0
     while True:
@@ -903,7 +929,7 @@ def _iter_code_spans(text: str):
             i += 1  # nothing of its length closes it; the tick sweep takes it
             continue
         close = runs[candidates[k]][0]
-        yield start, close + length, text[start + length:close]
+        yield start, close + length, text[start + length : close]
         i = candidates[k] + 1
 
 
@@ -945,11 +971,11 @@ def _strip_links(text: str) -> str:
             # A "[" that opens no link is ordinary text ("[1]", a stray bracket). Emit it
             # and resume just past it: the next "[" on the line may still open a real link,
             # and treating this one as a failed head would hide it.
-            out.append(text[pos:head.end()])
+            out.append(text[pos : head.end()])
             pos = head.end()
             continue
-        out.append(text[pos:head.start()])
-        out.append(text[head.end():label_end])
+        out.append(text[pos : head.start()])
+        out.append(text[head.end() : label_end])
         pos = _end_of_destination(text, label_end + 2)
 
 
@@ -1046,9 +1072,13 @@ def _strip_markdown(text: str) -> str:
     # glue the next line onto a marker line -- promoting an indented backtick run to a fence
     # that was never there.
     text = _CONTAINER_RE.sub("", text)
-    text = _FENCED_BLOCK_RE.sub(" ", text)                        # blocks that sat behind a container
-    text = re.sub(r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text)  # unterminated trailing fence
-    text = re.sub(r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text)       # heading markers, once fences are settled
+    text = _FENCED_BLOCK_RE.sub(" ", text)  # blocks that sat behind a container
+    text = re.sub(
+        r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text
+    )  # unterminated trailing fence
+    text = re.sub(
+        r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text
+    )  # heading markers, once fences are settled
     # A code span's content is literal: `__init__` is the identifier, not bold "init", and
     # `[label](url)` is the syntax being described, not a link to follow. Both rules
     # therefore apply only BETWEEN the spans, and the ticks come off after them -- peeling
@@ -1060,7 +1090,7 @@ def _strip_markdown(text: str) -> str:
         spoken.append(contents)
         pos = end
     spoken.append(_strip_emphasis(_strip_links(text[pos:])))
-    return "".join(spoken).replace("`", "")                   # unpaired inline code ticks
+    return "".join(spoken).replace("`", "")  # unpaired inline code ticks
 
 
 def _truncate_spoken(text: str, max_chars: int) -> str:
@@ -1071,13 +1101,16 @@ def _truncate_spoken(text: str, max_chars: int) -> str:
     # up to a later exclamation, throwing away speakable text we had room for.
     idx = max(clipped.rfind(end) for end in (". ", "! ", "? "))
     if idx >= max_chars // 2:
-        return clipped[:idx + 1].rstrip()
+        return clipped[: idx + 1].rstrip()
     space = clipped.rfind(" ")
     return (clipped[:space] if space > 0 else clipped).rstrip()
 
 
-def sanitize_reply(reply: str, max_chars: int = MAX_SPOKEN_CHARS,
-                   empty_fallback: str = EMPTY_REPLY_FALLBACK) -> str:
+def sanitize_reply(
+    reply: str,
+    max_chars: int = MAX_SPOKEN_CHARS,
+    empty_fallback: str = EMPTY_REPLY_FALLBACK,
+) -> str:
     """Make a brain reply safe to hand to speak().
 
     Bounds length, drops markdown/emoji/control characters, and turns an empty
@@ -1098,8 +1131,7 @@ def sanitize_reply(reply: str, max_chars: int = MAX_SPOKEN_CHARS,
     return text
 
 
-def brain(text: str, model: str | None = None,
-          timeout_s: int | None = None) -> str:
+def brain(text: str, model: str | None = None, timeout_s: int | None = None) -> str:
     """Answer transcribed text using the configured brain backend.
 
     brain_backend == "bridge" routes to a persistent assistant session (so voice
@@ -1153,14 +1185,20 @@ def _brain_bridge(text: str, cfg: dict) -> str:
         read_reply = brain_bridge.file_reply_reader(reply_path)
 
     return brain_bridge.brain_via_bridge(
-        text, persona=persona, send=send, read_reply=read_reply, cursor=cursor,
+        text,
+        persona=persona,
+        send=send,
+        read_reply=read_reply,
+        cursor=cursor,
         system_prompt=VOICE_SYSTEM_PROMPT,
-        timeout_s=cfg["brain_timeout_s"], poll_s=cfg["brain_poll_s"],
+        timeout_s=cfg["brain_timeout_s"],
+        poll_s=cfg["brain_poll_s"],
     )
 
 
-def _brain_cli(text: str, cfg: dict, model: str | None = None,
-               timeout_s: int | None = None) -> str:
+def _brain_cli(
+    text: str, cfg: dict, model: str | None = None, timeout_s: int | None = None
+) -> str:
     """Dev fallback: send the transcript to the local `claude` CLI.
 
     Uses the host Claude Code subscription via subprocess. Tools are disabled so
@@ -1174,10 +1212,20 @@ def _brain_cli(text: str, cfg: dict, model: str | None = None,
     prompt = f"{VOICE_SYSTEM_PROMPT}\n\nUser: {text}\nAssistant:"
     try:
         result = subprocess.run(
-            [CLAUDE_BIN, "-p", "--model", model,
-             "--tools", "", "--no-session-persistence"],
-            input=prompt, capture_output=True, text=True,
-            timeout=timeout_s, cwd=tempfile.gettempdir(),
+            [
+                CLAUDE_BIN,
+                "-p",
+                "--model",
+                model,
+                "--tools",
+                "",
+                "--no-session-persistence",
+            ],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            cwd=tempfile.gettempdir(),
         )
     except subprocess.TimeoutExpired:
         return "Sorry, I timed out thinking about that."
@@ -1218,7 +1266,10 @@ def _speak_subprocess(text: str, onnx: Path, out_wav_path: str) -> None:
     """Fallback TTS: shell out to the piper CLI, reloading the voice each call."""
     subprocess.run(
         [sys.executable, "-m", "piper", "-m", str(onnx), "-f", out_wav_path],
-        input=text, capture_output=True, text=True, check=True,
+        input=text,
+        capture_output=True,
+        text=True,
+        check=True,
     )
 
 
@@ -1263,8 +1314,9 @@ def speak(text: str, out_wav_path: str, voice_model: str | None = None) -> str:
 # --------------------------------------------------------------------------- #
 # End-to-end chain
 # --------------------------------------------------------------------------- #
-def run_pipeline(wav_path: str, out_wav_path: str | None = None,
-                 wake_word: str | None = None) -> dict:
+def run_pipeline(
+    wav_path: str, out_wav_path: str | None = None, wake_word: str | None = None
+) -> dict:
     """Full chain on one input WAV. Returns a dict of stage results + timings."""
     timings: dict[str, float] = {}
     t0 = time.time()
@@ -1313,10 +1365,14 @@ def run_pipeline(wav_path: str, out_wav_path: str | None = None,
     return result
 
 
-def run_turn(frames, model_name: str | None = None,
-             threshold: float | None = None,
-             out_wav_path: str | None = None,
-             on_capture=None, on_wake=None) -> dict | None:
+def run_turn(
+    frames,
+    model_name: str | None = None,
+    threshold: float | None = None,
+    out_wav_path: str | None = None,
+    on_capture=None,
+    on_wake=None,
+) -> dict | None:
     """One live turn over a frame stream: wait for the wake word, capture the
     request to its endpoint, then transcribe -> brain -> speak.
 
@@ -1376,10 +1432,13 @@ def run_turn(frames, model_name: str | None = None,
         if on_wake():
             preroll.clear()
 
-    request_pcm = capture_request(frames, preroll=list(preroll),
-                                  vad_threshold=cfg["capture_vad_threshold"],
-                                  endpoint_silence_ms=cfg["endpoint_silence_ms"],
-                                  max_request_ms=cfg["max_request_ms"])
+    request_pcm = capture_request(
+        frames,
+        preroll=list(preroll),
+        vad_threshold=cfg["capture_vad_threshold"],
+        endpoint_silence_ms=cfg["endpoint_silence_ms"],
+        max_request_ms=cfg["max_request_ms"],
+    )
     # Listening for this turn is done. Let a live loop stop the mic now, before the
     # slow stages below, so it does not buffer (then throw away) input recorded
     # while the assistant is thinking and speaking.
@@ -1432,7 +1491,9 @@ def run_turn(frames, model_name: str | None = None,
     }
 
 
-def warm_models(cfg: dict | None = None, wake_word: str | None = None) -> dict[str, float]:
+def warm_models(
+    cfg: dict | None = None, wake_word: str | None = None
+) -> dict[str, float]:
     """Load every model the first live turn would otherwise load lazily, up front.
 
     A live turn touches four models, each loaded lazily on first use: the wake model
@@ -1479,16 +1540,22 @@ def warm_models(cfg: dict | None = None, wake_word: str | None = None) -> dict[s
                     "will load lazily on first use"
                 )
             else:
-                print(f"  warm {label}: failed ({type(exc).__name__}: {exc}); "
-                      "will load lazily on first use")
+                print(
+                    f"  warm {label}: failed ({type(exc).__name__}: {exc}); "
+                    "will load lazily on first use"
+                )
             continue
         warmed[label] = time.time() - t0
         print(f"  warm {label}: {warmed[label]:.2f}s")
     return warmed
 
 
-def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
-             threshold: float | None = None) -> None:
+def run_loop(
+    wake_word: str | None = None,
+    mic_name=None,
+    output_name=None,
+    threshold: float | None = None,
+) -> None:
     """Always-on voice loop: listen, wake, capture, answer, speak -- repeat.
 
     Drives run_turn over a live microphone (audio.Microphone) and plays each reply
@@ -1525,8 +1592,10 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
         try:
             cue_wav = chime.wake_cue_wav()
         except Exception as e:  # noqa: BLE001 - the chime is optional, never fatal
-            print(f"  wake chime unavailable ({type(e).__name__}: {e}); "
-                  "continuing without it")
+            print(
+                f"  wake chime unavailable ({type(e).__name__}: {e}); "
+                "continuing without it"
+            )
 
     # Warm the models before listening so the first turn is as fast as the rest
     # (issue #13). Each loader caches, so the first real turn reuses these instances.
@@ -1572,15 +1641,21 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
         try:
             while True:
                 paused = False
-                result = run_turn(frames, model_name=wake_word,
-                                  threshold=threshold, out_wav_path=out_wav,
-                                  on_capture=pause_for_turn,
-                                  on_wake=chime_for_turn if cue_wav else None)
+                result = run_turn(
+                    frames,
+                    model_name=wake_word,
+                    threshold=threshold,
+                    out_wav_path=out_wav,
+                    on_capture=pause_for_turn,
+                    on_wake=chime_for_turn if cue_wav else None,
+                )
                 if result is not None:
                     print(f"  heard: {result['transcript']!r}")
                     if result.get("rejected") == "low_confidence":
-                        print("  low confidence, re-prompting "
-                              f"({result.get('reject_reason')})")
+                        print(
+                            "  low confidence, re-prompting "
+                            f"({result.get('reject_reason')})"
+                        )
                     print(f"  reply: {result['reply']!r}")
                     # A dead or busy output device on the reply must degrade, never crash
                     # the always-on loop -- the same guarantee the wake chime above and
@@ -1589,8 +1664,10 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
                     try:
                         audio.play_wav(out_wav, output_name)
                     except Exception as e:  # noqa: BLE001 - degrade to the saved WAV, never crash
-                        print(f"  reply playback failed ({type(e).__name__}: {e}); "
-                              f"reply WAV at {out_wav}")
+                        print(
+                            f"  reply playback failed ({type(e).__name__}: {e}); "
+                            f"reply WAV at {out_wav}"
+                        )
                 if paused:
                     # A turn was captured (mic stopped before the slow stages).
                     # Flush while the stream is still stopped: no fresh audio is
@@ -1612,20 +1689,36 @@ def run_loop(wake_word: str | None = None, mic_name=None, output_name=None,
 
 def _cli() -> int:
     p = argparse.ArgumentParser(
-        description="jawn-voice pipeline: process a WAV, or run the live mic loop with --listen")
+        description="jawn-voice pipeline: process a WAV, or run the live mic loop with --listen"
+    )
     p.add_argument("input_wav", nargs="?", help="input WAV to process")
     p.add_argument("-o", "--output", help="output WAV path for the spoken reply")
     p.add_argument("-w", "--wake-word", help="override the active wake word")
-    p.add_argument("--list-wake-words", action="store_true",
-                   help="list installed wake-word models and exit")
-    p.add_argument("--set-wake-word", metavar="NAME",
-                   help="persist a new active wake word to config.json and exit")
-    p.add_argument("--listen", action="store_true",
-                   help="run the always-on live mic loop (needs sounddevice)")
-    p.add_argument("--mic", metavar="NAME",
-                   help="mic device name substring (overrides config mic_device)")
-    p.add_argument("--speaker", metavar="NAME",
-                   help="output device name substring (overrides config output_device)")
+    p.add_argument(
+        "--list-wake-words",
+        action="store_true",
+        help="list installed wake-word models and exit",
+    )
+    p.add_argument(
+        "--set-wake-word",
+        metavar="NAME",
+        help="persist a new active wake word to config.json and exit",
+    )
+    p.add_argument(
+        "--listen",
+        action="store_true",
+        help="run the always-on live mic loop (needs sounddevice)",
+    )
+    p.add_argument(
+        "--mic",
+        metavar="NAME",
+        help="mic device name substring (overrides config mic_device)",
+    )
+    p.add_argument(
+        "--speaker",
+        metavar="NAME",
+        help="output device name substring (overrides config output_device)",
+    )
     args = p.parse_args()
 
     if args.list_wake_words:
@@ -1639,15 +1732,15 @@ def _cli() -> int:
         print(f"active wake word is now: {cfg['wake_word']}")
         return 0
     if args.listen:
-        run_loop(wake_word=args.wake_word, mic_name=args.mic,
-                 output_name=args.speaker)
+        run_loop(wake_word=args.wake_word, mic_name=args.mic, output_name=args.speaker)
         return 0
     if not args.input_wav:
-        p.error("input_wav is required unless using "
-                "--listen/--list-wake-words/--set-wake-word")
+        p.error(
+            "input_wav is required unless using "
+            "--listen/--list-wake-words/--set-wake-word"
+        )
 
-    r = run_pipeline(args.input_wav, out_wav_path=args.output,
-                     wake_word=args.wake_word)
+    r = run_pipeline(args.input_wav, out_wav_path=args.output, wake_word=args.wake_word)
     print(f"wake word   : {r['wake_word']}")
     print(f"wake fired  : {r['wake_fired']} (score {r['wake_score']})")
     if not r["wake_fired"]:
@@ -1656,8 +1749,9 @@ def _cli() -> int:
         print(f"transcript  : {r['transcript']}")
         print(f"reply       : {r['reply']}")
         print(f"output wav  : {r['output_wav']}")
-    print("timings (s) : " + ", ".join(
-        f"{k}={v:.2f}" for k, v in r["timings_s"].items()))
+    print(
+        "timings (s) : " + ", ".join(f"{k}={v:.2f}" for k, v in r["timings_s"].items())
+    )
     return 0
 
 

@@ -42,11 +42,13 @@ def main() -> int:
     # brain() by name in this module's namespace, so reassigning it here routes
     # the brain stage through bot-spren's send/reply contract instead of claude -p.
     pipeline.brain = lambda text, **_: brain_bridge.brain_via_bridge(
-        text, persona="syl",
+        text,
+        persona="syl",
         send=brain_bridge.local_sim_send(inbox),
         read_reply=brain_bridge.file_reply_reader(reply),
         system_prompt=pipeline.VOICE_SYSTEM_PROMPT,
-        timeout_s=20, poll_s=0.05,
+        timeout_s=20,
+        poll_s=0.05,
     )
 
     clip = str(PROJECT / "test_audio" / "clip_jarvis.wav")
@@ -56,20 +58,26 @@ def main() -> int:
 
     try:
         # Pin the wake word so the test is independent of config.json's active one.
-        r = pipeline.run_pipeline(clip, out_wav_path=str(d / "reply.wav"),
-                                  wake_word="hey_jarvis")
+        r = pipeline.run_pipeline(
+            clip, out_wav_path=str(d / "reply.wav"), wake_word="hey_jarvis"
+        )
     finally:
         sim.stop()
 
     check(r["wake_fired"], f"wake fired on the clip (score {r['wake_score']})")
     check(bool(r["transcript"]), f"STT produced text: {r['transcript']!r}")
-    check(r["reply"] == "Two plus two is four.",
-          f"bridge brain answered correctly: {r['reply']!r}")
-    check(bool(r["output_wav"]) and Path(r["output_wav"]).exists(),
-          f"TTS wrote a reply wav: {r['output_wav']}")
+    check(
+        r["reply"] == "Two plus two is four.",
+        f"bridge brain answered correctly: {r['reply']!r}",
+    )
+    check(
+        bool(r["output_wav"]) and Path(r["output_wav"]).exists(),
+        f"TTS wrote a reply wav: {r['output_wav']}",
+    )
 
-    print("\ntimings (s): " + ", ".join(
-        f"{k}={v:.2f}" for k, v in r["timings_s"].items()))
+    print(
+        "\ntimings (s): " + ", ".join(f"{k}={v:.2f}" for k, v in r["timings_s"].items())
+    )
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

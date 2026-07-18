@@ -25,8 +25,9 @@ def check(ok: bool, detail: str) -> None:
     print(f"  [{'PASS' if ok else 'FAIL'}] {detail}")
 
 
-def make_bursts(n: int, burst_s: float, gap_s: float, sr: int,
-                freq: float = 440.0) -> np.ndarray:
+def make_bursts(
+    n: int, burst_s: float, gap_s: float, sr: int, freq: float = 440.0
+) -> np.ndarray:
     """n tone bursts of burst_s separated by gap_s of near-silence."""
     burst_len = int(burst_s * sr)
     gap_len = int(gap_s * sr)
@@ -58,12 +59,16 @@ def test_process_positive(d: Path) -> None:
     out = d / "positive"
     total = prep.process([src], out, "positive", 0.3, 0.2, 3.0)
     files = sorted(out.glob("*.wav"))
-    check(total == 3 and len(files) == 3,
-          f"process wrote 3 positive clips (total={total}, files={len(files)})")
+    check(
+        total == 3 and len(files) == 3,
+        f"process wrote 3 positive clips (total={total}, files={len(files)})",
+    )
     if files:
         info = sf.info(files[0])
-        check(info.samplerate == 16000 and info.channels == 1,
-              f"clips are 16 kHz mono ({info.samplerate} Hz, {info.channels} ch)")
+        check(
+            info.samplerate == 16000 and info.channels == 1,
+            f"clips are 16 kHz mono ({info.samplerate} Hz, {info.channels} ch)",
+        )
 
 
 def test_resample_to_16k_mono(d: Path) -> None:
@@ -75,8 +80,10 @@ def test_resample_to_16k_mono(d: Path) -> None:
     loaded = prep.load_mono_16k(src)
     expected = int(round(len(audio) * 16000 / sr))
     check(loaded.ndim == 1, "loaded audio is mono")
-    check(abs(len(loaded) - expected) <= 2,
-          f"resampled length matches 16 kHz (got {len(loaded)}, want ~{expected})")
+    check(
+        abs(len(loaded) - expected) <= 2,
+        f"resampled length matches 16 kHz (got {len(loaded)}, want ~{expected})",
+    )
 
 
 def test_background_kept_whole(d: Path) -> None:
@@ -86,8 +93,10 @@ def test_background_kept_whole(d: Path) -> None:
     out = d / "background"
     total = prep.process([src], out, "background", 0.3, 0.2, 3.0)
     files = sorted(out.glob("*.wav"))
-    check(total == 1 and len(files) == 1,
-          f"background is one normalized file, not segmented (files={len(files)})")
+    check(
+        total == 1 and len(files) == 1,
+        f"background is one normalized file, not segmented (files={len(files)})",
+    )
 
 
 def test_explicit_files_only(d: Path) -> None:
@@ -102,19 +111,24 @@ def test_explicit_files_only(d: Path) -> None:
     pos1 = folder / "computah_a.wav"
     pos2 = folder / "computah_b.wav"
     neg = folder / "negatives.wav"
-    sf.write(pos1, make_bursts(2, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR,
-             subtype="PCM_16")
-    sf.write(pos2, make_bursts(3, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR,
-             subtype="PCM_16")
-    sf.write(neg, make_bursts(4, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR,
-             subtype="PCM_16")
+    sf.write(
+        pos1, make_bursts(2, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    sf.write(
+        pos2, make_bursts(3, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    sf.write(
+        neg, make_bursts(4, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
 
     out = d / "pos_only"
     total = prep.process([pos1, pos2], out, "positive", 0.3, 0.2, 3.0)
     files = sorted(out.glob("*.wav"))
     check(total == 5, f"only the two listed files processed (total={total}, want 5)")
-    check(not any("negatives" in f.name for f in files),
-          "the sibling negatives.wav was not pulled into positives")
+    check(
+        not any("negatives" in f.name for f in files),
+        "the sibling negatives.wav was not pulled into positives",
+    )
 
     out_all = d / "all"
     total_all = prep.process([folder], out_all, "positive", 0.3, 0.2, 3.0)

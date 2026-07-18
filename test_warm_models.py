@@ -44,19 +44,31 @@ def _stub_loaders(record: dict) -> tuple:
 
     Returns the tuple of originals so the caller restores them in a finally.
     """
-    real = (pipeline._get_oww_model, pipeline._get_whisper, pipeline._get_piper,
-            pipeline._get_vad, pipeline._resolve_wake_path)
+    real = (
+        pipeline._get_oww_model,
+        pipeline._get_whisper,
+        pipeline._get_piper,
+        pipeline._get_vad,
+        pipeline._resolve_wake_path,
+    )
     pipeline._resolve_wake_path = lambda name: f"/models/{name}.onnx"
     pipeline._get_oww_model = lambda path: record["wake"].append(path)
-    pipeline._get_whisper = lambda model, compute: record["whisper"].append((model, compute))
+    pipeline._get_whisper = lambda model, compute: record["whisper"].append(
+        (model, compute)
+    )
     pipeline._get_piper = lambda path: record["piper"].append(path)
     pipeline._get_vad = lambda: record["vad"].append("vad")
     return real
 
 
 def _restore_loaders(real: tuple) -> None:
-    (pipeline._get_oww_model, pipeline._get_whisper, pipeline._get_piper,
-     pipeline._get_vad, pipeline._resolve_wake_path) = real
+    (
+        pipeline._get_oww_model,
+        pipeline._get_whisper,
+        pipeline._get_piper,
+        pipeline._get_vad,
+        pipeline._resolve_wake_path,
+    ) = real
 
 
 def test_warms_each_once() -> None:
@@ -68,19 +80,28 @@ def test_warms_each_once() -> None:
     finally:
         _restore_loaders(real)
 
-    check("wake model loaded once, resolved from the active wake word",
-          record["wake"] == ["/models/hey_jarvis.onnx"], f"{record['wake']}")
-    check("capture-time VAD loaded once",
-          record["vad"] == ["vad"], f"{record['vad']}")
-    check("whisper loaded once with the configured model and compute",
-          record["whisper"] == [("base.en", "int8")], f"{record['whisper']}")
-    check("piper voice loaded once from the configured voice model",
-          record["piper"] == [str(pipeline.VOICES_DIR / "en_US-lessac-medium.onnx")],
-          f"{record['piper']}")
-    check("returns a warm time for every stage that loaded",
-          set(timings) == {"wake", "vad", "whisper", "piper"}
-          and all(isinstance(v, float) and v >= 0 for v in timings.values()),
-          f"{timings}")
+    check(
+        "wake model loaded once, resolved from the active wake word",
+        record["wake"] == ["/models/hey_jarvis.onnx"],
+        f"{record['wake']}",
+    )
+    check("capture-time VAD loaded once", record["vad"] == ["vad"], f"{record['vad']}")
+    check(
+        "whisper loaded once with the configured model and compute",
+        record["whisper"] == [("base.en", "int8")],
+        f"{record['whisper']}",
+    )
+    check(
+        "piper voice loaded once from the configured voice model",
+        record["piper"] == [str(pipeline.VOICES_DIR / "en_US-lessac-medium.onnx")],
+        f"{record['piper']}",
+    )
+    check(
+        "returns a warm time for every stage that loaded",
+        set(timings) == {"wake", "vad", "whisper", "piper"}
+        and all(isinstance(v, float) and v >= 0 for v in timings.values()),
+        f"{timings}",
+    )
 
 
 def test_one_failure_skips_only_that_stage() -> None:
@@ -97,14 +118,18 @@ def test_one_failure_skips_only_that_stage() -> None:
     finally:
         _restore_loaders(real)
 
-    check("one stage failing does not raise or stop the others",
-          record["wake"] == ["/models/hey_jarvis.onnx"]
-          and record["vad"] == ["vad"]
-          and record["piper"] == [str(pipeline.VOICES_DIR / "en_US-lessac-medium.onnx")],
-          f"wake={record['wake']} vad={record['vad']} piper={record['piper']}")
-    check("the failed stage is absent from the returned warm times",
-          "whisper" not in timings and set(timings) == {"wake", "vad", "piper"},
-          f"{timings}")
+    check(
+        "one stage failing does not raise or stop the others",
+        record["wake"] == ["/models/hey_jarvis.onnx"]
+        and record["vad"] == ["vad"]
+        and record["piper"] == [str(pipeline.VOICES_DIR / "en_US-lessac-medium.onnx")],
+        f"wake={record['wake']} vad={record['vad']} piper={record['piper']}",
+    )
+    check(
+        "the failed stage is absent from the returned warm times",
+        "whisper" not in timings and set(timings) == {"wake", "vad", "piper"},
+        f"{timings}",
+    )
 
 
 def test_run_loop_warms_before_listening() -> None:
@@ -117,7 +142,9 @@ def test_run_loop_warms_before_listening() -> None:
 
     # wake_chime off so the loop never touches the (guarded) cue path.
     pipeline.load_config = lambda: {"wake_word": "hey_jarvis", "wake_chime": False}
-    pipeline.warm_models = lambda cfg=None, wake_word=None: (order.append("warm"), {})[1]
+    pipeline.warm_models = lambda cfg=None, wake_word=None: (order.append("warm"), {})[
+        1
+    ]
     # No turn is captured, so the loop reaches the inactive-mic branch and breaks.
     pipeline.run_turn = lambda frames, **kw: None
 
@@ -163,8 +190,11 @@ def test_run_loop_warms_before_listening() -> None:
         else:
             sys.modules["audio"] = saved_audio
 
-    check("run_loop warms models, then opens the mic (warm before listen)",
-          order == ["warm", "listen"], f"order={order}")
+    check(
+        "run_loop warms models, then opens the mic (warm before listen)",
+        order == ["warm", "listen"],
+        f"order={order}",
+    )
 
 
 def test_file_pipeline_stays_lazy() -> None:

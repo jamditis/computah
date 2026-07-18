@@ -42,16 +42,30 @@ def main() -> int:
     cursor = brain_bridge.ReplyCursor()
     try:
         out1 = brain_bridge.brain_via_bridge(
-            "hey jarvis, what is two plus two?", persona="syl",
-            send=send, read_reply=read, cursor=cursor, timeout_s=10, poll_s=0.05)
+            "hey jarvis, what is two plus two?",
+            persona="syl",
+            send=send,
+            read_reply=read,
+            cursor=cursor,
+            timeout_s=10,
+            poll_s=0.05,
+        )
         check(out1 == "Two plus two is four.", f"round trip reply: {out1!r}")
 
         # A second turn must return the new reply, not the first turn's stale block.
         out2 = brain_bridge.brain_via_bridge(
-            "what is the capital of france?", persona="syl",
-            send=send, read_reply=read, cursor=cursor, timeout_s=10, poll_s=0.05)
-        check(out2 == "The capital of France is Paris.",
-              f"second turn is fresh, not stale: {out2!r}")
+            "what is the capital of france?",
+            persona="syl",
+            send=send,
+            read_reply=read,
+            cursor=cursor,
+            timeout_s=10,
+            poll_s=0.05,
+        )
+        check(
+            out2 == "The capital of France is Paris.",
+            f"second turn is fresh, not stale: {out2!r}",
+        )
     finally:
         sim.stop()
 
@@ -59,13 +73,17 @@ def main() -> int:
     inbox2 = d / "dead-inbox.jsonl"
     reply2 = d / "dead-reply.txt"
     out3 = brain_bridge.brain_via_bridge(
-        "is anyone there?", persona="syl",
+        "is anyone there?",
+        persona="syl",
         send=brain_bridge.local_sim_send(inbox2),
         read_reply=brain_bridge.file_reply_reader(reply2),
-        timeout_s=1, poll_s=0.05,
+        timeout_s=1,
+        poll_s=0.05,
     )
-    check(out3.startswith("Sorry, the brain took too long"),
-          f"timeout returns a spoken error: {out3!r}")
+    check(
+        out3.startswith("Sorry, the brain took too long"),
+        f"timeout returns a spoken error: {out3!r}",
+    )
 
     # Regression (the one-behind audio bug): a late reply from a timed-out turn must
     # not be spoken on the next turn. The cursor reserves a slot per send, so the
@@ -83,8 +101,8 @@ def main() -> int:
     # B's late reply lands first (slot 1), then C's real reply (slot 2).
     cursor3 = brain_bridge.ReplyCursor(consumed=2)
     frames = [
-        _blocks_text(("a", "A answer")),                                    # at send
-        _blocks_text(("a", "A answer"), ("b", "late B answer")),            # B lands
+        _blocks_text(("a", "A answer")),  # at send
+        _blocks_text(("a", "A answer"), ("b", "late B answer")),  # B lands
         _blocks_text(("a", "A answer"), ("b", "late B answer"), ("c", "C answer")),
     ]
     reads = {"i": 0}
@@ -95,13 +113,22 @@ def main() -> int:
         return text
 
     out4 = brain_bridge.brain_via_bridge(
-        "turn C prompt", persona="syl",
-        send=lambda *a, **k: None, read_reply=_scripted_read,
-        cursor=cursor3, timeout_s=5, poll_s=0.01)
-    check(out4 == "C answer",
-          f"late reply from a timed-out turn is skipped, not spoken: {out4!r}")
-    check(cursor3.consumed == 3,
-          f"the send reserved this turn's slot: consumed={cursor3.consumed}")
+        "turn C prompt",
+        persona="syl",
+        send=lambda *a, **k: None,
+        read_reply=_scripted_read,
+        cursor=cursor3,
+        timeout_s=5,
+        poll_s=0.01,
+    )
+    check(
+        out4 == "C answer",
+        f"late reply from a timed-out turn is skipped, not spoken: {out4!r}",
+    )
+    check(
+        cursor3.consumed == 3,
+        f"the send reserved this turn's slot: consumed={cursor3.consumed}",
+    )
 
     # Self-heal (the dropped-reply wedge): if a reply is never written at all — the
     # session crashed or its delivery hook failed — the reserved slot can never fill,
@@ -118,8 +145,9 @@ def main() -> int:
             self.blocks: list[str] = []
             self.first = True
 
-        def send(self, _persona: str, prompt: str, *,
-                 event_id: str | None = None) -> None:
+        def send(
+            self, _persona: str, prompt: str, *, event_id: str | None = None
+        ) -> None:
             if self.first:
                 self.first = False
                 return  # dropped: no block ever appears for this turn
@@ -127,24 +155,35 @@ def main() -> int:
 
         def read(self) -> str:
             return "".join(
-                f"\n--- t delivery_id={i} ---\n{p}\n"
-                for i, p in enumerate(self.blocks)
+                f"\n--- t delivery_id={i} ---\n{p}\n" for i, p in enumerate(self.blocks)
             )
 
     brain = _DropThenAnswer()
     heal = brain_bridge.ReplyCursor(consumed=0)
     turns = [
         brain_bridge.brain_via_bridge(
-            f"q{n}", persona="syl", send=brain.send, read_reply=brain.read,
-            cursor=heal, timeout_s=0.3, poll_s=0.02)
+            f"q{n}",
+            persona="syl",
+            send=brain.send,
+            read_reply=brain.read,
+            cursor=heal,
+            timeout_s=0.3,
+            poll_s=0.02,
+        )
         for n in range(1, 4)
     ]
-    check(turns[0].startswith("Sorry, the brain took too long"),
-          f"dropped reply times out (turn 1): {turns[0]!r}")
-    check(turns[1].startswith("Sorry, the brain took too long"),
-          f"still wedged before the resync threshold (turn 2): {turns[1]!r}")
-    check(turns[2] == "q3",
-          f"cursor resynced; turn 3 speaks its own answer, not a wedge: {turns[2]!r}")
+    check(
+        turns[0].startswith("Sorry, the brain took too long"),
+        f"dropped reply times out (turn 1): {turns[0]!r}",
+    )
+    check(
+        turns[1].startswith("Sorry, the brain took too long"),
+        f"still wedged before the resync threshold (turn 2): {turns[1]!r}",
+    )
+    check(
+        turns[2] == "q3",
+        f"cursor resynced; turn 3 speaks its own answer, not a wedge: {turns[2]!r}",
+    )
 
     # The send argv must carry -d <working_dir> so bot-spren writes to the session's
     # inbox, not its default ~/.bot-spren/<name>/state dead-letter dir. Capture the
@@ -162,17 +201,23 @@ def main() -> int:
     brain_bridge.subprocess.run = _fake_run
     try:
         brain_bridge.cli_send("bot-spren", working_dir="/x/syl")("syl", "hi")
-        check(captured[-1] == ["bot-spren", "send", "-d", "/x/syl", "syl", "hi"],
-              f"cli_send with workdir inserts -d: {captured[-1]}")
+        check(
+            captured[-1] == ["bot-spren", "send", "-d", "/x/syl", "syl", "hi"],
+            f"cli_send with workdir inserts -d: {captured[-1]}",
+        )
 
         brain_bridge.cli_send("bot-spren")("syl", "hi")
-        check(captured[-1] == ["bot-spren", "send", "syl", "hi"],
-              f"cli_send without workdir omits -d: {captured[-1]}")
+        check(
+            captured[-1] == ["bot-spren", "send", "syl", "hi"],
+            f"cli_send without workdir omits -d: {captured[-1]}",
+        )
 
         brain_bridge.ssh_cli_send("ofj", "bot-spren", working_dir="/x/syl")("syl", "hi")
         remote = captured[-1][-1]  # the joined remote command is the last ssh arg
-        check("send -d /x/syl syl hi" in remote,
-              f"ssh_cli_send with workdir inserts -d into remote: {remote!r}")
+        check(
+            "send -d /x/syl syl hi" in remote,
+            f"ssh_cli_send with workdir inserts -d into remote: {remote!r}",
+        )
     finally:
         brain_bridge.subprocess.run = real_run
 
@@ -195,15 +240,23 @@ def main() -> int:
             self.drop = set(drop)
             self.plain = set(plain)  # turns written WITHOUT an event_id (positional)
 
-        def send(self, _persona: str, prompt: str, *,
-                 event_id: str | None = None) -> None:
+        def send(
+            self, _persona: str, prompt: str, *, event_id: str | None = None
+        ) -> None:
             self.turn += 1
             text = prompt.split("User: ", 1)[-1] if "User: " in prompt else prompt
             if self.turn in self.drop:
                 return  # reply dropped at source (#48)
-            eid = None if self.turn in self.plain else event_id  # unstamped -> positional
-            self.blocks.append((f"d{self.turn}", eid,
-                                answers.get(text.strip(), f"echo:{text.strip()}")))
+            eid = (
+                None if self.turn in self.plain else event_id
+            )  # unstamped -> positional
+            self.blocks.append(
+                (
+                    f"d{self.turn}",
+                    eid,
+                    answers.get(text.strip(), f"echo:{text.strip()}"),
+                )
+            )
 
         def read(self) -> str:
             out = ""
@@ -220,14 +273,23 @@ def main() -> int:
     # before any producer emits it.)
     parsed = brain_bridge._delivery_blocks(
         "\n--- t delivery_id=d1 event_id=e1 ---\nstamped\n"
-        "\n--- t delivery_id=d2 ---\nunstamped\n")
-    check(parsed == [("d1", "e1", "stamped"), ("d2", None, "unstamped")],
-          f"_delivery_blocks parses the optional event_id token: {parsed}")
+        "\n--- t delivery_id=d2 ---\nunstamped\n"
+    )
+    check(
+        parsed == [("d1", "e1", "stamped"), ("d2", None, "unstamped")],
+        f"_delivery_blocks parses the optional event_id token: {parsed}",
+    )
 
     # Identity round trip: two turns, each returns its own stamped answer.
     syl = _StampedSyl()
-    common = dict(persona="syl", send=syl.send, read_reply=syl.read,
-                  cursor=brain_bridge.ReplyCursor(), timeout_s=0.5, poll_s=0.01)
+    common = dict(
+        persona="syl",
+        send=syl.send,
+        read_reply=syl.read,
+        cursor=brain_bridge.ReplyCursor(),
+        timeout_s=0.5,
+        poll_s=0.01,
+    )
     r1 = brain_bridge.brain_via_bridge("what is two plus two?", **common)
     r2 = brain_bridge.brain_via_bridge("what is the capital of france?", **common)
     check(r1 == answers["what is two plus two?"], f"identity turn 1: {r1!r}")
@@ -238,14 +300,24 @@ def main() -> int:
     # correlation turn 2 would time out too (its block sits at slot 0 while the cursor
     # polls slot 1) -- the collateral damage this closes.
     syl2 = _StampedSyl(drop={1})
-    common2 = dict(persona="syl", send=syl2.send, read_reply=syl2.read,
-                   cursor=brain_bridge.ReplyCursor(), timeout_s=0.3, poll_s=0.02)
+    common2 = dict(
+        persona="syl",
+        send=syl2.send,
+        read_reply=syl2.read,
+        cursor=brain_bridge.ReplyCursor(),
+        timeout_s=0.3,
+        poll_s=0.02,
+    )
     d1 = brain_bridge.brain_via_bridge("what is two plus two?", **common2)
     d2 = brain_bridge.brain_via_bridge("what is the capital of france?", **common2)
-    check(d1.startswith("Sorry, the brain took too long"),
-          f"dropped reply still times out its own turn: {d1!r}")
-    check(d2 == answers["what is the capital of france?"],
-          f"next turn keeps its own answer despite the drop (#48 fixed): {d2!r}")
+    check(
+        d1.startswith("Sorry, the brain took too long"),
+        f"dropped reply still times out its own turn: {d1!r}",
+    )
+    check(
+        d2 == answers["what is the capital of france?"],
+        f"next turn keeps its own answer despite the drop (#48 fixed): {d2!r}",
+    )
 
     # Mixed/transition seam (the hardest case): a stamped block that is NOT this turn's
     # -- a different event_id -- sitting at the positional target slot must be SKIPPED
@@ -257,25 +329,42 @@ def main() -> int:
         "\n--- t delivery_id=dx event_id=eid-x ---\nanswer x\n"
     )
     seam = brain_bridge.brain_via_bridge(
-        "stamped reply dropped for this turn", persona="syl",
-        send=lambda *a, **k: None, read_reply=lambda: seam_file,
-        cursor=brain_bridge.ReplyCursor(consumed=1), timeout_s=0.1, poll_s=0.02)
-    check(seam.startswith("Sorry, the brain took too long"),
-          f"non-matching stamped block at the target slot is skipped: {seam!r}")
+        "stamped reply dropped for this turn",
+        persona="syl",
+        send=lambda *a, **k: None,
+        read_reply=lambda: seam_file,
+        cursor=brain_bridge.ReplyCursor(consumed=1),
+        timeout_s=0.1,
+        poll_s=0.02,
+    )
+    check(
+        seam.startswith("Sorry, the brain took too long"),
+        f"non-matching stamped block at the target slot is skipped: {seam!r}",
+    )
 
     # Cursor coherence across mixed resolution: an unstamped turn (positional) then a
     # stamped turn (identity) through one cursor each return their own answer, and the
     # cursor still counts one slot per send.
     mix = _StampedSyl(plain={1})
     mcur = brain_bridge.ReplyCursor()
-    mcommon = dict(persona="syl", send=mix.send, read_reply=mix.read,
-                   cursor=mcur, timeout_s=0.5, poll_s=0.01)
+    mcommon = dict(
+        persona="syl",
+        send=mix.send,
+        read_reply=mix.read,
+        cursor=mcur,
+        timeout_s=0.5,
+        poll_s=0.01,
+    )
     m1 = brain_bridge.brain_via_bridge("what is two plus two?", **mcommon)
     m2 = brain_bridge.brain_via_bridge("what is the capital of france?", **mcommon)
-    check(m1 == answers["what is two plus two?"],
-          f"mixed: unstamped turn resolves positionally: {m1!r}")
-    check(m2 == answers["what is the capital of france?"],
-          f"mixed: stamped turn resolves by identity: {m2!r}")
+    check(
+        m1 == answers["what is two plus two?"],
+        f"mixed: unstamped turn resolves positionally: {m1!r}",
+    )
+    check(
+        m2 == answers["what is the capital of france?"],
+        f"mixed: stamped turn resolves by identity: {m2!r}",
+    )
     check(mcur.consumed == 2, f"mixed: cursor counts both sends: {mcur.consumed}")
 
     # Transition gap (documented, tracked in #59): after a stamped identity match, a
@@ -288,17 +377,29 @@ def main() -> int:
     # unstamped turn answered at slot 1.
     trans = _StampedSyl(drop={1}, plain={3})
     tcur = brain_bridge.ReplyCursor()
-    tcommon = dict(persona="syl", send=trans.send, read_reply=trans.read,
-                   cursor=tcur, timeout_s=0.3, poll_s=0.02)
+    tcommon = dict(
+        persona="syl",
+        send=trans.send,
+        read_reply=trans.read,
+        cursor=tcur,
+        timeout_s=0.3,
+        poll_s=0.02,
+    )
     t1 = brain_bridge.brain_via_bridge("what is two plus two?", **tcommon)
     t2 = brain_bridge.brain_via_bridge("what is the capital of france?", **tcommon)
     t3 = brain_bridge.brain_via_bridge("what is two plus two?", **tcommon)
-    check(t1.startswith("Sorry, the brain took too long"),
-          f"transition: dropped stamped turn times out: {t1!r}")
-    check(t2 == answers["what is the capital of france?"],
-          f"transition: stamped turn matches by identity regardless of position: {t2!r}")
-    check(t3.startswith("Sorry, the brain took too long"),
-          f"transition: mixed-window unstamped turn after a stamped match strands (deferred to #59): {t3!r}")
+    check(
+        t1.startswith("Sorry, the brain took too long"),
+        f"transition: dropped stamped turn times out: {t1!r}",
+    )
+    check(
+        t2 == answers["what is the capital of france?"],
+        f"transition: stamped turn matches by identity regardless of position: {t2!r}",
+    )
+    check(
+        t3.startswith("Sorry, the brain took too long"),
+        f"transition: mixed-window unstamped turn after a stamped match strands (deferred to #59): {t3!r}",
+    )
 
     # End-to-end identity match through the real components (model-free): the actual
     # local_sim_send stamps the inbox event_id, a real SimPersona echoes it into the
@@ -309,9 +410,14 @@ def main() -> int:
     e2e_sim = SimPersona(e2e_inbox, e2e_reply, poll_s=0.05, echo_event_id=True)
     e2e_sim.start()
     try:
-        ecommon = dict(persona="syl", send=brain_bridge.local_sim_send(e2e_inbox),
-                       read_reply=brain_bridge.file_reply_reader(e2e_reply),
-                       cursor=brain_bridge.ReplyCursor(), timeout_s=10, poll_s=0.05)
+        ecommon = dict(
+            persona="syl",
+            send=brain_bridge.local_sim_send(e2e_inbox),
+            read_reply=brain_bridge.file_reply_reader(e2e_reply),
+            cursor=brain_bridge.ReplyCursor(),
+            timeout_s=10,
+            poll_s=0.05,
+        )
         e1 = brain_bridge.brain_via_bridge("what is two plus two?", **ecommon)
         e2 = brain_bridge.brain_via_bridge("what is the capital of france?", **ecommon)
         check(e1 == "Two plus two is four.", f"e2e identity turn 1: {e1!r}")

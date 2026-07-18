@@ -73,7 +73,11 @@ def main() -> int:
         # loop breaks. The turn's reply is what run_loop then tries to play.
         state["turns"] += 1
         if state["turns"] == 1:
-            return {"transcript": "file an issue", "reply": "Filed it.", "rejected": None}
+            return {
+                "transcript": "file an issue",
+                "reply": "Filed it.",
+                "rejected": None,
+            }
         return None
 
     fake_audio = types.ModuleType("audio")

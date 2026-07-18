@@ -28,26 +28,36 @@ def check(ok: bool, detail: str) -> None:
 def test_empty_and_whitespace() -> None:
     """An empty or whitespace-only reply yields the spoken fallback, not silence."""
     for reply in ("", "   ", "\n\t  \n", None):
-        check(pipeline.sanitize_reply(reply) == pipeline.EMPTY_REPLY_FALLBACK,
-              f"empty reply {reply!r} -> spoken fallback")
+        check(
+            pipeline.sanitize_reply(reply) == pipeline.EMPTY_REPLY_FALLBACK,
+            f"empty reply {reply!r} -> spoken fallback",
+        )
     # A reply that is only a fenced code block has nothing speakable, so it too
     # becomes the fallback rather than reaching TTS as raw code or as silence.
-    check(pipeline.sanitize_reply("```\nprint('do not speak me')\n```")
-          == pipeline.EMPTY_REPLY_FALLBACK,
-          "code-block-only reply -> spoken fallback")
+    check(
+        pipeline.sanitize_reply("```\nprint('do not speak me')\n```")
+        == pipeline.EMPTY_REPLY_FALLBACK,
+        "code-block-only reply -> spoken fallback",
+    )
 
 
 def test_oversized_is_capped() -> None:
     """A very long reply is capped and does not end mid-word."""
     long_reply = ("This is a sentence. " * 200).strip()  # ~3800 chars
     out = pipeline.sanitize_reply(long_reply)
-    check(len(out) <= pipeline.MAX_SPOKEN_CHARS,
-          f"oversized reply capped to <= {pipeline.MAX_SPOKEN_CHARS} (got {len(out)})")
-    check(not out.endswith("senten") and " " not in out[-1:],
-          "cap lands on a clean boundary, not mid-word")
+    check(
+        len(out) <= pipeline.MAX_SPOKEN_CHARS,
+        f"oversized reply capped to <= {pipeline.MAX_SPOKEN_CHARS} (got {len(out)})",
+    )
+    check(
+        not out.endswith("senten") and " " not in out[-1:],
+        "cap lands on a clean boundary, not mid-word",
+    )
     # A custom lower cap is honored.
-    check(len(pipeline.sanitize_reply("word " * 100, max_chars=40)) <= 40,
-          "custom max_chars is honored")
+    check(
+        len(pipeline.sanitize_reply("word " * 100, max_chars=40)) <= 40,
+        "custom max_chars is honored",
+    )
 
 
 def test_truncation_uses_the_last_sentence_end() -> None:
@@ -60,15 +70,18 @@ def test_truncation_uses_the_last_sentence_end() -> None:
     # The period clears the halfway mark (so trying ". " first would return there),
     # the exclamation sits later and still inside the cap, and the whole reply runs
     # past the cap so truncation actually fires.
-    head = "word " * 24                                   # 120 chars, the halfway mark
+    head = "word " * 24  # 120 chars, the halfway mark
     text = head + "period. " + ("beta " * 12) + "gamma! " + ("tail " * 20)
     out = pipeline.sanitize_reply(text, max_chars=240)
-    check(out.endswith("gamma!"),
-          f"cut lands on the last sentence end, not the first kind: {out[-24:]!r}")
+    check(
+        out.endswith("gamma!"),
+        f"cut lands on the last sentence end, not the first kind: {out[-24:]!r}",
+    )
     check(len(out) <= 240, f"still within the cap (got {len(out)})")
     # Every sentence-end kind is eligible, not just the period.
     q = pipeline.sanitize_reply(
-        head + "period. " + ("beta " * 12) + "gamma? " + ("tail " * 20), max_chars=240)
+        head + "period. " + ("beta " * 12) + "gamma? " + ("tail " * 20), max_chars=240
+    )
     check(q.endswith("gamma?"), f"a question mark ends a cut too: {q[-24:]!r}")
 
 
@@ -76,10 +89,14 @@ def test_control_chars_stripped() -> None:
     """Control characters are removed before TTS."""
     dirty = "Hello\x00 there\x07, friend\x1b[0m."
     out = pipeline.sanitize_reply(dirty)
-    check(all(ord(c) >= 0x20 or c == " " for c in out),
-          f"control characters stripped: {out!r}")
-    check("Hello there" in out.replace("  ", " "),
-          "readable text survives the control strip")
+    check(
+        all(ord(c) >= 0x20 or c == " " for c in out),
+        f"control characters stripped: {out!r}",
+    )
+    check(
+        "Hello there" in out.replace("  ", " "),
+        "readable text survives the control strip",
+    )
 
 
 def test_ansi_escapes_stripped() -> None:
@@ -89,16 +106,21 @@ def test_ansi_escapes_stripped() -> None:
     realistic. Dropping only the ESC byte would leave "[31m" to be read aloud.
     """
     out = pipeline.sanitize_reply("\x1b[31mThe build failed.\x1b[0m")
-    check(out == "The build failed.",
-          f"CSI colour codes leave no payload behind: {out!r}")
-    check("[31m" not in out and "[0m" not in out,
-          "no escape payload survives as spoken text")
+    check(
+        out == "The build failed.", f"CSI colour codes leave no payload behind: {out!r}"
+    )
+    check(
+        "[31m" not in out and "[0m" not in out,
+        "no escape payload survives as spoken text",
+    )
     # Cursor moves and a window-title (OSC) sequence go the same way.
     moves = pipeline.sanitize_reply("\x1b[2J\x1b[HDone.\x1b]0;title\x07")
     check(moves == "Done.", f"CSI cursor moves and OSC stripped: {moves!r}")
     # A reply that is nothing but escapes has nothing speakable left.
-    check(pipeline.sanitize_reply("\x1b[31m\x1b[0m") == pipeline.EMPTY_REPLY_FALLBACK,
-          "escape-only reply -> spoken fallback")
+    check(
+        pipeline.sanitize_reply("\x1b[31m\x1b[0m") == pipeline.EMPTY_REPLY_FALLBACK,
+        "escape-only reply -> spoken fallback",
+    )
 
 
 def test_markdown_stripped() -> None:
@@ -114,10 +136,11 @@ def test_markdown_stripped() -> None:
     out = pipeline.sanitize_reply(md)
     for marker in ("#", "*", "`", "~", "]", "(http"):
         check(marker not in out, f"markdown marker {marker!r} stripped")
-    check("bold" in out and "italic" in out and "the docs" in out,
-          "link and emphasis text is kept")
-    check("print('do not speak me')" not in out,
-          "fenced code block content is dropped")
+    check(
+        "bold" in out and "italic" in out and "the docs" in out,
+        "link and emphasis text is kept",
+    )
+    check("print('do not speak me')" not in out, "fenced code block content is dropped")
     check("\n" not in out, "newlines collapsed to spaces")
 
 
@@ -126,25 +149,35 @@ def test_markdown_edge_cases() -> None:
     # Underscore emphasis is removed, but snake_case identifiers, filenames, and env
     # vars in a plain reply survive so they are spoken intact, not run together.
     ident = pipeline.sanitize_reply("Set BOT_SPREN_STATE_DIR in config_local.json.")
-    check("BOT_SPREN_STATE_DIR" in ident and "config_local.json" in ident,
-          f"snake_case identifiers keep their underscores: {ident!r}")
+    check(
+        "BOT_SPREN_STATE_DIR" in ident and "config_local.json" in ident,
+        f"snake_case identifiers keep their underscores: {ident!r}",
+    )
     emph = pipeline.sanitize_reply("This is _important_ and __very__ so.")
-    check("_" not in emph and "important" in emph and "very" in emph,
-          f"paired underscore emphasis is stripped: {emph!r}")
+    check(
+        "_" not in emph and "important" in emph and "very" in emph,
+        f"paired underscore emphasis is stripped: {emph!r}",
+    )
     # A literal asterisk that is not emphasis (a glob or multiplication) is spoken
     # as written, not deleted along with the emphasis markers.
     glob = pipeline.sanitize_reply("List the *.py files, then compute 5 * 6.")
-    check("*.py" in glob and "5 * 6" in glob,
-          f"literal asterisks (glob, math) are preserved: {glob!r}")
+    check(
+        "*.py" in glob and "5 * 6" in glob,
+        f"literal asterisks (glob, math) are preserved: {glob!r}",
+    )
     star = pipeline.sanitize_reply("Use **bold** and *italic* sparingly.")
-    check("*" not in star and "bold" in star and "italic" in star,
-          f"paired asterisk emphasis is stripped: {star!r}")
+    check(
+        "*" not in star and "bold" in star and "italic" in star,
+        f"paired asterisk emphasis is stripped: {star!r}",
+    )
 
     # An unterminated fenced block (truncated reply, opening fence, no close) must be
     # dropped entirely, not just have its backticks peeled off, or code gets spoken.
     broken = pipeline.sanitize_reply("Run this:\n```\nrm -rf / --no-preserve-root")
-    check("rm -rf" not in broken and "no-preserve-root" not in broken,
-          f"unterminated fenced code is dropped, not spoken: {broken!r}")
+    check(
+        "rm -rf" not in broken and "no-preserve-root" not in broken,
+        f"unterminated fenced code is dropped, not spoken: {broken!r}",
+    )
     check("Run this" in broken, "text before the broken fence survives")
 
 
@@ -155,10 +188,12 @@ def test_unpaired_emphasis_runs_are_literal() -> None:
     CommonMark renders "*args", "**kwargs", "_private" and "VALUE_" verbatim. A reply
     about code is full of these, and dropping the delimiter renames the thing spoken.
     """
-    for reply, kept in (("Pass *args to it.", "*args"),
-                        ("Pass **kwargs to it.", "**kwargs"),
-                        ("Set _private on the class.", "_private"),
-                        ("Use VALUE_ as the prefix.", "VALUE_")):
+    for reply, kept in (
+        ("Pass *args to it.", "*args"),
+        ("Pass **kwargs to it.", "**kwargs"),
+        ("Set _private on the class.", "_private"),
+        ("Use VALUE_ as the prefix.", "VALUE_"),
+    ):
         out = pipeline.sanitize_reply(reply)
         check(kept in out, f"unpaired run stays literal: {reply!r} -> {out!r}")
 
@@ -169,25 +204,29 @@ def test_code_span_content_is_literal() -> None:
     "`__init__`" is the identifier, not bold "init". The ticks still come off, but only
     after emphasis, which is the order markdown itself resolves them in.
     """
-    for reply, kept in (("The `__init__` method runs first.", "__init__"),
-                        ("The `_private` field is internal.", "_private"),
-                        ("Read `VALUE_` from the env.", "VALUE_")):
+    for reply, kept in (
+        ("The `__init__` method runs first.", "__init__"),
+        ("The `_private` field is internal.", "_private"),
+        ("Read `VALUE_` from the env.", "VALUE_"),
+    ):
         out = pipeline.sanitize_reply(reply)
         check(kept in out, f"code span stays literal: {reply!r} -> {out!r}")
         check("`" not in out, f"backticks still stripped: {out!r}")
 
 
 def test_a_quote_marker_without_a_space_still_holds_a_block() -> None:
-    """">" alone opens a quote, so ">```" is a fence inside one and its body is code.
+    """ ">" alone opens a quote, so ">```" is a fence inside one and its body is code.
 
     A list marker needs its space to be a marker ("-foo" is a word), but a quote marker does
     not. Sharing one whitespace rule between them left the ">" in place, so the fence never
     reached a line start, the block was never recognised, and its body was spoken -- which is
     the one thing this stage exists to stop.
     """
-    for reply in ("Before.\n>```\nsecret\n>```\nAfter.",
-                  "Before.\n>>```\nsecret\n>>```\nAfter.",
-                  "Before.\n> ```\nsecret\n> ```\nAfter."):
+    for reply in (
+        "Before.\n>```\nsecret\n>```\nAfter.",
+        "Before.\n>>```\nsecret\n>>```\nAfter.",
+        "Before.\n> ```\nsecret\n> ```\nAfter.",
+    ):
         out = pipeline.sanitize_reply(reply)
         check("secret" not in out, f"block body not spoken: {reply!r} -> {out!r}")
         check("After." in out, f"prose after the block survives: {out!r}")
@@ -241,8 +280,10 @@ def test_many_unclosed_runs_do_not_stall_the_loop() -> None:
     out = pipeline.sanitize_reply(reply)
     elapsed = time.perf_counter() - start
     check(elapsed < 1.0, f"400 distinct unclosed runs took {elapsed:.1f}s (was 2.0s)")
-    check(out.startswith("Before ") and out.endswith("After."),
-          f"the prose around them still speaks: {out[:12]!r}..{out[-8:]!r}")
+    check(
+        out.startswith("Before ") and out.endswith("After."),
+        f"the prose around them still speaks: {out[:12]!r}..{out[-8:]!r}",
+    )
 
 
 def test_an_unpaired_run_opens_nothing_and_keeps_its_line() -> None:
@@ -252,10 +293,16 @@ def test_an_unpaired_run_opens_nothing_and_keeps_its_line() -> None:
     whole ordering above exists to prevent -- and speech that is silently cut is
     indistinguishable downstream from speech that was never said.
     """
-    for reply in ("Use ``` to open a block.", "A ` tick and text after it.",
-                  "Two `` ticks and more text."):
+    for reply in (
+        "Use ``` to open a block.",
+        "A ` tick and text after it.",
+        "Two `` ticks and more text.",
+    ):
         out = pipeline.sanitize_reply(reply)
-        check(out.rstrip(".").endswith(("block", "it", "text")), f"tail kept: {reply!r} -> {out!r}")
+        check(
+            out.rstrip(".").endswith(("block", "it", "text")),
+            f"tail kept: {reply!r} -> {out!r}",
+        )
 
 
 def test_inner_ticks_belong_to_the_span_the_outer_run_opened() -> None:
@@ -282,20 +329,25 @@ def test_paired_dunder_speaks_as_its_content() -> None:
     the two cases. Both are pinned here together because they are one decision:
     whatever keeps the underscores on "__init__" puts them on "__bold__" too.
     """
-    for reply, spoken in (("__init__", "init"),
-                          ("The __init__ method runs first.",
-                           "The init method runs first."),
-                          ("__bold__", "bold"),
-                          ("__really important__", "really important")):
+    for reply, spoken in (
+        ("__init__", "init"),
+        ("The __init__ method runs first.", "The init method runs first."),
+        ("__bold__", "bold"),
+        ("__really important__", "really important"),
+    ):
         out = pipeline.sanitize_reply(reply)
-        check(out == spoken, f"paired dunder speaks as its content: {reply!r} -> {out!r}")
+        check(
+            out == spoken, f"paired dunder speaks as its content: {reply!r} -> {out!r}"
+        )
 
 
 def test_nested_emphasis_fully_stripped() -> None:
     """Emphasis inside emphasis leaves no delimiter behind for TTS to read."""
     out = pipeline.sanitize_reply("This is **bold with *italic* inside** it.")
-    check("*" not in out and "bold with italic inside" in out,
-          f"nested emphasis fully stripped: {out!r}")
+    check(
+        "*" not in out and "bold with italic inside" in out,
+        f"nested emphasis fully stripped: {out!r}",
+    )
 
 
 def test_ansi_csi_takes_all_parameter_bytes() -> None:
@@ -316,8 +368,10 @@ def test_tilde_fenced_code_is_dropped() -> None:
     closed = pipeline.sanitize_reply('Before.\n~~~python\nprint("hi")\n~~~\nAfter.')
     check('print("hi")' not in closed, f"tilde-fenced code not spoken: {closed!r}")
     check("~" not in closed, f"no fence characters survive: {closed!r}")
-    check("Before." in closed and "After." in closed,
-          f"prose around the fence survives: {closed!r}")
+    check(
+        "Before." in closed and "After." in closed,
+        f"prose around the fence survives: {closed!r}",
+    )
     # An unterminated tilde fence (a truncated reply) drops to the end, as a backtick
     # fence does, rather than spilling the code body into speech.
     broken = pipeline.sanitize_reply("Run this:\n~~~\nrm -rf / --no-preserve-root")
@@ -334,20 +388,34 @@ def test_inline_fence_mention_is_not_a_block() -> None:
     to open a code block loses the explanation. Deleting speech is worse than leaving
     markup in it, because nothing downstream can tell the reply was cut.
     """
-    out = pipeline.sanitize_reply("To open a block, type ``` and then your code. That is the whole trick.")
-    check("the whole trick" in out, f"prose after an inline fence mention survives: {out!r}")
+    out = pipeline.sanitize_reply(
+        "To open a block, type ``` and then your code. That is the whole trick."
+    )
+    check(
+        "the whole trick" in out,
+        f"prose after an inline fence mention survives: {out!r}",
+    )
     check("`" not in out, f"no fence characters survive: {out!r}")
     # Two mentions in one sentence must not pair into a block that eats the words between.
     pair = pipeline.sanitize_reply("Use ``` to start and ``` to end. Got it?")
-    check("to start" in pair and "to end" in pair, f"text between two mentions survives: {pair!r}")
+    check(
+        "to start" in pair and "to end" in pair,
+        f"text between two mentions survives: {pair!r}",
+    )
     # An indented mention is still a mention: only up to 3 spaces makes a real opener, and
     # this sits mid-line regardless.
     tilde = pipeline.sanitize_reply("A ~~~ marks a fence too. Remember that.")
-    check("Remember that" in tilde, f"prose after an inline tilde mention survives: {tilde!r}")
+    check(
+        "Remember that" in tilde,
+        f"prose after an inline tilde mention survives: {tilde!r}",
+    )
     # The guarantee the anchor must not cost: a real block still goes.
     real = pipeline.sanitize_reply("Before.\n```python\nprint('hi')\n```\nAfter.")
     check("print" not in real, f"a real fenced block is still dropped: {real!r}")
-    check("Before." in real and "After." in real, f"prose around a real block survives: {real!r}")
+    check(
+        "Before." in real and "After." in real,
+        f"prose around a real block survives: {real!r}",
+    )
 
 
 def test_keycap_emoji_fully_stripped() -> None:
@@ -372,11 +440,21 @@ def test_link_destination_with_parens_consumed_whole() -> None:
     '.../Foo_(bar)' stops a non-nesting pattern at the inner ')' and leaves the outer one
     behind to be spoken as punctuation after the label.
     """
-    out = pipeline.sanitize_reply("See [Wikipedia](https://en.wikipedia.org/wiki/Foo_(bar)) for more.")
-    check(out == "See Wikipedia for more.", f"paren-bearing link reduced to its label: {out!r}")
+    out = pipeline.sanitize_reply(
+        "See [Wikipedia](https://en.wikipedia.org/wiki/Foo_(bar)) for more."
+    )
+    check(
+        out == "See Wikipedia for more.",
+        f"paren-bearing link reduced to its label: {out!r}",
+    )
     check("wikipedia.org" not in out, f"no URL survives: {out!r}")
-    plain = pipeline.sanitize_reply("See [Wikipedia](https://en.wikipedia.org/wiki/Foo) for more.")
-    check(plain == "See Wikipedia for more.", f"a plain link still reduces to its label: {plain!r}")
+    plain = pipeline.sanitize_reply(
+        "See [Wikipedia](https://en.wikipedia.org/wiki/Foo) for more."
+    )
+    check(
+        plain == "See Wikipedia for more.",
+        f"a plain link still reduces to its label: {plain!r}",
+    )
 
 
 def test_truncated_csi_is_dropped() -> None:
@@ -390,15 +468,17 @@ def test_truncated_csi_is_dropped() -> None:
         out = pipeline.sanitize_reply(f"Done{cut}")
         check(out == "Done", f"truncated CSI {cut!r} left nothing behind: {out!r}")
     # A complete sequence is still taken whole, so the tolerance cost nothing.
-    check(pipeline.sanitize_reply("\x1b[31mred\x1b[0m") == "red", "a terminated CSI still goes")
+    check(
+        pipeline.sanitize_reply("\x1b[31mred\x1b[0m") == "red",
+        "a terminated CSI still goes",
+    )
 
 
 def test_emoji_stripped() -> None:
     """Emoji are stripped without touching accented letters."""
     out = pipeline.sanitize_reply("All done \U0001f44d café résumé")
     check("\U0001f44d" not in out, "emoji stripped")
-    check("café" in out and "résumé" in out,
-          "accented letters untouched")
+    check("café" in out and "résumé" in out, "accented letters untouched")
 
 
 def test_clean_text_unchanged() -> None:
@@ -408,14 +488,19 @@ def test_clean_text_unchanged() -> None:
         "Sorry, I timed out thinking about that.",
         "Sorry, the brain is not available right now.",
     ):
-        check(pipeline.sanitize_reply(reply) == reply,
-              f"clean reply unchanged: {reply!r}")
+        check(
+            pipeline.sanitize_reply(reply) == reply, f"clean reply unchanged: {reply!r}"
+        )
 
 
 def test_brain_routes_both_paths(d: Path) -> None:
     """brain() sanitizes whichever backend produced the reply, before speak()."""
-    saved = (pipeline.CONFIG_PATH, pipeline.LOCAL_CONFIG_PATH,
-             pipeline._brain_cli, pipeline._brain_bridge)
+    saved = (
+        pipeline.CONFIG_PATH,
+        pipeline.LOCAL_CONFIG_PATH,
+        pipeline._brain_cli,
+        pipeline._brain_bridge,
+    )
     try:
         pipeline.CONFIG_PATH = d / "config.json"
         pipeline.LOCAL_CONFIG_PATH = d / "config.local.json"
@@ -424,24 +509,35 @@ def test_brain_routes_both_paths(d: Path) -> None:
         pipeline._brain_cli = lambda text, cfg, **kw: dirty
         pipeline.CONFIG_PATH.write_text('{"brain_backend": "cli"}')
         cli_out = pipeline.brain("hi")
-        check(len(cli_out) <= pipeline.MAX_SPOKEN_CHARS and "**" not in cli_out
-              and "`" not in cli_out,
-              "brain() sanitizes the cli path output")
+        check(
+            len(cli_out) <= pipeline.MAX_SPOKEN_CHARS
+            and "**" not in cli_out
+            and "`" not in cli_out,
+            "brain() sanitizes the cli path output",
+        )
 
         pipeline._brain_bridge = lambda text, cfg: dirty
         pipeline.CONFIG_PATH.write_text('{"brain_backend": "bridge"}')
         bridge_out = pipeline.brain("hi")
-        check(len(bridge_out) <= pipeline.MAX_SPOKEN_CHARS and "**" not in bridge_out,
-              "brain() sanitizes the bridge path output")
+        check(
+            len(bridge_out) <= pipeline.MAX_SPOKEN_CHARS and "**" not in bridge_out,
+            "brain() sanitizes the bridge path output",
+        )
 
         # An empty backend reply still yields a spoken sentence through brain().
         pipeline._brain_cli = lambda text, cfg, **kw: ""
         pipeline.CONFIG_PATH.write_text('{"brain_backend": "cli"}')
-        check(pipeline.brain("hi") == pipeline.EMPTY_REPLY_FALLBACK,
-              "brain() turns an empty reply into the spoken fallback")
+        check(
+            pipeline.brain("hi") == pipeline.EMPTY_REPLY_FALLBACK,
+            "brain() turns an empty reply into the spoken fallback",
+        )
     finally:
-        (pipeline.CONFIG_PATH, pipeline.LOCAL_CONFIG_PATH,
-         pipeline._brain_cli, pipeline._brain_bridge) = saved
+        (
+            pipeline.CONFIG_PATH,
+            pipeline.LOCAL_CONFIG_PATH,
+            pipeline._brain_cli,
+            pipeline._brain_bridge,
+        ) = saved
 
 
 def test_fence_inside_a_container_is_still_a_block() -> None:
@@ -481,7 +577,9 @@ def test_fence_inside_nested_containers_is_still_a_block() -> None:
     re.sub does not rescan what it exposed, so one pass over "> > ```" leaves a marker in
     front of the fence and the block goes unrecognised -- then the code-span rule speaks it.
     """
-    out = pipeline.sanitize_reply("Here:\n> > ```\n> > print('secret')\n> > ```\nAfter.")
+    out = pipeline.sanitize_reply(
+        "Here:\n> > ```\n> > print('secret')\n> > ```\nAfter."
+    )
     check("secret" not in out, f"doubly-quoted fenced code is not spoken: {out!r}")
     check("After" in out, f"prose after it survives: {out!r}")
 
@@ -493,7 +591,10 @@ def test_a_heading_that_names_a_fence_opens_nothing() -> None:
     heading that merely mentions ``` becomes an unterminated opener and eats the reply.
     """
     out = pipeline.sanitize_reply("# ```\nAll of this speech must survive.")
-    check("All of this speech must survive." in out, f"prose after the heading survives: {out!r}")
+    check(
+        "All of this speech must survive." in out,
+        f"prose after the heading survives: {out!r}",
+    )
 
 
 def test_a_bare_marker_does_not_swallow_its_line_ending() -> None:
@@ -503,7 +604,10 @@ def test_a_bare_marker_does_not_swallow_its_line_ending() -> None:
     an indented backtick run to a fence at a line start and deleting every word after it.
     """
     out = pipeline.sanitize_reply("- \n    ```\nAll of this speech must survive.")
-    check("All of this speech must survive." in out, f"prose survives a bare marker: {out!r}")
+    check(
+        "All of this speech must survive." in out,
+        f"prose survives a bare marker: {out!r}",
+    )
 
 
 def test_crlf_input_is_stripped_like_lf() -> None:
@@ -515,7 +619,10 @@ def test_crlf_input_is_stripped_like_lf() -> None:
     """
     out = pipeline.sanitize_reply("Before.\r\n~~~\r\nsecret\r\n~~~\r\nAfter.")
     check("secret" not in out, f"CRLF fenced code is not spoken: {out!r}")
-    check("Before" in out and "After" in out, f"CRLF prose survives on both sides: {out!r}")
+    check(
+        "Before" in out and "After" in out,
+        f"CRLF prose survives on both sides: {out!r}",
+    )
 
 
 def test_closing_fence_may_be_longer_than_its_opener() -> None:
@@ -526,7 +633,9 @@ def test_closing_fence_may_be_longer_than_its_opener() -> None:
     """
     out = pipeline.sanitize_reply("Before.\n~~~\nsecret\n~~~~\nAfter.")
     check("secret" not in out, f"long-closer fenced code is not spoken: {out!r}")
-    check("Before" in out and "After" in out, f"prose survives a longer closer: {out!r}")
+    check(
+        "Before" in out and "After" in out, f"prose survives a longer closer: {out!r}"
+    )
 
 
 def test_link_destination_nests_to_any_depth() -> None:
@@ -537,9 +646,13 @@ def test_link_destination_nests_to_any_depth() -> None:
     the stray punctuation the nesting rule was added to fix.
     """
     out = pipeline.sanitize_reply("See [docs](https://x.test/a(b(c))) now.")
-    check(out.strip() == "See docs now.", f"depth-2 destination consumed whole: {out!r}")
+    check(
+        out.strip() == "See docs now.", f"depth-2 destination consumed whole: {out!r}"
+    )
     out = pipeline.sanitize_reply("See [docs](https://x.test/(((x)))) now.")
-    check(out.strip() == "See docs now.", f"depth-3 destination consumed whole: {out!r}")
+    check(
+        out.strip() == "See docs now.", f"depth-3 destination consumed whole: {out!r}"
+    )
     check("x.test" not in out, f"no destination reaches the speaker: {out!r}")
 
 
@@ -549,9 +662,13 @@ def test_a_closer_must_be_as_long_as_its_opener() -> None:
     The opener must take its whole run rather than give a character back, or "~~~~" matches as
     "~~~" and a later "~~~" closes a block markdown says is still open.
     """
-    out = pipeline.sanitize_reply("Before.\n~~~~\nstill code\n~~~\nmore code\n~~~~\nAfter.")
-    check("still code" not in out and "more code" not in out,
-          f"nothing inside the block is spoken: {out!r}")
+    out = pipeline.sanitize_reply(
+        "Before.\n~~~~\nstill code\n~~~\nmore code\n~~~~\nAfter."
+    )
+    check(
+        "still code" not in out and "more code" not in out,
+        f"nothing inside the block is spoken: {out!r}",
+    )
     check("Before" in out and "After" in out, f"prose survives on both sides: {out!r}")
 
 
@@ -567,13 +684,16 @@ def test_escaped_parens_in_a_destination_are_characters() -> None:
 
 
 def test_an_unbalanced_head_that_was_never_a_link_keeps_the_tail() -> None:
-    """"](" is ordinary text in a code span, and links are read before the ticks are.
+    """ "](" is ordinary text in a code span, and links are read before the ticks are.
 
     A destination cannot hold unescaped whitespace, which bounds how much an unbalanced "("
     may take. Consuming to the end instead deleted the rest of the reply.
     """
     out = pipeline.sanitize_reply("Use `[x](ordinary prose` and keep this tail.")
-    check("keep this tail" in out, f"the tail survives a head that was not a link: {out!r}")
+    check(
+        "keep this tail" in out,
+        f"the tail survives a head that was not a link: {out!r}",
+    )
 
 
 def test_truncated_link_destination_is_not_spoken() -> None:
@@ -616,7 +736,9 @@ def test_link_syntax_in_a_code_span_is_literal() -> None:
     spoken = pipeline.sanitize_reply("The syntax is `![alt](src)` for images.")
     check(spoken == "The syntax is ![alt](src) for images.", f"image span: {spoken!r}")
     # The span is protected, but a real link outside one is still reduced.
-    spoken = pipeline.sanitize_reply("Write `[x](y)` to link [docs](https://example.com).")
+    spoken = pipeline.sanitize_reply(
+        "Write `[x](y)` to link [docs](https://example.com)."
+    )
     check(spoken == "Write [x](y) to link docs.", f"both at once: {spoken!r}")
 
 
@@ -646,15 +768,20 @@ def test_a_wall_of_brackets_does_not_stall_the_loop() -> None:
     above a linear scan of this input and far below the cost of a rescan per bracket, so it
     fails on a return to that shape rather than on a slow host.
     """
-    for name, reply in (("nothing closes them", "[" * 8000 + " hello"),
-                        ("one closer at the end", "[" * 8000 + "](url) hello")):
+    for name, reply in (
+        ("nothing closes them", "[" * 8000 + " hello"),
+        ("one closer at the end", "[" * 8000 + "](url) hello"),
+    ):
         start = time.perf_counter()
         pipeline.sanitize_reply(reply)
         elapsed = time.perf_counter() - start
         check(elapsed < 1.0, f"8k brackets, {name}: {elapsed:.2f}s")
     # The pairing is there to find a link, so prove it still does under the same shape.
-    check(pipeline.sanitize_reply("[" * 20 + "x" + "]" * 20 + " hi") == "[" * 20 + "x" + "]" * 20 + " hi",
-          "unbalanced brackets stay literal")
+    check(
+        pipeline.sanitize_reply("[" * 20 + "x" + "]" * 20 + " hi")
+        == "[" * 20 + "x" + "]" * 20 + " hi",
+        "unbalanced brackets stay literal",
+    )
 
 
 def main() -> int:
