@@ -24,6 +24,7 @@ import argparse
 import collections
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -795,6 +796,341 @@ def guard_transcript(heard: Transcript, cfg: dict) -> tuple[bool, str]:
 # --------------------------------------------------------------------------- #
 # Stage 3: the brain (persistent session via the bridge, or the claude CLI)
 # --------------------------------------------------------------------------- #
+# A reply is model output going straight to Piper, so VOICE_SYSTEM_PROMPT asking
+# for short plain text is a request, not a guarantee: a confused or truncated
+# model still emits markdown, emoji, control bytes, or pages of prose. These
+# bound what can reach speak() regardless of what the model did.
+MAX_SPOKEN_CHARS = 600
+EMPTY_REPLY_FALLBACK = "Sorry, I don't have an answer for that."
+# A whole ANSI escape sequence, not just its ESC byte: _brain_cli returns the
+# claude CLI's stdout, so colour codes are a realistic reply. Dropping only the
+# ESC would leave "[31m" behind to be read aloud. The CSI branch is the ECMA-48
+# grammar rather than the parameter bytes seen so far: any of 0x30-0x3f may appear
+# before the final byte, so a colon-separated true-colour SGR ("\x1b[38:2::255:0:0m")
+# is one sequence, and a narrower pattern leaves its parameters to be spoken.
+_ANSI_ESCAPE_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]?"  # CSI (colour, cursor moves), terminated or not
+    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC (window title), terminated or not
+    r"|[@-Z\\-_])"  # two-character escapes
+)
+_CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+# U+20E3 is the enclosing keycap: "1" + U+FE0F + U+20E3 is one glyph, so taking only the
+# variation selector leaves the digit still wearing a combining mark, which is the emoji
+# this class promises never reaches Piper. U+FE0E is its text-presentation twin.
+_EMOJI_RE = re.compile(
+    "[\U0001f000-\U0001faff\U00002600-\U000027bf\U00002b00-\U00002bff"
+    "\U00002190-\U000021ff\ufe0e\ufe0f\u20e3\u200d]"
+)
+
+
+_LINK_OPEN_RE = re.compile(r"!?\[")
+_WHITESPACE_RE = re.compile(r"\s")
+# Quote and list markers, the two containers a fenced block can sit inside. Headings are not
+# containers and are handled separately, after fences.
+#
+# A list marker needs a space to be a marker at all ("-foo" is a word), but a quote marker does
+# not: ">" alone opens a quote, so ">```" is a fenced block inside one. Requiring a space after
+# ">" left that marker in place, the fence never reached a line start, and the block's body was
+# spoken -- the exact failure the ordering above exists to prevent. So the two take separate
+# branches rather than sharing one whitespace rule. The space stays optional-but-single, which
+# is what markdown counts as the marker; any further indent belongs to the content.
+#
+# The trailing + takes a line's whole marker run in one match, which is what lets the caller do
+# a single pass. Stripping one marker per pass and re-running until the text stopped changing
+# read the same, and cost a pass per marker with a full rescan each time: ">"*8000 took 0.29s
+# and scaled as the square, so a reply that was nothing but quote markers could stall a loop
+# that is always listening. Each repetition consumes at least its marker character, so the run
+# cannot match empty and the + cannot spin.
+_CONTAINER_RE = re.compile(r"(?m)^(?:[ \t]{0,3}(?:(?:[-*+]|\d+[.)])[ \t]+|>[ \t]?))+")
+# A complete fenced block: an opener at a line start (up to 3 spaces, as markdown allows),
+# closed by a run of the SAME character at least as long. Either character opens a block, so a
+# stray "~~~" inside a backtick block cannot close it early.
+#
+# (?!\2) forces the opener to take its whole run. Without it the pattern could give a character
+# back -- matching only three of a "~~~~" opener, letting .*? eat the fourth, and then accepting
+# a later "~~~" as a closer that markdown says is too short to close anything, so what is still
+# code gets spoken.
+#
+# Anchoring to a line start is what keeps a reply that merely MENTIONS ``` mid-sentence from
+# reading as a block, whereupon the unterminated-fence rule would drop every word after it: an
+# answer explaining how to open a code block would lose the explanation, silently, and nothing
+# downstream can tell speech from speech-that-was-cut. An inline run left behind is not spoken
+# anyway -- it pairs off as a code span, or the final tick sweep takes it.
+_FENCED_BLOCK_RE = re.compile(
+    r"(?ms)^[ ]{0,3}((`|~)\2{2,})(?!\2).*?^[ ]{0,3}\1\2*[ \t]*$"
+)
+# Emphasis is a matched pair of identical delimiter runs hugging its content, which is
+# the only thing markdown reads as emphasis. An unpaired run is literal text, and a
+# reply about code is made of unpaired runs (*args, **kwargs, _private, VALUE_) whose
+# delimiter is part of the name being spoken. A run that whitespace keeps from hugging
+# anything (5 * 6) opens nothing either, and \w on the outer edges keeps an underscore
+# inside a word (snake_case) from reading as a delimiter at all.
+# One pattern per delimiter, each barred from crossing its own character: an unpaired
+# run then gives up at the next candidate rather than rescanning the rest of the
+# reply, which keeps a long reply -- the case this whole stage exists for -- linear.
+_EMPHASIS_RES = (
+    re.compile(r"(?<!\w)(\*{1,3})(?!\s)([^*]+)(?<!\s)\1(?!\w)"),
+    re.compile(r"(?<!\w)(_{1,3})(?!\s)([^_]+)(?<!\s)\1(?!\w)"),
+    re.compile(r"(?<!\w)(~~)(?!\s)([^~]+)(?<!\s)\1(?!\w)"),
+)
+
+
+def _tick_run_end(text: str, start: int) -> int:
+    """Index just past the backtick run beginning at `start`."""
+    i = start
+    while i < len(text) and text[i] == "`":
+        i += 1
+    return i
+
+
+def _iter_code_spans(text: str):
+    """Yield (start, end, contents) for each code span, left to right.
+
+    Markdown closes a backtick run with the next run of exactly the same length, and a run
+    that never finds its match is literal text rather than an opener. Comparing runs is a
+    direct reading of that rule; the pattern this replaces, (`+)(.+?)\\1, could only
+    approximate it by trying every opener length against every closing position, which cost
+    cubic time in a run's length -- 4,000 ticks took 2.3s and 8,000 about 18s. A reply is
+    model output arriving at a loop that is always listening, so a long enough run of one
+    character was enough to stop it answering at all.
+
+    Runs are indexed by length up front, and each length keeps a cursor that only moves
+    forward, so a run is examined once no matter how many openers look past it. Searching
+    forward per opener instead was still superlinear, because an opener that nothing closes
+    rescans every run behind it: 400 runs of distinct lengths -- "`"*n + "x" for n in 1..400,
+    80KB -- took 2.0s, which is the same stall by another route.
+
+    Scanning runs also settles the case the pattern read backwards: in "`a``b`" the outer
+    single ticks pair, so the inner pair is content, not a delimiter.
+    """
+    runs: list[tuple[int, int]] = []  # (start, length), left to right
+    by_length: dict[int, list[int]] = {}  # length -> indices into runs
+    pos = 0
+    while True:
+        start = text.find("`", pos)
+        if start < 0:
+            break
+        pos = _tick_run_end(text, start)
+        by_length.setdefault(pos - start, []).append(len(runs))
+        runs.append((start, pos - start))
+
+    seek = dict.fromkeys(by_length, 0)
+    i = 0
+    while i < len(runs):
+        start, length = runs[i]
+        candidates = by_length[length]
+        # Only ever forward: i never goes back, so a candidate already behind it is behind
+        # every later opener too, and skipping it here is skipping it for good.
+        k = seek[length]
+        while k < len(candidates) and candidates[k] <= i:
+            k += 1
+        seek[length] = k
+        if k == len(candidates):
+            i += 1  # nothing of its length closes it; the tick sweep takes it
+            continue
+        close = runs[candidates[k]][0]
+        yield start, close + length, text[start + length : close]
+        i = candidates[k] + 1
+
+
+def _strip_emphasis(text: str) -> str:
+    """Drop matched emphasis pairs, leaving unpaired delimiter runs as literal text."""
+    # Content cannot cross its own delimiter, so a pass takes the innermost pair and
+    # emphasis nested in emphasis needs another; each pass drops two runs, so this
+    # settles.
+    while True:
+        stripped = text
+        for pattern in _EMPHASIS_RES:
+            stripped = pattern.sub(r"\2", stripped)
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def _strip_links(text: str) -> str:
+    """Reduce [label](dest) and ![alt](dest) to the label, at any nesting depth.
+
+    A destination may carry balanced parens ("/wiki/Foo_(bar)"), and stopping at the first
+    ")" leaves the outer one to be spoken as punctuation after the label. Counting them is
+    the part a pattern cannot do: every nesting depth a pattern spells out has a next one,
+    and a link the pattern misses entirely is a whole URL read aloud -- a worse failure than
+    the stray punctuation the nesting was added to fix. An unbalanced destination takes the
+    rest of the text with it, which is the call the unterminated-fence rule already makes:
+    the reply was cut mid-link, and what follows an unclosed "(" is the URL.
+    """
+    closes = _label_ends(text)
+    out: list[str] = []
+    pos = 0
+    while True:
+        head = _LINK_OPEN_RE.search(text, pos)
+        if head is None:
+            out.append(text[pos:])
+            return "".join(out)
+        label_end = closes.get(head.end() - 1, -1)
+        if label_end < 0 or not text.startswith("(", label_end + 1):
+            # A "[" that opens no link is ordinary text ("[1]", a stray bracket). Emit it
+            # and resume just past it: the next "[" on the line may still open a real link,
+            # and treating this one as a failed head would hide it.
+            out.append(text[pos : head.end()])
+            pos = head.end()
+            continue
+        out.append(text[pos : head.start()])
+        out.append(text[head.end() : label_end])
+        pos = _end_of_destination(text, label_end + 2)
+
+
+def _label_ends(text: str) -> dict[int, int]:
+    """Map each "[" to the "]" that closes it, for the whole text in one pass.
+
+    A label may hold brackets of its own -- "[the [docs]](url)" is one link whose label
+    markdown reads as "the [docs]". Reading a label as "everything up to the first ]" stops
+    at the inner bracket, finds no "(" after it, and does not see the link at all, so the
+    whole URL is spoken: a worse failure than the stray punctuation the destination counting
+    already exists to avoid.
+
+    Pairing with a stack, once, is what keeps that from costing a rescan per bracket.
+    Counting forward from each "[" instead re-walks the tail for every bracket that nothing
+    closes -- "["*8000 + "](url)" took 5.2s that way, the same stall the tick and container
+    rules each call out, and the reply is model output arriving at a loop that is always
+    listening.
+
+    A backslash escape reads differently on each bracket, because the two choices that miss
+    a link are not the same choice. CommonMark says "\\[" opens nothing, but every link this
+    pass fails to see is a destination spoken in full, so an escaped "[" is still a head
+    worth reading -- an escape is the reply's own markup, not a request to hear a URL. An
+    escaped "]" is skipped for the same reason from the other side: it does not close the
+    label, so "[a\\]b](url)" pairs at the real "]" and speaks its label instead of its URL.
+    Both rules err toward finding the link, which is the only direction that is quiet.
+    """
+    closes: dict[int, int] = {}
+    opens: list[int] = []
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            if text[i + 1] == "[":
+                opens.append(i + 1)
+            i += 2
+            continue
+        if c == "[":
+            opens.append(i)
+        elif c == "]" and opens:
+            closes[opens.pop()] = i
+        i += 1
+    return closes
+
+
+def _end_of_destination(text: str, start: int) -> int:
+    """Index just past the destination opened by the "(" before `start`.
+
+    Counting rather than matching is what a pattern cannot do, and a backslash escape is a
+    character in the destination rather than structure -- reading "\\(" as a nesting level runs
+    the count off the end of a link that was balanced all along.
+    """
+    depth = 1
+    i = start
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and i + 1 < len(text):
+            i += 2
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    # Never balanced, so this was not a whole link. A destination cannot hold unescaped
+    # whitespace, which bounds how much of the tail an unbalanced "(" may take: enough to
+    # swallow a URL the reply was cut off mid-way through, and no further. Consuming to the end
+    # instead deleted the rest of a reply whenever a "](" was never a link at all.
+    ws = _WHITESPACE_RE.search(text, start)
+    return ws.start() if ws else len(text)
+
+
+def _strip_markdown(text: str) -> str:
+    """Reduce the markdown the VOICE_SYSTEM_PROMPT forbids to plain spoken text."""
+    # Line endings first, so every line-anchored rule below can spell its line end "$" and
+    # mean it. A \r sits between a closing fence and its line end, which reads as "no closer"
+    # and hands the rest of the reply to the unterminated-fence rule.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    # A block at the margin is read BEFORE any marker comes off, and the containers below are
+    # read after, because each pass is wrong in the other's absence. Taking markers off first
+    # alone exposed a block's own interior: a body line like "> ```" is code, but with the
+    # quote marker gone it reads as this block's closer, so the real closer became an opener
+    # and the rest of the reply was deleted as an unterminated block -- while the code it was
+    # supposed to hide got spoken. Removing the whole margin block first means its interior is
+    # never on the page for the container pass to misread.
+    text = _FENCED_BLOCK_RE.sub(" ", text)
+    # Only quotes and list items can hold a block. A heading cannot, and stripping "#" here
+    # would promote its content to a line start, inventing a fence out of a heading that merely
+    # names one; it comes off further down, once fences have been decided. One pass: the
+    # pattern takes a line's whole marker run, so the inner marker of "> > ```" comes off with
+    # the outer one and re.sub never needs to rescan what it exposed. Whitespace is [ \t]
+    # rather than \s: \s matches a newline, so a bare marker could swallow its line ending and
+    # glue the next line onto a marker line -- promoting an indented backtick run to a fence
+    # that was never there.
+    text = _CONTAINER_RE.sub("", text)
+    text = _FENCED_BLOCK_RE.sub(" ", text)  # blocks that sat behind a container
+    text = re.sub(
+        r"(?ms)^[ ]{0,3}(?:`{3,}|~{3,}).*", " ", text
+    )  # unterminated trailing fence
+    text = re.sub(
+        r"(?m)^[ \t]{0,3}#{1,6}[ \t]+", "", text
+    )  # heading markers, once fences are settled
+    # A code span's content is literal: `__init__` is the identifier, not bold "init", and
+    # `[label](url)` is the syntax being described, not a link to follow. Both rules
+    # therefore apply only BETWEEN the spans, and the ticks come off after them -- peeling
+    # them first would hand each rule content it has no way to tell from markup.
+    spoken: list[str] = []
+    pos = 0
+    for start, end, contents in _iter_code_spans(text):
+        spoken.append(_strip_emphasis(_strip_links(text[pos:start])))
+        spoken.append(contents)
+        pos = end
+    spoken.append(_strip_emphasis(_strip_links(text[pos:])))
+    return "".join(spoken).replace("`", "")  # unpaired inline code ticks
+
+
+def _truncate_spoken(text: str, max_chars: int) -> str:
+    """Clip to max_chars on a sentence end when there is one, else a word break."""
+    clipped = text[:max_chars]
+    # The LAST sentence end of any kind, not the first kind that happens to match:
+    # checking ". " before "! " would cut at an earlier period and drop everything
+    # up to a later exclamation, throwing away speakable text we had room for.
+    idx = max(clipped.rfind(end) for end in (". ", "! ", "? "))
+    if idx >= max_chars // 2:
+        return clipped[: idx + 1].rstrip()
+    space = clipped.rfind(" ")
+    return (clipped[:space] if space > 0 else clipped).rstrip()
+
+
+def sanitize_reply(
+    reply: str,
+    max_chars: int = MAX_SPOKEN_CHARS,
+    empty_fallback: str = EMPTY_REPLY_FALLBACK,
+) -> str:
+    """Make a brain reply safe to hand to speak().
+
+    Bounds length, drops markdown/emoji/control characters, and turns an empty
+    reply into a spoken sentence so a silent failure is audible rather than a
+    turn that just does nothing.
+    """
+    if not reply or not reply.strip():
+        return empty_fallback
+    text = _ANSI_ESCAPE_RE.sub("", reply)
+    text = _strip_markdown(text)
+    text = _EMOJI_RE.sub("", text)
+    text = _CONTROL_CHARS_RE.sub("", text)
+    text = " ".join(text.split())
+    if not text:
+        return empty_fallback
+    if len(text) > max_chars:
+        text = _truncate_spoken(text, max_chars)
+    return text
+
+
 def brain(text: str, model: str | None = None, timeout_s: int | None = None) -> str:
     """Answer transcribed text using the configured brain backend.
 
@@ -803,11 +1139,16 @@ def brain(text: str, model: str | None = None, timeout_s: int | None = None) -> 
     else uses the local `claude` CLI fallback. Either way the reply is short
     spoken text, and no network LLM API is called. Never raises for an expected
     failure — the caller is a voice loop, so it returns a spoken error instead.
+
+    Both backends return through sanitize_reply(), so this is the single place a
+    reply becomes speakable and no raw model output can reach speak().
     """
     cfg = load_config()
     if cfg["brain_backend"] == "bridge":
-        return _brain_bridge(text, cfg)
-    return _brain_cli(text, cfg, model=model, timeout_s=timeout_s)
+        reply = _brain_bridge(text, cfg)
+    else:
+        reply = _brain_cli(text, cfg, model=model, timeout_s=timeout_s)
+    return sanitize_reply(reply)
 
 
 # One reply cursor per reply file, kept for the life of the process so the
