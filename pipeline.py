@@ -342,12 +342,48 @@ def _read_base_config() -> dict:
     return {}
 
 
-def set_wake_word(name: str) -> dict:
-    """Change the active wake word in config.json and return the effective config."""
+def _read_local_config() -> dict:
+    """Read only config.local.json — the gitignored deployment overlay.
+
+    set_wake_word(local=True) writes back here, so it must round-trip the local
+    overlay alone and leave the committed config.json untouched, the mirror of
+    what _read_base_config does for the base. A malformed overlay raises rather
+    than falling back to {}: this file also carries the deployment's brain_*
+    settings, so writing an empty object back over it would silently erase them.
+    Failing here leaves the file intact for the operator to fix. (load_config's
+    own read stays tolerant, so a bad overlay degrades the runtime instead of
+    crashing it — only the write path refuses to clobber.)
+    """
+    if not LOCAL_CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(LOCAL_CONFIG_PATH.read_text())
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"config.local.json is not valid JSON ({e}); refusing to overwrite "
+            "it and risk losing the deployment overrides it carries. Fix the "
+            "file and retry."
+        ) from e
+
+
+def set_wake_word(name: str, *, local: bool = False) -> dict:
+    """Persist a new active wake word and return the effective config.
+
+    By default the change lands in the committed config.json, updating the
+    built-in default a fresh clone runs with. With local=True it lands in the
+    gitignored config.local.json instead, so a deployment can activate its own
+    (often gitignored) wake-word model without dirtying the tracked file. Either
+    way the target file is round-tripped alone so the committed/local split holds.
+    """
     _resolve_wake_path(name)  # validate before writing
-    base = _read_base_config()
-    base["wake_word"] = name
-    CONFIG_PATH.write_text(json.dumps(base, indent=2) + "\n")
+    if local:
+        overlay = _read_local_config()
+        overlay["wake_word"] = name
+        LOCAL_CONFIG_PATH.write_text(json.dumps(overlay, indent=2) + "\n")
+    else:
+        base = _read_base_config()
+        base["wake_word"] = name
+        CONFIG_PATH.write_text(json.dumps(base, indent=2) + "\n")
     return load_config()
 
 
@@ -1702,7 +1738,14 @@ def _cli() -> int:
     p.add_argument(
         "--set-wake-word",
         metavar="NAME",
-        help="persist a new active wake word to config.json and exit",
+        help="persist a new active wake word and exit (config.json by default, "
+        "or config.local.json with --local)",
+    )
+    p.add_argument(
+        "--local",
+        action="store_true",
+        help="with --set-wake-word, write the override to the gitignored "
+        "config.local.json instead of the committed config.json",
     )
     p.add_argument(
         "--listen",
@@ -1721,6 +1764,9 @@ def _cli() -> int:
     )
     args = p.parse_args()
 
+    if args.local and not args.set_wake_word:
+        p.error("--local only applies to --set-wake-word")
+
     if args.list_wake_words:
         cfg = load_config()
         for name in sorted(available_wake_models()):
@@ -1728,8 +1774,14 @@ def _cli() -> int:
             print(f"{name}{mark}")
         return 0
     if args.set_wake_word:
-        cfg = set_wake_word(args.set_wake_word)
-        print(f"active wake word is now: {cfg['wake_word']}")
+        cfg = set_wake_word(args.set_wake_word, local=args.local)
+        target = "config.local.json" if args.local else "config.json"
+        print(f"wake word saved to {target}: {args.set_wake_word}")
+        if cfg["wake_word"] != args.set_wake_word:
+            print(
+                f"note: config.local.json still overrides the active wake word "
+                f"to {cfg['wake_word']!r}; pass --local to change that instead"
+            )
         return 0
     if args.listen:
         run_loop(wake_word=args.wake_word, mic_name=args.mic, output_name=args.speaker)

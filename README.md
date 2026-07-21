@@ -118,6 +118,18 @@ Switch the active wake word and persist it to `config.json`:
 .venv/bin/python pipeline.py --set-wake-word hey_jarvis
 ```
 
+Use `--local` to persist the choice to the gitignored `config.local.json`
+instead, so a deployment can activate its own wake word (often a gitignored
+`computah` model) without dirtying the tracked `config.json` a fresh clone
+runs with:
+
+```bash
+.venv/bin/python pipeline.py --set-wake-word computah --local
+```
+
+`config.local.json` overrides `config.json` at runtime, so the local choice
+wins while the committed default stays a built-in.
+
 Run the pipeline on a wav file:
 
 ```bash
