@@ -123,6 +123,77 @@ def test_set_wake_word_no_leak(d: Path) -> None:
     )
 
 
+def test_set_wake_word_local(d: Path) -> None:
+    """--set-wake-word --local writes config.local.json, leaving the base intact."""
+    pipeline.CONFIG_PATH = d / "config.json"
+    pipeline.LOCAL_CONFIG_PATH = d / "config.local.json"
+    _write(pipeline.CONFIG_PATH, {"wake_word": "hey_jarvis"})
+    _write(
+        pipeline.LOCAL_CONFIG_PATH,
+        {"brain_backend": "bridge", "brain_host": "secret-host"},
+    )
+
+    pipeline.set_wake_word("alexa", local=True)
+
+    base = json.loads(pipeline.CONFIG_PATH.read_text())
+    overlay = json.loads(pipeline.LOCAL_CONFIG_PATH.read_text())
+    check(
+        base.get("wake_word") == "hey_jarvis",
+        "committed config.json default is left untouched by a local set",
+    )
+    check(
+        overlay.get("wake_word") == "alexa",
+        "config.local.json carries the local wake-word override",
+    )
+    check(
+        overlay.get("brain_host") == "secret-host",
+        "existing config.local.json keys survive the local set",
+    )
+    check(
+        pipeline.load_config()["wake_word"] == "alexa",
+        "effective config reads the local wake word (overlay wins)",
+    )
+
+
+def test_set_wake_word_local_malformed_no_clobber(d: Path) -> None:
+    """--set-wake-word --local refuses to overwrite a malformed config.local.json."""
+    pipeline.CONFIG_PATH = d / "config.json"
+    pipeline.LOCAL_CONFIG_PATH = d / "config.local.json"
+    _write(pipeline.CONFIG_PATH, {"wake_word": "hey_jarvis"})
+    # A truncated overlay an operator left mid-edit, still carrying live settings.
+    truncated = '{"brain_host": "secret-host",'
+    pipeline.LOCAL_CONFIG_PATH.write_text(truncated)
+
+    raised = False
+    try:
+        pipeline.set_wake_word("alexa", local=True)
+    except ValueError:
+        raised = True
+
+    check(raised, "a malformed config.local.json raises instead of clobbering")
+    check(
+        pipeline.LOCAL_CONFIG_PATH.read_text() == truncated,
+        "the malformed overlay is left intact for the operator to fix",
+    )
+
+
+def test_set_wake_word_base_shadowed_by_local(d: Path) -> None:
+    """A base set stays shadowed by a local override — the invariant the CLI note keys off."""
+    pipeline.CONFIG_PATH = d / "config.json"
+    pipeline.LOCAL_CONFIG_PATH = d / "config.local.json"
+    _write(pipeline.CONFIG_PATH, {})
+    _write(pipeline.LOCAL_CONFIG_PATH, {"wake_word": "alexa"})
+
+    cfg = pipeline.set_wake_word("hey_jarvis", local=False)
+
+    base = json.loads(pipeline.CONFIG_PATH.read_text())
+    check(base.get("wake_word") == "hey_jarvis", "the base write lands in config.json")
+    check(
+        cfg["wake_word"] == "alexa",
+        "effective wake word stays the local override, so the CLI flags it as shadowed",
+    )
+
+
 def main() -> int:
     # Snapshot module state so the test restores the repo's real wiring on exit.
     saved = (
@@ -140,6 +211,9 @@ def main() -> int:
             pipeline._brain_cli, pipeline._brain_bridge = saved[2], saved[3]
             test_bridge_via_config(d, brain_bridge)
             test_set_wake_word_no_leak(d)
+            test_set_wake_word_local(d)
+            test_set_wake_word_local_malformed_no_clobber(d)
+            test_set_wake_word_base_shadowed_by_local(d)
     finally:
         (
             pipeline.CONFIG_PATH,
