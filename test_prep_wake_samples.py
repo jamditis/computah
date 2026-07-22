@@ -244,6 +244,101 @@ def test_in_run_collision_raises(d: Path) -> None:
         check(False, "an in-run collision should have raised FileExistsError")
 
 
+def test_refresh_after_adding_collider_leaves_no_orphans(d: Path) -> None:
+    """Adding a second same-basename input must not orphan the first run's clips.
+
+    Run one input, then rerun with a second file of the same basename into the
+    same dir. If every colliding input got suffixed, the first run's
+    computah_###.wav would be stranded next to an identical computah-1_###.wav --
+    and eval_wake_threshold._clips() reads every clip in the directory, so the
+    stale pair would silently double-count. The first input keeps the bare stem,
+    so its clips are overwritten in place and only the new file is suffixed.
+    """
+    a = d / "refresh_a"
+    b = d / "refresh_b"
+    a.mkdir()
+    b.mkdir()
+    sf.write(
+        a / "computah.wav",
+        make_bursts(2, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    sf.write(
+        b / "computah.wav",
+        make_bursts(3, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+
+    out = d / "refresh_out"
+    prep.process([a / "computah.wav"], out, "positive", 0.3, 0.2, 3.0)
+    prep.process(
+        [a / "computah.wav", b / "computah.wav"], out, "positive", 0.3, 0.2, 3.0
+    )
+
+    files = sorted(p.name for p in out.glob("*.wav"))
+    # 2 clips from a (bare stem, overwritten in place) + 3 from b (suffixed).
+    check(
+        len(files) == 5,
+        f"refresh with an added collider leaves no orphaned clips ({files})",
+    )
+    check(
+        any(n.startswith("computah_") for n in files),
+        f"the first colliding input keeps the bare stem ({files})",
+    )
+
+
+def test_stem_assignment_ignores_input_order(d: Path) -> None:
+    """The same colliding files must map to the same stems in any order.
+
+    If the bare stem went to whichever file was listed first, rerunning with the
+    inputs reordered would hand it to the other file: the previous run's
+    computah_###.wav would stop being rewritten and would linger as a duplicate
+    that eval_wake_threshold still reads. Ranking by resolved path makes the
+    mapping a function of which files are present, not how they were passed.
+    """
+    a = d / "order_a"
+    b = d / "order_b"
+    a.mkdir()
+    b.mkdir()
+    for folder in (a, b):
+        sf.write(
+            folder / "computah.wav",
+            make_bursts(2, 0.5, 0.8, prep.TARGET_SR),
+            prep.TARGET_SR,
+            subtype="PCM_16",
+        )
+
+    forward = prep._unique_stems([a / "computah.wav", b / "computah.wav"])
+    reverse = prep._unique_stems([b / "computah.wav", a / "computah.wav"])
+    # Same file -> same stem regardless of position, so reverse is forward flipped.
+    check(
+        forward == list(reversed(reverse)),
+        f"stem assignment is order-independent (forward={forward}, reverse={reverse})",
+    )
+    check(
+        sorted(forward) == ["computah", "computah-1"],
+        f"one file keeps the bare stem, the other is suffixed ({sorted(forward)})",
+    )
+
+    # Two colliding groups where one group's bare stem is the name the other
+    # group's suffix search wants. Reserving only singletons hands "computah-1"
+    # to both, and the run later dies on a bogus same-basename FileExistsError.
+    two_groups = prep._unique_stems(
+        [
+            a / "computah.wav",
+            b / "computah.wav",
+            a / "computah-1.wav",
+            b / "computah-1.wav",
+        ]
+    )
+    check(
+        len(set(two_groups)) == len(two_groups),
+        f"overlapping collider groups still get distinct stems ({two_groups})",
+    )
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -256,6 +351,8 @@ def main() -> int:
         test_duplicate_basename_no_overwrite(d)
         test_rerun_refreshes_populated_dir(d)
         test_in_run_collision_raises(d)
+        test_refresh_after_adding_collider_leaves_no_orphans(d)
+        test_stem_assignment_ignores_input_order(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

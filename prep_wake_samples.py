@@ -238,28 +238,53 @@ def _unique_stems(files: list[Path]) -> list[str]:
     Clip names are derived from the input stem, so two inputs that share a
     basename (a/computah.wav and b/computah.wav) would write the same clip
     names and the second file would silently overwrite the first. A stem that
-    is already unique across the inputs is kept as-is; a colliding one gets the
-    lowest numeric suffix not otherwise taken. Singletons are reserved first so
-    a disambiguated "computah-1" can never land on a real "computah-1" input.
+    is already unique across the inputs is kept as-is. Within a colliding group
+    one file keeps the bare stem and the rest get the lowest numeric suffix not
+    otherwise taken. Every input stem is reserved up front so a disambiguated
+    "computah-1" can never land on a real "computah-1" input -- including one
+    that is itself part of another colliding group.
+
+    One member of the group keeps the bare stem so that refreshing a samples dir
+    stays a refresh: adding a second computah.wav renames only the new file and
+    leaves the original's clips to be overwritten in place. Suffixing every
+    member instead would orphan the previous run's computah_###.wav, and
+    eval_wake_threshold reads every clip in the directory, so those orphans would
+    quietly train and score as duplicates.
+
+    Which member keeps the bare stem is decided by resolved path, not by input
+    order, so the mapping depends only on WHICH files are present. Passing the
+    same two files in the other order must not move the bare stem to the other
+    file -- that would strand the first run's clips just as surely.
 
     A clip's final name is "<stem>-N_<idx>.wav" when disambiguated (the "-N"
     from here, the "_<idx>" segment index from _write_clip) or "<stem>_<idx>.wav"
     when the stem was already unique.
     """
     counts = Counter(f.stem for f in files)
-    used = {f.stem for f in files if counts[f.stem] == 1}
-    stems: list[str] = []
-    for f in files:
+    used = {f.stem for f in files}
+    assigned: dict[int, str] = {}
+    groups: dict[str, list[int]] = {}
+    for i, f in enumerate(files):
         if counts[f.stem] == 1:
-            stems.append(f.stem)
-            continue
-        n = 1
-        while f"{f.stem}-{n}" in used:
-            n += 1
-        stem = f"{f.stem}-{n}"
-        used.add(stem)
-        stems.append(stem)
-    return stems
+            assigned[i] = f.stem
+        else:
+            groups.setdefault(f.stem, []).append(i)
+
+    # Sorted group order, and resolved-path order within a group, so every
+    # assignment below is a function of the input set alone.
+    for stem, idxs in sorted(groups.items()):
+        ranked = sorted(idxs, key=lambda j: str(files[j].resolve()))
+        for rank, i in enumerate(ranked):
+            if rank == 0:
+                assigned[i] = stem
+                continue
+            n = 1
+            while f"{stem}-{n}" in used:
+                n += 1
+            name = f"{stem}-{n}"
+            used.add(name)
+            assigned[i] = name
+    return [assigned[i] for i in range(len(files))]
 
 
 def process(
@@ -303,6 +328,28 @@ def process(
     # honest even if two inputs ever resolve to the same clip name.
     total = len(written)
     print(f"\nwrote {total} {label} clip(s) to {out_dir}")
+
+    # Clips this run did not write are left from an earlier run over a different
+    # input set. Training and eval read every clip in the directory, so they
+    # would score as extra data nobody asked for. Deleting them here would be
+    # too eager (the dir is the user's), so say so and name the fix.
+    # Match what eval_wake_threshold._clips() reads, not just what we write, so
+    # the warning covers every file that will actually be scored.
+    stale = sorted(
+        p
+        for p in out_dir.iterdir()
+        if p.suffix.lower() in AUDIO_EXTS and p not in written
+    )
+    if stale:
+        shown = ", ".join(p.name for p in stale[:3])
+        if len(stale) > 3:
+            shown += f", +{len(stale) - 3} more"
+        print(
+            f"warning: {len(stale)} clip(s) in {out_dir} are left from an earlier "
+            f"run ({shown}). Training and eval read every clip in this directory, "
+            f"so delete them or clear {out_dir} and rerun.",
+            file=sys.stderr,
+        )
     if all_durs:
         a = np.array(all_durs)
         print(
