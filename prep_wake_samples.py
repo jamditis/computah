@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from math import gcd
 from pathlib import Path
 
@@ -206,6 +207,36 @@ def _inputs(paths: list[Path]) -> list[Path]:
     return uniq
 
 
+def _unique_stems(files: list[Path]) -> list[str]:
+    """A distinct output stem per input file, in input order.
+
+    Clip names are derived from the input stem, so two inputs that share a
+    basename (a/computah.wav and b/computah.wav) would write the same clip
+    names and the second file would silently overwrite the first. A stem that
+    is already unique across the inputs is kept as-is; a colliding one gets the
+    lowest numeric suffix not otherwise taken. Singletons are reserved first so
+    a disambiguated "computah-1" can never land on a real "computah-1" input.
+
+    A clip's final name is "<stem>-N_<idx>.wav" when disambiguated (the "-N"
+    from here, the "_<idx>" segment index from _write_clip) or "<stem>_<idx>.wav"
+    when the stem was already unique.
+    """
+    counts = Counter(f.stem for f in files)
+    used = {f.stem for f in files if counts[f.stem] == 1}
+    stems: list[str] = []
+    for f in files:
+        if counts[f.stem] == 1:
+            stems.append(f.stem)
+            continue
+        n = 1
+        while f"{f.stem}-{n}" in used:
+            n += 1
+        stem = f"{f.stem}-{n}"
+        used.add(stem)
+        stems.append(stem)
+    return stems
+
+
 def process(
     inputs: list[Path],
     out_dir: Path,
@@ -221,28 +252,30 @@ def process(
         print(f"no audio files found at {joined}", file=sys.stderr)
         return 0
 
-    total = 0
+    stems = _unique_stems(files)
+    written: set[Path] = set()
     all_durs: list[float] = []
-    for f in files:
+    for f, stem in zip(files, stems):
         audio = load_mono_16k(f)
         dur = len(audio) / TARGET_SR
         if label == "background":
             # Continuous negative audio: keep it whole, just normalized.
-            _write_clip(out_dir, f.stem, 0, audio)
-            total += 1
+            written.add(_write_clip(out_dir, stem, 0, audio))
             print(f"  {f.name}: {dur:.1f}s background -> 1 file")
             continue
 
         clips, stats = segment_on_silence(audio, min_gap_s, min_dur_s, max_dur_s)
         for i, clip in enumerate(clips):
-            _write_clip(out_dir, f.stem, i, clip)
+            written.add(_write_clip(out_dir, stem, i, clip))
             all_durs.append(len(clip) / TARGET_SR)
-        total += stats["kept"]
         note = ""
         if stats["too_short"] or stats["too_long"]:
             note = f" (dropped {stats['too_short']} short, {stats['too_long']} long)"
         print(f"  {f.name}: {dur:.1f}s -> {stats['kept']} clips{note}")
 
+    # Count files actually on disk, not segments requested, so the report is
+    # honest even if two inputs ever resolve to the same clip name.
+    total = len(written)
     print(f"\nwrote {total} {label} clip(s) to {out_dir}")
     if all_durs:
         a = np.array(all_durs)

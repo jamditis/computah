@@ -143,6 +143,59 @@ def test_empty_input_no_crash(d: Path) -> None:
     check(total == 0, f"empty input returns 0 without crashing (got {total})")
 
 
+def test_duplicate_basename_no_overwrite(d: Path) -> None:
+    """Two inputs sharing a basename must not overwrite each other's clips.
+
+    Clip names come from the input stem, so a/computah.wav and b/computah.wav
+    once wrote the same names and the second file silently clobbered the first
+    while the reported total still counted both. The two files carry different
+    burst counts (2 and 3) so any overwrite shows up as fewer files than clips.
+    """
+    a = d / "a"
+    b = d / "b"
+    a.mkdir()
+    b.mkdir()
+    sf.write(
+        a / "computah.wav",
+        make_bursts(2, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    sf.write(
+        b / "computah.wav",
+        make_bursts(3, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+
+    out = d / "dup_positive"
+    total = prep.process(
+        [a / "computah.wav", b / "computah.wav"], out, "positive", 0.3, 0.2, 3.0
+    )
+    files = sorted(out.glob("*.wav"))
+    check(
+        total == 5 and len(files) == 5,
+        f"5 clips from two same-basename inputs, none overwritten "
+        f"(total={total}, files={len(files)})",
+    )
+    check(
+        len({f.name for f in files}) == len(files),
+        f"every clip name is distinct ({[f.name for f in files]})",
+    )
+
+    # The background path derives names the same way, so it shares the bug.
+    out_bg = d / "dup_background"
+    total_bg = prep.process(
+        [a / "computah.wav", b / "computah.wav"], out_bg, "background", 0.3, 0.2, 3.0
+    )
+    bg_files = sorted(out_bg.glob("*.wav"))
+    check(
+        total_bg == 2 and len(bg_files) == 2,
+        f"two same-basename background files stay two files "
+        f"(total={total_bg}, files={len(bg_files)})",
+    )
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -152,6 +205,7 @@ def main() -> int:
         test_background_kept_whole(d)
         test_explicit_files_only(d)
         test_empty_input_no_crash(d)
+        test_duplicate_basename_no_overwrite(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1
