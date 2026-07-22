@@ -287,6 +287,28 @@ def _unique_stems(files: list[Path]) -> list[str]:
     return [assigned[i] for i in range(len(files))]
 
 
+def _stale_clips(out_dir: Path, written: set[Path]) -> list[Path]:
+    """Audio files in `out_dir` this run did not write, sorted; empty if absent.
+
+    Mirrors `eval_wake_threshold._clips()`, precondition included: a directory
+    that does not exist holds nothing. The precondition lives here, with the
+    read, because the earlier inline copy dropped it and a run that writes no
+    clips never creates out_dir (only `_write_clip` does), so the scan died on
+    a missing directory.
+
+    The mirror is close but not exact: this module's `AUDIO_EXTS` is the wider
+    set, so the warning can name a file eval would skip. #82 tracks giving both
+    modules one definition instead of two copies.
+    """
+    if not out_dir.is_dir():
+        return []
+    return sorted(
+        p
+        for p in out_dir.iterdir()
+        if p.suffix.lower() in AUDIO_EXTS and p not in written
+    )
+
+
 def process(
     inputs: list[Path],
     out_dir: Path,
@@ -296,6 +318,18 @@ def process(
     max_dur_s: float,
 ) -> int:
     """Process every input file; return the total clip count written."""
+    # Checked before any audio is decoded, so an occupied --output is named once
+    # rather than surfacing as whichever exception the run happens to reach first:
+    # mkdir() raises FileExistsError once a clip is ready to write, and a run that
+    # writes nothing gets as far as the stale scan below.
+    if out_dir.exists() and not out_dir.is_dir():
+        print(
+            f"error: --output {out_dir} exists and is not a directory; "
+            f"point --output at a directory, or move that file",
+            file=sys.stderr,
+        )
+        return 0
+
     files = _inputs(inputs)
     if not files:
         joined = ", ".join(str(p) for p in inputs)
@@ -333,13 +367,7 @@ def process(
     # input set. Training and eval read every clip in the directory, so they
     # would score as extra data nobody asked for. Deleting them here would be
     # too eager (the dir is the user's), so say so and name the fix.
-    # Match what eval_wake_threshold._clips() reads, not just what we write, so
-    # the warning covers every file that will actually be scored.
-    stale = sorted(
-        p
-        for p in out_dir.iterdir()
-        if p.suffix.lower() in AUDIO_EXTS and p not in written
-    )
+    stale = _stale_clips(out_dir, written)
     if stale:
         shown = ", ".join(p.name for p in stale[:3])
         if len(stale) > 3:

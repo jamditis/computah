@@ -143,6 +143,41 @@ def test_empty_input_no_crash(d: Path) -> None:
     check(total == 0, f"empty input returns 0 without crashing (got {total})")
 
 
+def test_zero_clips_no_crash(d: Path) -> None:
+    """Audio that yields no clips must report cleanly, not raise.
+
+    Distinct from test_empty_input_no_crash: the input file IS found, so this
+    runs past the no-files early return and reaches the stale-clip scan. Only
+    _write_clip() creates out_dir, so a run that writes nothing never creates
+    it and the scan reads a directory that is not there.
+    """
+    audio = make_bursts(n=3, burst_s=0.6, gap_s=1.0, sr=prep.TARGET_SR)
+    src = d / "all_dropped.wav"
+    sf.write(src, audio, prep.TARGET_SR, subtype="PCM_16")
+    out = d / "out_dropped"
+    # A --min-dur longer than every burst, so all three segments drop as short.
+    total = prep.process([src], out, "positive", 0.3, 5.0, 10.0)
+    check(total == 0, f"all-dropped input returns 0 without crashing (got {total})")
+    check(not out.exists(), "a run that writes no clips leaves no output dir")
+
+
+def test_output_path_not_a_directory(d: Path) -> None:
+    """An --output naming an existing file reports it, rather than raising.
+
+    The mistake used to surface as one of two exceptions depending on whether a
+    clip was ready to write (FileExistsError from mkdir) or not
+    (NotADirectoryError from the stale scan), both after decoding every input.
+    """
+    audio = make_bursts(n=2, burst_s=0.6, gap_s=1.0, sr=prep.TARGET_SR)
+    src = d / "into_a_file.wav"
+    sf.write(src, audio, prep.TARGET_SR, subtype="PCM_16")
+    occupied = d / "not_a_dir"
+    occupied.write_text("keep me")
+    total = prep.process([src], occupied, "positive", 0.3, 0.2, 3.0)
+    check(total == 0, f"an occupied --output returns 0, not a traceback (got {total})")
+    check(occupied.read_text() == "keep me", "the file at --output is left untouched")
+
+
 def test_duplicate_basename_no_overwrite(d: Path) -> None:
     """Two inputs sharing a basename must not overwrite each other's clips.
 
@@ -348,6 +383,8 @@ def main() -> int:
         test_background_kept_whole(d)
         test_explicit_files_only(d)
         test_empty_input_no_crash(d)
+        test_zero_clips_no_crash(d)
+        test_output_path_not_a_directory(d)
         test_duplicate_basename_no_overwrite(d)
         test_rerun_refreshes_populated_dir(d)
         test_in_run_collision_raises(d)
