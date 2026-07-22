@@ -143,6 +143,237 @@ def test_empty_input_no_crash(d: Path) -> None:
     check(total == 0, f"empty input returns 0 without crashing (got {total})")
 
 
+def test_zero_clips_no_crash(d: Path) -> None:
+    """Audio that yields no clips must report cleanly, not raise.
+
+    Distinct from test_empty_input_no_crash: the input file IS found, so this
+    runs past the no-files early return and reaches the stale-clip scan. Only
+    _write_clip() creates out_dir, so a run that writes nothing never creates
+    it and the scan reads a directory that is not there.
+    """
+    audio = make_bursts(n=3, burst_s=0.6, gap_s=1.0, sr=prep.TARGET_SR)
+    src = d / "all_dropped.wav"
+    sf.write(src, audio, prep.TARGET_SR, subtype="PCM_16")
+    out = d / "out_dropped"
+    # A --min-dur longer than every burst, so all three segments drop as short.
+    total = prep.process([src], out, "positive", 0.3, 5.0, 10.0)
+    check(total == 0, f"all-dropped input returns 0 without crashing (got {total})")
+    check(not out.exists(), "a run that writes no clips leaves no output dir")
+
+
+def test_output_path_not_a_directory(d: Path) -> None:
+    """An --output naming an existing file reports it, rather than raising.
+
+    The mistake used to surface as one of two exceptions depending on whether a
+    clip was ready to write (FileExistsError from mkdir) or not
+    (NotADirectoryError from the stale scan), both after decoding every input.
+    """
+    audio = make_bursts(n=2, burst_s=0.6, gap_s=1.0, sr=prep.TARGET_SR)
+    src = d / "into_a_file.wav"
+    sf.write(src, audio, prep.TARGET_SR, subtype="PCM_16")
+    occupied = d / "not_a_dir"
+    occupied.write_text("keep me")
+    total = prep.process([src], occupied, "positive", 0.3, 0.2, 3.0)
+    check(total == 0, f"an occupied --output returns 0, not a traceback (got {total})")
+    check(occupied.read_text() == "keep me", "the file at --output is left untouched")
+
+
+def test_duplicate_basename_no_overwrite(d: Path) -> None:
+    """Two inputs sharing a basename must not overwrite each other's clips.
+
+    Clip names come from the input stem, so a/computah.wav and b/computah.wav
+    once wrote the same names and the second file silently clobbered the first
+    while the reported total still counted both. The two files carry different
+    burst counts (2 and 3) so any overwrite shows up as fewer files than clips.
+    """
+    a = d / "a"
+    b = d / "b"
+    a.mkdir()
+    b.mkdir()
+    sf.write(
+        a / "computah.wav",
+        make_bursts(2, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    sf.write(
+        b / "computah.wav",
+        make_bursts(3, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+
+    out = d / "dup_positive"
+    total = prep.process(
+        [a / "computah.wav", b / "computah.wav"], out, "positive", 0.3, 0.2, 3.0
+    )
+    files = sorted(out.glob("*.wav"))
+    check(
+        total == 5 and len(files) == 5,
+        f"5 clips from two same-basename inputs, none overwritten "
+        f"(total={total}, files={len(files)})",
+    )
+    check(
+        len({f.name for f in files}) == len(files),
+        f"every clip name is distinct ({[f.name for f in files]})",
+    )
+
+    # The background path derives names the same way, so it shares the bug.
+    out_bg = d / "dup_background"
+    total_bg = prep.process(
+        [a / "computah.wav", b / "computah.wav"], out_bg, "background", 0.3, 0.2, 3.0
+    )
+    bg_files = sorted(out_bg.glob("*.wav"))
+    check(
+        total_bg == 2 and len(bg_files) == 2,
+        f"two same-basename background files stay two files "
+        f"(total={total_bg}, files={len(bg_files)})",
+    )
+
+
+def test_rerun_refreshes_populated_dir(d: Path) -> None:
+    """Rerunning into a dir that already holds a prior run's clips must work.
+
+    The docs tell people to run prep_wake_samples straight into samples/, so a
+    refresh overwrites last run's clips rather than aborting. Running process
+    twice into the same out_dir must succeed both times and leave the same file
+    count -- a prior-run leftover is an intended overwrite, not a collision.
+    """
+    src = d / "rerun_src"
+    src.mkdir()
+    sf.write(
+        src / "take.wav",
+        make_bursts(3, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    out = d / "rerun_out"
+    first = prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    second = prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    files = sorted(out.glob("*.wav"))
+    check(
+        first == second == 3 and len(files) == 3,
+        f"rerun into a populated dir refreshes cleanly "
+        f"(first={first}, second={second}, files={len(files)})",
+    )
+
+
+def test_in_run_collision_raises(d: Path) -> None:
+    """Two clips in one run mapping to the same file must fail loud.
+
+    _unique_stems keeps in-run basenames distinct, but this is the backstop for
+    a case-insensitive filesystem where distinct-cased stems resolve to one
+    inode. Writing the same name twice with a shared seen-set (as one run would)
+    must raise instead of silently dropping the first clip.
+    """
+    out = d / "in_run_collision"
+    audio = make_bursts(1, 0.5, 0.8, prep.TARGET_SR)
+    seen: set[int] = set()
+    first = prep._write_unique(out, "dup", 0, audio, seen)
+    check(first.exists(), f"first clip of the run lands on disk ({first.name})")
+    try:
+        prep._write_unique(out, "dup", 0, audio, seen)
+    except FileExistsError:
+        check(True, "a second clip mapping to the same file in one run raises")
+    else:
+        check(False, "an in-run collision should have raised FileExistsError")
+
+
+def test_refresh_after_adding_collider_leaves_no_orphans(d: Path) -> None:
+    """Adding a second same-basename input must not orphan the first run's clips.
+
+    Run one input, then rerun with a second file of the same basename into the
+    same dir. If every colliding input got suffixed, the first run's
+    computah_###.wav would be stranded next to an identical computah-1_###.wav --
+    and eval_wake_threshold._clips() reads every clip in the directory, so the
+    stale pair would silently double-count. The first input keeps the bare stem,
+    so its clips are overwritten in place and only the new file is suffixed.
+    """
+    a = d / "refresh_a"
+    b = d / "refresh_b"
+    a.mkdir()
+    b.mkdir()
+    sf.write(
+        a / "computah.wav",
+        make_bursts(2, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    sf.write(
+        b / "computah.wav",
+        make_bursts(3, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+
+    out = d / "refresh_out"
+    prep.process([a / "computah.wav"], out, "positive", 0.3, 0.2, 3.0)
+    prep.process(
+        [a / "computah.wav", b / "computah.wav"], out, "positive", 0.3, 0.2, 3.0
+    )
+
+    files = sorted(p.name for p in out.glob("*.wav"))
+    # 2 clips from a (bare stem, overwritten in place) + 3 from b (suffixed).
+    check(
+        len(files) == 5,
+        f"refresh with an added collider leaves no orphaned clips ({files})",
+    )
+    check(
+        any(n.startswith("computah_") for n in files),
+        f"the first colliding input keeps the bare stem ({files})",
+    )
+
+
+def test_stem_assignment_ignores_input_order(d: Path) -> None:
+    """The same colliding files must map to the same stems in any order.
+
+    If the bare stem went to whichever file was listed first, rerunning with the
+    inputs reordered would hand it to the other file: the previous run's
+    computah_###.wav would stop being rewritten and would linger as a duplicate
+    that eval_wake_threshold still reads. Ranking by resolved path makes the
+    mapping a function of which files are present, not how they were passed.
+    """
+    a = d / "order_a"
+    b = d / "order_b"
+    a.mkdir()
+    b.mkdir()
+    for folder in (a, b):
+        sf.write(
+            folder / "computah.wav",
+            make_bursts(2, 0.5, 0.8, prep.TARGET_SR),
+            prep.TARGET_SR,
+            subtype="PCM_16",
+        )
+
+    forward = prep._unique_stems([a / "computah.wav", b / "computah.wav"])
+    reverse = prep._unique_stems([b / "computah.wav", a / "computah.wav"])
+    # Same file -> same stem regardless of position, so reverse is forward flipped.
+    check(
+        forward == list(reversed(reverse)),
+        f"stem assignment is order-independent (forward={forward}, reverse={reverse})",
+    )
+    check(
+        sorted(forward) == ["computah", "computah-1"],
+        f"one file keeps the bare stem, the other is suffixed ({sorted(forward)})",
+    )
+
+    # Two colliding groups where one group's bare stem is the name the other
+    # group's suffix search wants. Reserving only singletons hands "computah-1"
+    # to both, and the run later dies on a bogus same-basename FileExistsError.
+    two_groups = prep._unique_stems(
+        [
+            a / "computah.wav",
+            b / "computah.wav",
+            a / "computah-1.wav",
+            b / "computah-1.wav",
+        ]
+    )
+    check(
+        len(set(two_groups)) == len(two_groups),
+        f"overlapping collider groups still get distinct stems ({two_groups})",
+    )
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -152,6 +383,13 @@ def main() -> int:
         test_background_kept_whole(d)
         test_explicit_files_only(d)
         test_empty_input_no_crash(d)
+        test_zero_clips_no_crash(d)
+        test_output_path_not_a_directory(d)
+        test_duplicate_basename_no_overwrite(d)
+        test_rerun_refreshes_populated_dir(d)
+        test_in_run_collision_raises(d)
+        test_refresh_after_adding_collider_leaves_no_orphans(d)
+        test_stem_assignment_ignores_input_order(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

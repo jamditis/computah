@@ -28,6 +28,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import Counter
 from math import gcd
 from pathlib import Path
 
@@ -89,6 +90,31 @@ def _write_clip(out_dir: Path, stem: str, idx: int, audio: np.ndarray) -> Path:
     pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
     path = out_dir / f"{stem}_{idx:03d}.wav"
     sf.write(path, pcm, TARGET_SR, subtype="PCM_16")
+    return path
+
+
+def _write_unique(
+    out_dir: Path, stem: str, idx: int, audio: np.ndarray, seen: set[int]
+) -> Path:
+    """Write a clip, refusing to clobber one this same run already wrote.
+
+    Rerunning the script into a populated dir is a supported refresh, so a
+    leftover from a *prior* run is fine to overwrite. What must never happen is
+    two inputs in *one* run mapping to the same file and the second silently
+    replacing the first. `seen` holds the inode of every clip written this run;
+    the filesystem resolves a case-insensitive collision (a/Computah.wav and
+    b/computah.wav) to that same inode, so this catches it where a path-string
+    compare would not, and stays quiet on a case-sensitive FS where the two are
+    genuinely different files.
+    """
+    path = out_dir / f"{stem}_{idx:03d}.wav"
+    if path.exists() and path.stat().st_ino in seen:
+        raise FileExistsError(
+            f"two inputs map to {path.name} in one run "
+            f"(same basename, or a case-insensitive filesystem collision)"
+        )
+    _write_clip(out_dir, stem, idx, audio)
+    seen.add(path.stat().st_ino)
     return path
 
 
@@ -206,6 +232,83 @@ def _inputs(paths: list[Path]) -> list[Path]:
     return uniq
 
 
+def _unique_stems(files: list[Path]) -> list[str]:
+    """A distinct output stem per input file, in input order.
+
+    Clip names are derived from the input stem, so two inputs that share a
+    basename (a/computah.wav and b/computah.wav) would write the same clip
+    names and the second file would silently overwrite the first. A stem that
+    is already unique across the inputs is kept as-is. Within a colliding group
+    one file keeps the bare stem and the rest get the lowest numeric suffix not
+    otherwise taken. Every input stem is reserved up front so a disambiguated
+    "computah-1" can never land on a real "computah-1" input -- including one
+    that is itself part of another colliding group.
+
+    One member of the group keeps the bare stem so that refreshing a samples dir
+    stays a refresh: adding a second computah.wav renames only the new file and
+    leaves the original's clips to be overwritten in place. Suffixing every
+    member instead would orphan the previous run's computah_###.wav, and
+    eval_wake_threshold reads every clip in the directory, so those orphans would
+    quietly train and score as duplicates.
+
+    Which member keeps the bare stem is decided by resolved path, not by input
+    order, so the mapping depends only on WHICH files are present. Passing the
+    same two files in the other order must not move the bare stem to the other
+    file -- that would strand the first run's clips just as surely.
+
+    A clip's final name is "<stem>-N_<idx>.wav" when disambiguated (the "-N"
+    from here, the "_<idx>" segment index from _write_clip) or "<stem>_<idx>.wav"
+    when the stem was already unique.
+    """
+    counts = Counter(f.stem for f in files)
+    used = {f.stem for f in files}
+    assigned: dict[int, str] = {}
+    groups: dict[str, list[int]] = {}
+    for i, f in enumerate(files):
+        if counts[f.stem] == 1:
+            assigned[i] = f.stem
+        else:
+            groups.setdefault(f.stem, []).append(i)
+
+    # Sorted group order, and resolved-path order within a group, so every
+    # assignment below is a function of the input set alone.
+    for stem, idxs in sorted(groups.items()):
+        ranked = sorted(idxs, key=lambda j: str(files[j].resolve()))
+        for rank, i in enumerate(ranked):
+            if rank == 0:
+                assigned[i] = stem
+                continue
+            n = 1
+            while f"{stem}-{n}" in used:
+                n += 1
+            name = f"{stem}-{n}"
+            used.add(name)
+            assigned[i] = name
+    return [assigned[i] for i in range(len(files))]
+
+
+def _stale_clips(out_dir: Path, written: set[Path]) -> list[Path]:
+    """Audio files in `out_dir` this run did not write, sorted; empty if absent.
+
+    Mirrors `eval_wake_threshold._clips()`, precondition included: a directory
+    that does not exist holds nothing. The precondition lives here, with the
+    read, because the earlier inline copy dropped it and a run that writes no
+    clips never creates out_dir (only `_write_clip` does), so the scan died on
+    a missing directory.
+
+    The mirror is close but not exact: this module's `AUDIO_EXTS` is the wider
+    set, so the warning can name a file eval would skip. #82 tracks giving both
+    modules one definition instead of two copies.
+    """
+    if not out_dir.is_dir():
+        return []
+    return sorted(
+        p
+        for p in out_dir.iterdir()
+        if p.suffix.lower() in AUDIO_EXTS and p not in written
+    )
+
+
 def process(
     inputs: list[Path],
     out_dir: Path,
@@ -215,35 +318,66 @@ def process(
     max_dur_s: float,
 ) -> int:
     """Process every input file; return the total clip count written."""
+    # Checked before any audio is decoded, so an occupied --output is named once
+    # rather than surfacing as whichever exception the run happens to reach first:
+    # mkdir() raises FileExistsError once a clip is ready to write, and a run that
+    # writes nothing gets as far as the stale scan below.
+    if out_dir.exists() and not out_dir.is_dir():
+        print(
+            f"error: --output {out_dir} exists and is not a directory; "
+            f"point --output at a directory, or move that file",
+            file=sys.stderr,
+        )
+        return 0
+
     files = _inputs(inputs)
     if not files:
         joined = ", ".join(str(p) for p in inputs)
         print(f"no audio files found at {joined}", file=sys.stderr)
         return 0
 
-    total = 0
+    stems = _unique_stems(files)
+    written: set[Path] = set()
+    seen_inodes: set[int] = set()
     all_durs: list[float] = []
-    for f in files:
+    for f, stem in zip(files, stems):
         audio = load_mono_16k(f)
         dur = len(audio) / TARGET_SR
         if label == "background":
             # Continuous negative audio: keep it whole, just normalized.
-            _write_clip(out_dir, f.stem, 0, audio)
-            total += 1
+            written.add(_write_unique(out_dir, stem, 0, audio, seen_inodes))
             print(f"  {f.name}: {dur:.1f}s background -> 1 file")
             continue
 
         clips, stats = segment_on_silence(audio, min_gap_s, min_dur_s, max_dur_s)
         for i, clip in enumerate(clips):
-            _write_clip(out_dir, f.stem, i, clip)
+            written.add(_write_unique(out_dir, stem, i, clip, seen_inodes))
             all_durs.append(len(clip) / TARGET_SR)
-        total += stats["kept"]
         note = ""
         if stats["too_short"] or stats["too_long"]:
             note = f" (dropped {stats['too_short']} short, {stats['too_long']} long)"
         print(f"  {f.name}: {dur:.1f}s -> {stats['kept']} clips{note}")
 
+    # Count files actually on disk, not segments requested, so the report is
+    # honest even if two inputs ever resolve to the same clip name.
+    total = len(written)
     print(f"\nwrote {total} {label} clip(s) to {out_dir}")
+
+    # Clips this run did not write are left from an earlier run over a different
+    # input set. Training and eval read every clip in the directory, so they
+    # would score as extra data nobody asked for. Deleting them here would be
+    # too eager (the dir is the user's), so say so and name the fix.
+    stale = _stale_clips(out_dir, written)
+    if stale:
+        shown = ", ".join(p.name for p in stale[:3])
+        if len(stale) > 3:
+            shown += f", +{len(stale) - 3} more"
+        print(
+            f"warning: {len(stale)} clip(s) in {out_dir} are left from an earlier "
+            f"run ({shown}). Training and eval read every clip in this directory, "
+            f"so delete them or clear {out_dir} and rerun.",
+            file=sys.stderr,
+        )
     if all_durs:
         a = np.array(all_durs)
         print(
