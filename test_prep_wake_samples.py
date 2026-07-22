@@ -196,6 +196,27 @@ def test_duplicate_basename_no_overwrite(d: Path) -> None:
     )
 
 
+def test_write_clip_refuses_overwrite(d: Path) -> None:
+    """_write_clip must never overwrite a clip already on disk.
+
+    _unique_stems disambiguates same-basename inputs on a case-sensitive
+    filesystem, but a case-insensitive one (Computah vs computah collapse to one
+    path) or a rerun into a populated dir can still target an existing file. The
+    guard turns that into a loud FileExistsError instead of a silent data loss,
+    so the check writes the same clip name twice and expects the second to raise.
+    """
+    out = d / "overwrite_guard"
+    audio = make_bursts(1, 0.5, 0.8, prep.TARGET_SR)
+    first = prep._write_clip(out, "dup", 0, audio)
+    check(first.exists(), f"first _write_clip lands on disk ({first.name})")
+    try:
+        prep._write_clip(out, "dup", 0, audio)
+    except FileExistsError:
+        check(True, "second write to the same clip name raises FileExistsError")
+    else:
+        check(False, "second write to the same clip name should have raised")
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -206,6 +227,7 @@ def main() -> int:
         test_explicit_files_only(d)
         test_empty_input_no_crash(d)
         test_duplicate_basename_no_overwrite(d)
+        test_write_clip_refuses_overwrite(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

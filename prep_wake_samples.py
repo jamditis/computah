@@ -89,6 +89,16 @@ def _write_clip(out_dir: Path, stem: str, idx: int, audio: np.ndarray) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
     path = out_dir / f"{stem}_{idx:03d}.wav"
+    if path.exists():
+        # Never silently clobber a clip already on disk. _unique_stems keeps
+        # in-run basenames distinct, but two collisions slip past it: a
+        # case-insensitive filesystem (a/Computah.wav and b/computah.wav map to
+        # one path) and a rerun into a populated out_dir. Fail loud so a real
+        # ambiguity surfaces instead of a training example vanishing.
+        raise FileExistsError(
+            f"refusing to overwrite {path}: another clip already claimed this "
+            f"name (case-insensitive basename collision or a prior run's output)"
+        )
     sf.write(path, pcm, TARGET_SR, subtype="PCM_16")
     return path
 
