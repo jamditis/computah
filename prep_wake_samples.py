@@ -89,17 +89,32 @@ def _write_clip(out_dir: Path, stem: str, idx: int, audio: np.ndarray) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     pcm = (np.clip(audio, -1.0, 1.0) * 32767.0).astype(np.int16)
     path = out_dir / f"{stem}_{idx:03d}.wav"
-    if path.exists():
-        # Never silently clobber a clip already on disk. _unique_stems keeps
-        # in-run basenames distinct, but two collisions slip past it: a
-        # case-insensitive filesystem (a/Computah.wav and b/computah.wav map to
-        # one path) and a rerun into a populated out_dir. Fail loud so a real
-        # ambiguity surfaces instead of a training example vanishing.
-        raise FileExistsError(
-            f"refusing to overwrite {path}: another clip already claimed this "
-            f"name (case-insensitive basename collision or a prior run's output)"
-        )
     sf.write(path, pcm, TARGET_SR, subtype="PCM_16")
+    return path
+
+
+def _write_unique(
+    out_dir: Path, stem: str, idx: int, audio: np.ndarray, seen: set[int]
+) -> Path:
+    """Write a clip, refusing to clobber one this same run already wrote.
+
+    Rerunning the script into a populated dir is a supported refresh, so a
+    leftover from a *prior* run is fine to overwrite. What must never happen is
+    two inputs in *one* run mapping to the same file and the second silently
+    replacing the first. `seen` holds the inode of every clip written this run;
+    the filesystem resolves a case-insensitive collision (a/Computah.wav and
+    b/computah.wav) to that same inode, so this catches it where a path-string
+    compare would not, and stays quiet on a case-sensitive FS where the two are
+    genuinely different files.
+    """
+    path = out_dir / f"{stem}_{idx:03d}.wav"
+    if path.exists() and path.stat().st_ino in seen:
+        raise FileExistsError(
+            f"two inputs map to {path.name} in one run "
+            f"(same basename, or a case-insensitive filesystem collision)"
+        )
+    _write_clip(out_dir, stem, idx, audio)
+    seen.add(path.stat().st_ino)
     return path
 
 
@@ -264,19 +279,20 @@ def process(
 
     stems = _unique_stems(files)
     written: set[Path] = set()
+    seen_inodes: set[int] = set()
     all_durs: list[float] = []
     for f, stem in zip(files, stems):
         audio = load_mono_16k(f)
         dur = len(audio) / TARGET_SR
         if label == "background":
             # Continuous negative audio: keep it whole, just normalized.
-            written.add(_write_clip(out_dir, stem, 0, audio))
+            written.add(_write_unique(out_dir, stem, 0, audio, seen_inodes))
             print(f"  {f.name}: {dur:.1f}s background -> 1 file")
             continue
 
         clips, stats = segment_on_silence(audio, min_gap_s, min_dur_s, max_dur_s)
         for i, clip in enumerate(clips):
-            written.add(_write_clip(out_dir, stem, i, clip))
+            written.add(_write_unique(out_dir, stem, i, clip, seen_inodes))
             all_durs.append(len(clip) / TARGET_SR)
         note = ""
         if stats["too_short"] or stats["too_long"]:

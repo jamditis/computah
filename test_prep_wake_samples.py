@@ -196,25 +196,52 @@ def test_duplicate_basename_no_overwrite(d: Path) -> None:
     )
 
 
-def test_write_clip_refuses_overwrite(d: Path) -> None:
-    """_write_clip must never overwrite a clip already on disk.
+def test_rerun_refreshes_populated_dir(d: Path) -> None:
+    """Rerunning into a dir that already holds a prior run's clips must work.
 
-    _unique_stems disambiguates same-basename inputs on a case-sensitive
-    filesystem, but a case-insensitive one (Computah vs computah collapse to one
-    path) or a rerun into a populated dir can still target an existing file. The
-    guard turns that into a loud FileExistsError instead of a silent data loss,
-    so the check writes the same clip name twice and expects the second to raise.
+    The docs tell people to run prep_wake_samples straight into samples/, so a
+    refresh overwrites last run's clips rather than aborting. Running process
+    twice into the same out_dir must succeed both times and leave the same file
+    count -- a prior-run leftover is an intended overwrite, not a collision.
     """
-    out = d / "overwrite_guard"
+    src = d / "rerun_src"
+    src.mkdir()
+    sf.write(
+        src / "take.wav",
+        make_bursts(3, 0.5, 0.8, prep.TARGET_SR),
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    out = d / "rerun_out"
+    first = prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    second = prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    files = sorted(out.glob("*.wav"))
+    check(
+        first == second == 3 and len(files) == 3,
+        f"rerun into a populated dir refreshes cleanly "
+        f"(first={first}, second={second}, files={len(files)})",
+    )
+
+
+def test_in_run_collision_raises(d: Path) -> None:
+    """Two clips in one run mapping to the same file must fail loud.
+
+    _unique_stems keeps in-run basenames distinct, but this is the backstop for
+    a case-insensitive filesystem where distinct-cased stems resolve to one
+    inode. Writing the same name twice with a shared seen-set (as one run would)
+    must raise instead of silently dropping the first clip.
+    """
+    out = d / "in_run_collision"
     audio = make_bursts(1, 0.5, 0.8, prep.TARGET_SR)
-    first = prep._write_clip(out, "dup", 0, audio)
-    check(first.exists(), f"first _write_clip lands on disk ({first.name})")
+    seen: set[int] = set()
+    first = prep._write_unique(out, "dup", 0, audio, seen)
+    check(first.exists(), f"first clip of the run lands on disk ({first.name})")
     try:
-        prep._write_clip(out, "dup", 0, audio)
+        prep._write_unique(out, "dup", 0, audio, seen)
     except FileExistsError:
-        check(True, "second write to the same clip name raises FileExistsError")
+        check(True, "a second clip mapping to the same file in one run raises")
     else:
-        check(False, "second write to the same clip name should have raised")
+        check(False, "an in-run collision should have raised FileExistsError")
 
 
 def main() -> int:
@@ -227,7 +254,8 @@ def main() -> int:
         test_explicit_files_only(d)
         test_empty_input_no_crash(d)
         test_duplicate_basename_no_overwrite(d)
-        test_write_clip_refuses_overwrite(d)
+        test_rerun_refreshes_populated_dir(d)
+        test_in_run_collision_raises(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1
