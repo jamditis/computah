@@ -33,10 +33,22 @@ repo. The evaluation script below is committed; the audio it reads is not.
 Re-running prep into a populated `samples/` dir refreshes it in place. If a
 re-recording yields fewer clips than last time, the extra clips from the old run
 would linger and the training globs would still read them, so prep warns and
-names the count. Pass `--clean` to remove those leftovers in the same run. It is
-deliberately narrow: it only deletes leftover clips of a take this run
-re-recorded (a `<stem>_NNN.wav` clip whose stem the run wrote), so a source
-recording or a hand-curated clip for a different stem is named but left in place.
+names the count. Pass `--clean` to remove those leftovers in the same run.
+
+`--clean` only ever deletes clips prep itself made. It removes the now-unused
+higher-numbered clips of a take this run re-recorded, and the clips a previous
+run recorded for a take that is no longer in the inputs -- the second kind is
+matched against `.prep-manifest.json`, a record prep keeps in the output dir of
+what it wrote there. A source recording, a hand-curated clip, and anything else
+absent from that record is named but left in place.
+
+That record proves prep made a file, not that the file belongs to what you are
+refreshing, so the manifest half only applies when the run matches the recorded
+set: same `--label`, and at least one take in common. Point `--clean` at the
+wrong directory and it falls back to the narrow stem match, which cannot reach
+past the clips the run just wrote. Prep also spares the prior clips of a take it
+tried and got nothing from (a silent or bad re-recording): those are the only
+copy, and it will not trade them for a run that produced nothing.
 
 ```bash
 .venv/bin/python prep_wake_samples.py --input computah_normal.wav \

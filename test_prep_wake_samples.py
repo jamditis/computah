@@ -521,6 +521,211 @@ def test_stem_assignment_ignores_input_order(d: Path) -> None:
     )
 
 
+def _burst_take(path: Path, n: int) -> None:
+    """Write a take of `n` well-separated utterances at `path`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(
+        path, make_bursts(n, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+
+
+def test_manifest_cleans_dropped_input_orphans(d: Path) -> None:
+    """--clean removes the orphans of an input dropped between runs (#84 case 1).
+
+    The stem rule alone cannot reach these: `other` is not in the rerun at all,
+    so no clip this run writes ever makes its old ones stale. The manifest is
+    what distinguishes them from audio a user put in the directory.
+    """
+    src = d / "dropped_src"
+    _burst_take(src / "a" / "take.wav", 3)
+    _burst_take(src / "b" / "other.wav", 2)
+    out = d / "dropped_out"
+    prep.process([src / "a" / "take.wav", src / "b" / "other.wav"], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        (out / prep.MANIFEST_NAME).is_file(),
+        "a run records what it wrote in the manifest",
+    )
+
+    prep.process([src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["take_000.wav", "take_001.wav", "take_002.wav"],
+        f"--clean removes a dropped input's orphans ({present})",
+    )
+
+
+def test_manifest_cleans_changed_collider_stem_orphans(d: Path) -> None:
+    """--clean removes orphans whose disambiguated stem vanished (#84 case 2).
+
+    Two `take.wav` inputs become stems `take` and `take-1`. Rerun with only one
+    and `take-1` is not a stem any more, so its clips are orphaned under a name
+    nothing will overwrite.
+    """
+    src = d / "collider_src"
+    _burst_take(src / "a" / "take.wav", 3)
+    _burst_take(src / "b" / "take.wav", 2)
+    out = d / "collider_out"
+    prep.process([src / "a" / "take.wav", src / "b" / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    first = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        any(n.startswith("take-1_") for n in first),
+        f"the collider run writes a disambiguated stem ({first})",
+    )
+
+    prep.process([src / "b" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        not any(n.startswith("take-1_") for n in present),
+        f"--clean removes orphans of a stem the rerun no longer produces ({present})",
+    )
+
+
+def test_manifest_never_authorizes_deleting_curated_audio(d: Path) -> None:
+    """The manifest widens --clean only to files prep recorded writing.
+
+    A hand-added clip whose stem no run ever wrote is exactly the shape the new
+    rule reaches for -- an orphan of an unattempted stem -- so this pins that it
+    is still spared. Being absent from the manifest is the whole guarantee.
+    """
+    src = d / "curated_src"
+    _burst_take(src / "take.wav", 3)
+    out = d / "curated_out"
+    prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(out / "custom_001.wav", 1)
+    _burst_take(out / "my_recording.wav", 1)
+
+    prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        "custom_001.wav" in present and "my_recording.wav" in present,
+        f"--clean spares audio prep did not create ({present})",
+    )
+
+
+def test_manifest_spares_prior_clips_when_rerun_writes_nothing(d: Path) -> None:
+    """The manifest must not reopen the silent-re-recording data loss.
+
+    Those clips ARE in the manifest, so a rule that removed every manifested
+    clip the run did not rewrite would delete the only copy of a take whose
+    re-recording came back silent. The stem has to be excluded because the run
+    attempted it, regardless of what the manifest says.
+    """
+    src = d / "silent_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "silent_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+
+    _burst_take(take, 3)
+    second = prep.process([take], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        second == 0
+        and present == ["take_000.wav", "take_001.wav", "take_002.wav"],
+        f"a manifested clip is still spared when its take wrote nothing ({present})",
+    )
+
+
+def test_manifest_spares_a_silent_take_alongside_a_good_one(d: Path) -> None:
+    """The `attempted` guard, with the manifest rule actually armed.
+
+    When the whole run comes back empty nothing is written, so the manifest rule
+    never arms and the guard is never reached. The case that reaches it is a run
+    where one take records fine and another comes back silent: the good take
+    supplies the stem overlap that arms the rule, and then only `attempted`
+    stands between the silent take's earlier clips -- its only copy -- and
+    unlink(). Delete that clause and this is the test that goes red.
+    """
+    src = d / "mixed_src"
+    good = src / "good.wav"
+    flaky = src / "flaky.wav"
+    _burst_take(good, 2)
+    _burst_take(flaky, 3)
+    out = d / "mixed_out"
+    prep.process([good, flaky], out, "positive", 0.3, 0.2, 3.0)
+    before = sorted(p.name for p in out.glob("*.wav"))
+    check(len(before) == 5, f"both takes record on the first run ({before})")
+
+    # Re-record both. `good` is fine; `flaky` comes back as one long unbroken
+    # tone -- a mic left running, say -- which the max-duration cap drops
+    # entirely, so it writes nothing while `good` writes and arms the rule.
+    _burst_take(good, 2)
+    sf.write(
+        flaky,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    prep.process([good, flaky], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        sorted(n for n in present if n.startswith("flaky_"))
+        == ["flaky_000.wav", "flaky_001.wav", "flaky_002.wav"],
+        f"--clean spares a silent take's only copy while cleaning beside it ({present})",
+    )
+
+
+def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
+    """A corrupt manifest degrades --clean, it does not fail the run.
+
+    The clips are the output that matters. Reading garbage as "no record" costs
+    precision on the orphans only the manifest can reach; treating it as fatal
+    would block a run that has real work to do.
+    """
+    src = d / "corrupt_src"
+    _burst_take(src / "a" / "take.wav", 3)
+    _burst_take(src / "b" / "other.wav", 2)
+    out = d / "corrupt_out"
+    prep.process([src / "a" / "take.wav", src / "b" / "other.wav"], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).write_text("{not json")
+
+    _burst_take(src / "a" / "take.wav", 2)
+    total = prep.process([src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 2 and "take_002.wav" not in present and "other_000.wav" in present,
+        f"a corrupt manifest leaves the stem rule working ({present})",
+    )
+
+
+def test_manifest_spares_a_different_dataset_on_stray_output(d: Path) -> None:
+    """A mistyped --output must not let the manifest wipe another dataset.
+
+    Provenance says prep created a file, not that the file belongs to the set
+    being refreshed, so the manifest rule only arms on a matching label with an
+    overlapping stem. Without that, every clip in a background dir is one prep
+    wrote and no positives rerun attempts, which would be enough to delete the
+    whole directory.
+    """
+    src = d / "stray_src"
+    _burst_take(src / "noise.wav", 2)
+    bg = d / "stray_background"
+    prep.process([src / "noise.wav"], bg, "background", 0.3, 0.2, 3.0)
+    before = sorted(p.name for p in bg.glob("*.wav"))
+    check(before == ["noise_000.wav"], f"the background dir starts populated ({before})")
+
+    # The typo: a positives run pointed at the background dir.
+    _burst_take(src / "computah.wav", 3)
+    prep.process([src / "computah.wav"], bg, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in bg.glob("*.wav"))
+    check(
+        "noise_000.wav" in present,
+        f"--clean spares a dataset this run is not refreshing ({present})",
+    )
+
+    # And the guard has to survive the typo being repeated. If the stray run had
+    # relabeled the directory's record as "positive", this second one would find
+    # a matching label plus an overlapping stem and read the background clip as
+    # its own orphan.
+    _burst_take(src / "computah.wav", 2)
+    prep.process([src / "computah.wav"], bg, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in bg.glob("*.wav"))
+    check(
+        "noise_000.wav" in present,
+        f"a repeated stray --output still spares the other dataset ({present})",
+    )
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -541,6 +746,13 @@ def main() -> int:
         test_in_run_collision_raises(d)
         test_refresh_after_adding_collider_leaves_no_orphans(d)
         test_stem_assignment_ignores_input_order(d)
+        test_manifest_cleans_dropped_input_orphans(d)
+        test_manifest_cleans_changed_collider_stem_orphans(d)
+        test_manifest_never_authorizes_deleting_curated_audio(d)
+        test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
+        test_manifest_spares_a_silent_take_alongside_a_good_one(d)
+        test_manifest_unreadable_falls_back_to_stem_rule(d)
+        test_manifest_spares_a_different_dataset_on_stray_output(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

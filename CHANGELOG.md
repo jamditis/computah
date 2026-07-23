@@ -17,6 +17,18 @@ All notable changes to computah are recorded here. The format follows
   leftover count. `test_prep_wake_samples.py` covers the re-run-with-fewer-clips
   case with and without `--clean`, and that `--clean` spares files this run did
   not record.
+- `prep_wake_samples.py` output manifest (#84): prep records the clips it writes
+  in `.prep-manifest.json` in the output dir, and `--clean` uses it to remove the
+  orphans the stem match cannot reach -- clips from an input dropped between runs,
+  and clips under a disambiguated stem (`take-1_000.wav`) that a later run no
+  longer produces. The record is what separates those from audio a user curated,
+  so `--clean` still never deletes a file prep did not create. Provenance alone is
+  not enough to delete, though: the manifest rule only arms when the run refreshes
+  the recorded set (same `--label`, at least one stem in common), so a mistyped
+  `--output` that lands a positives run in a background directory falls back to the
+  stem match instead of wiping it. `--clean` also still spares the prior clips of a
+  take this run attempted but wrote nothing for. An absent or unreadable manifest
+  degrades `--clean` to the stem match rather than failing the run.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,

@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -323,6 +324,77 @@ def _summarize(paths: list[Path], limit: int = 3) -> str:
     return shown
 
 
+MANIFEST_NAME = ".prep-manifest.json"
+
+
+def _read_manifest(out_dir: Path) -> tuple[str | None, set[str]]:
+    """The label and clip names a previous prep run recorded here.
+
+    Fails soft on every read problem -- absent, unreadable, not JSON, wrong
+    shape -- returning ``(None, set())``. An empty record means "no record of
+    what prep made," which narrows `--clean` back to the stem rule below.
+    Failing loud would be worse in both directions: a corrupt manifest would
+    abort a run that has real work to do, and a manifest trusted despite a
+    partial read could name files prep never wrote.
+    """
+    try:
+        raw = json.loads((out_dir / MANIFEST_NAME).read_text())
+    except (OSError, ValueError):
+        return None, set()
+    if not isinstance(raw, dict):
+        return None, set()
+    clips = raw.get("clips")
+    if not isinstance(clips, list):
+        return None, set()
+    label = raw.get("label")
+    return (
+        label if isinstance(label, str) else None,
+        {c for c in clips if isinstance(c, str)},
+    )
+
+
+def _write_manifest(
+    out_dir: Path, label: str, names: set[str], prior_label: str | None
+) -> None:
+    """Record which files in `out_dir` prep created, for a later --clean run.
+
+    Written after the clips are on disk, and a failure only warns: the clips are
+    the output that matters, and losing the manifest costs precision on a future
+    --clean, not correctness. A run that wrote nothing into a directory that does
+    not exist has nothing to record and does not create one.
+
+    A directory already recorded under a different label is left alone. Rewriting
+    it would relabel the other dataset's files as this one's, and a second stray
+    run into the same directory would then find a matching label and an
+    overlapping stem and read them as its own orphans. The mismatch is worth
+    saying out loud either way: it usually means ``--output`` points somewhere
+    unintended.
+    """
+    if not out_dir.is_dir():
+        return
+    if prior_label is not None and prior_label != label:
+        print(
+            f"warning: {out_dir} was last written as {prior_label!r} clips, not "
+            f"{label!r}; leaving its record alone. If --output is right, clear the "
+            f"directory (or remove {MANIFEST_NAME}) to start its record over",
+            file=sys.stderr,
+        )
+        return
+    try:
+        (out_dir / MANIFEST_NAME).write_text(
+            json.dumps(
+                {"version": 1, "label": label, "clips": sorted(names)}, indent=2
+            )
+            + "\n"
+        )
+    except OSError as e:
+        print(
+            f"warning: could not write {out_dir / MANIFEST_NAME} ({e}); "
+            f"a later --clean will fall back to matching re-recorded stems only",
+            file=sys.stderr,
+        )
+
+
 def _clip_stem(name: str) -> str | None:
     """The stem of a "<stem>_NNN.wav" clip name, or None if it isn't one."""
     m = _CLIP_NAME.fullmatch(name)
@@ -340,11 +412,15 @@ def process(
 ) -> int:
     """Process every input file; return the total clip count written.
 
-    With ``clean`` set, a re-recorded take's leftover clips (a prior run's
-    now-unused higher-numbered clips for a stem this run wrote) are removed after
-    this run writes, so its own count matches what is on disk. It stays narrow on
-    purpose: an unrelated take's clips, a source recording, or hand-added audio is
-    named but never deleted, so a stray ``--output`` never silently wipes files.
+    With ``clean`` set, prep's own leftover clips are removed after this run
+    writes, so its count matches what is on disk. Two kinds qualify: a
+    re-recorded take's now-unused higher-numbered clips (matched by stem), and
+    clips a previous run recorded for a take that is not in this run's inputs at
+    all (matched against ``MANIFEST_NAME``, and only when this run refreshes the
+    recorded set -- same label, overlapping stems). Everything else is named but
+    never deleted -- a source recording, hand-added audio, another dataset a
+    stray ``--output`` landed in, and the prior clips of a take this run
+    attempted but wrote nothing for.
     """
     # Checked before any audio is decoded, so an occupied --output is named once
     # rather than surfacing as whichever exception the run happens to reach first:
@@ -365,6 +441,9 @@ def process(
         return 0
 
     stems = _unique_stems(files)
+    # Read before anything is written, so it describes the directory as this run
+    # found it.
+    prior_label, prior = _read_manifest(out_dir)
     written: set[Path] = set()
     seen_inodes: set[int] = set()
     all_durs: list[float] = []
@@ -409,32 +488,94 @@ def process(
     run_stems = {
         stem for stem in (_clip_stem(p.name) for p in written) if stem is not None
     }
+    # The manifest widens --clean to the orphans the stem rule cannot reach: a
+    # clip prep recorded writing on an earlier run, whose stem is not in this
+    # run's inputs at all. That covers a dropped input and a basename collision
+    # whose disambiguated stem changed -- both leave clips no rerun will ever
+    # overwrite, and the manifest is what proves prep made them rather than a
+    # user curating the directory.
+    #
+    # But "prep made this file" is provenance, not permission. It does not say
+    # the file belongs to the dataset this run is refreshing, and without that
+    # second fact a mistyped --output -- positives re-run into the background
+    # directory -- would delete every clip there, since none of those stems are
+    # in the inputs. So the manifest rule only arms when this run looks like a
+    # refresh of the recorded set: same label, and at least one stem in common.
+    # A stray --output shares neither, and falls back to the stem rule, which
+    # cannot reach outside what this run just wrote.
+    #
+    # A stem this run DID attempt but wrote nothing for is excluded on purpose,
+    # manifest or not: that is the silent-re-recording case, where the prior
+    # clips are the only copy. The manifest says prep created a file; it does
+    # not say the file is expendable.
+    attempted = set(stems)
+    prior_stems = {
+        stem for stem in (_clip_stem(n) for n in prior) if stem is not None
+    }
+    refreshes_prior = prior_label == label and bool(run_stems & prior_stems)
     stale = _stale_clips(out_dir, written)
-    if stale:
-        removable = (
-            [p for p in stale if _clip_stem(p.name) in run_stems] if clean else []
+    removable = (
+        [
+            p
+            for p in stale
+            if _clip_stem(p.name) in run_stems
+            or (
+                refreshes_prior
+                and p.name in prior
+                and _clip_stem(p.name) not in attempted
+            )
+        ]
+        if clean
+        else []
+    )
+    for p in removable:
+        p.unlink()
+    if removable:
+        print(
+            f"removed {len(removable)} clip(s) left from an earlier run "
+            f"({_summarize(removable)})"
         )
-        for p in removable:
-            p.unlink()
-        if removable:
-            print(
-                f"removed {len(removable)} clip(s) left from an earlier run "
-                f"({_summarize(removable)})"
-            )
-        lingering = [p for p in stale if p not in removable]
-        if lingering:
+    lingering = [p for p in stale if p not in removable]
+    # Carry forward the prior run's record for files still on disk, so a
+    # directory built up over several runs keeps one provenance list rather than
+    # only remembering the most recent run.
+    _write_manifest(
+        out_dir,
+        label,
+        {p.name for p in written} | {p.name for p in lingering if p.name in prior},
+        prior_label,
+    )
+    if lingering:
+        # Why a file lingered decides what the user should do about it, and the
+        # cases want opposite advice. A take this run re-recorded and got nothing
+        # from kept its previous clips because they are the only copy -- telling
+        # that user to delete them by hand would undo the guard and lose the
+        # recording. Split the message rather than send one that is right for the
+        # common case and harmful for the case prep went out of its way to
+        # protect.
+        empty_takes = [p for p in lingering if _clip_stem(p.name) in attempted]
+        if empty_takes and clean:
             fix = (
-                "these are not clips this run re-recorded, so --clean leaves them; "
-                "remove them by hand"
-                if clean
-                else "rerun with --clean to remove them, or clear the directory by hand"
+                "this run re-recorded "
+                f"{_summarize(empty_takes)} and got no clips from it, so --clean "
+                "kept the earlier ones rather than leave you with none; check the "
+                "recording before removing anything"
             )
-            print(
-                f"warning: {len(lingering)} file(s) in {out_dir} are left from an "
-                f"earlier run ({_summarize(lingering)}). Training and eval read "
-                f"every clip in this directory, so {fix}.",
-                file=sys.stderr,
+        elif clean:
+            fix = (
+                "prep has no record of creating these, so --clean leaves them; "
+                "remove them by hand if they are not wanted"
             )
+        else:
+            fix = "rerun with --clean to remove them, or clear the directory by hand"
+        print(
+            f"warning: {len(lingering)} file(s) in {out_dir} are left from an "
+            f"earlier run ({_summarize(lingering)}). Training and eval read every "
+            f"clip in this directory, so they count as data nobody asked for: "
+            f"{fix}.",
+            file=sys.stderr,
+        )
+
     if all_durs:
         a = np.array(all_durs)
         print(
@@ -476,9 +617,9 @@ def main() -> int:
     p.add_argument(
         "--clean",
         action="store_true",
-        help="remove a re-recorded take's leftover clips in --output (a prior run's "
-        "now-unused higher-numbered clips for a take in this run); leaves unrelated "
-        "or hand-added audio in place",
+        help="remove prep's own leftover clips in --output: a re-recorded take's "
+        "now-unused higher-numbered clips, plus clips a previous run recorded for a "
+        "take no longer in the inputs; leaves hand-added audio in place",
     )
     args = p.parse_args()
 
