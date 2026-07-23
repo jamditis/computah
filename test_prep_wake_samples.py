@@ -258,6 +258,153 @@ def test_rerun_refreshes_populated_dir(d: Path) -> None:
     )
 
 
+def test_rerun_with_fewer_clips_orphans_then_clean(d: Path) -> None:
+    """Issue #8: re-recording with fewer utterances must not silently keep orphans.
+
+    The first run writes five clips. Re-recording the same take with two
+    utterances and rerunning overwrites take_000/_001 but strands take_002..004.
+    Without --clean those orphans linger (the warn path, so training would read
+    them); with clean=True they are removed and the returned count equals the
+    files on disk -- the issue's acceptance criteria.
+    """
+    src = d / "fewer_src"
+    src.mkdir()
+    take = src / "take.wav"
+    sf.write(
+        take, make_bursts(5, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    out = d / "fewer_out"
+    first = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    check(first == 5, f"first run writes five clips (first={first})")
+
+    # Re-record the same file with fewer utterances, then rerun into the same dir.
+    sf.write(
+        take, make_bursts(2, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    without = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        without == 2 and len(present) == 5,
+        f"without --clean the three orphans linger (wrote={without}, files={present})",
+    )
+
+    cleaned = prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        cleaned == 2 and present == ["take_000.wav", "take_001.wav"],
+        f"--clean removes the orphans so the count matches files on disk "
+        f"(wrote={cleaned}, files={present})",
+    )
+
+
+def test_clean_spares_files_this_run_did_not_record(d: Path) -> None:
+    """--clean removes only the re-recorded take's own orphan clips. A source
+    take, and a hand-curated clip that happens to match "<stem>_NNN.wav" but
+    whose stem this run did not write, are both left in place.
+    """
+    src = d / "spare_src"
+    src.mkdir()
+    take = src / "take.wav"
+    sf.write(
+        take, make_bursts(3, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    out = d / "spare_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)  # take_000.._002
+
+    # A raw recording (no clip shape) and a hand-curated clip whose stem this run
+    # never writes -- both must survive --clean.
+    for name in ("my_recording.wav", "custom_001.wav"):
+        sf.write(
+            out / name,
+            make_bursts(1, 0.5, 0.8, prep.TARGET_SR),
+            prep.TARGET_SR,
+            subtype="PCM_16",
+        )
+
+    # Re-record with fewer utterances and rerun with --clean: only the take_*
+    # orphan is removed; the source take and the foreign clip are untouched.
+    sf.write(
+        take, make_bursts(2, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        "my_recording.wav" in present
+        and "custom_001.wav" in present
+        and "take_002.wav" not in present,
+        f"--clean removes only the re-recorded take's orphans ({present})",
+    )
+
+
+def test_clean_removes_disambiguated_stem_orphans(d: Path) -> None:
+    """--clean must clean orphans of a *disambiguated* stem too (#7 x #8).
+
+    Two inputs sharing a basename get stems "computah" and "computah-1". The
+    greedy match in _CLIP_NAME is load-bearing here: an orphan
+    "computah-1_002.wav" has to pair back to the run stem "computah-1", not
+    "computah", or --clean would strand it for training to read.
+    """
+    a = d / "disambig_a"
+    b = d / "disambig_b"
+    a.mkdir()
+    b.mkdir()
+    for dir_ in (a, b):
+        sf.write(
+            dir_ / "computah.wav",
+            make_bursts(3, 0.5, 0.8, prep.TARGET_SR),
+            prep.TARGET_SR,
+            subtype="PCM_16",
+        )
+    out = d / "disambig_out"
+    inputs = [a / "computah.wav", b / "computah.wav"]
+    prep.process(inputs, out, "positive", 0.3, 0.2, 3.0)  # computah_* + computah-1_*, 6
+
+    # Re-record both takes shorter, then rerun with --clean.
+    for dir_ in (a, b):
+        sf.write(
+            dir_ / "computah.wav",
+            make_bursts(1, 0.5, 0.8, prep.TARGET_SR),
+            prep.TARGET_SR,
+            subtype="PCM_16",
+        )
+    prep.process(inputs, out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["computah-1_000.wav", "computah_000.wav"],
+        f"--clean clears orphans of both the bare and disambiguated stems ({present})",
+    )
+
+
+def test_clean_spares_prior_clips_when_rerun_writes_nothing(d: Path) -> None:
+    """A re-recording that yields zero clips must not let --clean wipe the good
+    run before it. The take's stem is still in the input list, but it wrote
+    nothing this run, so its earlier clips are the only copy -- --clean has to
+    leave them. Scoping by written stems (not input stems) is what protects them.
+    """
+    src = d / "wipe_src"
+    src.mkdir()
+    take = src / "take.wav"
+    sf.write(
+        take, make_bursts(3, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    out = d / "wipe_out"
+    first = prep.process([take], out, "positive", 0.3, 0.2, 3.0)  # take_000.._002
+    check(first == 3, f"first run writes the good clips (got {first})")
+
+    # Re-record badly: a --min-dur longer than every burst drops all segments, so
+    # this run writes nothing. Without the written-stem scoping, --clean would read
+    # the take's prior clips as stale-for-its-own-stem and delete the only copy.
+    sf.write(
+        take, make_bursts(3, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    second = prep.process([take], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        second == 0 and present == ["take_000.wav", "take_001.wav", "take_002.wav"],
+        f"--clean keeps the prior good clips when the rerun writes nothing ({present})",
+    )
+
+
 def test_in_run_collision_raises(d: Path) -> None:
     """Two clips in one run mapping to the same file must fail loud.
 
@@ -387,6 +534,10 @@ def main() -> int:
         test_output_path_not_a_directory(d)
         test_duplicate_basename_no_overwrite(d)
         test_rerun_refreshes_populated_dir(d)
+        test_rerun_with_fewer_clips_orphans_then_clean(d)
+        test_clean_spares_files_this_run_did_not_record(d)
+        test_clean_removes_disambiguated_stem_orphans(d)
+        test_clean_spares_prior_clips_when_rerun_writes_nothing(d)
         test_in_run_collision_raises(d)
         test_refresh_after_adding_collider_leaves_no_orphans(d)
         test_stem_assignment_ignores_input_order(d)

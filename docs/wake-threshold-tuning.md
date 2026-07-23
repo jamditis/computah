@@ -30,6 +30,19 @@ and background takes, then split them into clips with `prep_wake_samples.py`:
 `samples/` is gitignored: these are personal voice recordings and never go in the
 repo. The evaluation script below is committed; the audio it reads is not.
 
+Re-running prep into a populated `samples/` dir refreshes it in place. If a
+re-recording yields fewer clips than last time, the extra clips from the old run
+would linger and the training globs would still read them, so prep warns and
+names the count. Pass `--clean` to remove those leftovers in the same run. It is
+deliberately narrow: it only deletes leftover clips of a take this run
+re-recorded (a `<stem>_NNN.wav` clip whose stem the run wrote), so a source
+recording or a hand-curated clip for a different stem is named but left in place.
+
+```bash
+.venv/bin/python prep_wake_samples.py --input computah_normal.wav \
+    --output samples/positive --label positive --clean
+```
+
 ## 2. Run the sweep
 
 ```bash

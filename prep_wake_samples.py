@@ -24,6 +24,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +39,11 @@ from scipy.signal import resample_poly
 
 TARGET_SR = 16000
 AUDIO_EXTS = {".wav", ".flac", ".ogg", ".m4a", ".mp3", ".aac", ".mp4", ".wma"}
+# prep writes each clip as "<stem>_NNN.wav" (see _write_unique; NNN is >=3 digits,
+# since :03d is a minimum width). --clean pairs this shape with the current run's
+# stems so it only removes a re-recorded take's own leftover clips, never a source
+# take, an unrelated take's clips, or hand-added audio a user left in the output dir.
+_CLIP_NAME = re.compile(r"(.+)_\d{3,}\.wav$")
 
 
 # --------------------------------------------------------------------------- #
@@ -309,6 +315,20 @@ def _stale_clips(out_dir: Path, written: set[Path]) -> list[Path]:
     )
 
 
+def _summarize(paths: list[Path], limit: int = 3) -> str:
+    """A short "a, b, c, +N more" list of clip names for a one-line status."""
+    shown = ", ".join(p.name for p in paths[:limit])
+    if len(paths) > limit:
+        shown += f", +{len(paths) - limit} more"
+    return shown
+
+
+def _clip_stem(name: str) -> str | None:
+    """The stem of a "<stem>_NNN.wav" clip name, or None if it isn't one."""
+    m = _CLIP_NAME.fullmatch(name)
+    return m.group(1) if m else None
+
+
 def process(
     inputs: list[Path],
     out_dir: Path,
@@ -316,8 +336,16 @@ def process(
     min_gap_s: float,
     min_dur_s: float,
     max_dur_s: float,
+    clean: bool = False,
 ) -> int:
-    """Process every input file; return the total clip count written."""
+    """Process every input file; return the total clip count written.
+
+    With ``clean`` set, a re-recorded take's leftover clips (a prior run's
+    now-unused higher-numbered clips for a stem this run wrote) are removed after
+    this run writes, so its own count matches what is on disk. It stays narrow on
+    purpose: an unrelated take's clips, a source recording, or hand-added audio is
+    named but never deleted, so a stray ``--output`` never silently wipes files.
+    """
     # Checked before any audio is decoded, so an occupied --output is named once
     # rather than surfacing as whichever exception the run happens to reach first:
     # mkdir() raises FileExistsError once a clip is ready to write, and a run that
@@ -363,21 +391,50 @@ def process(
     total = len(written)
     print(f"\nwrote {total} {label} clip(s) to {out_dir}")
 
-    # Clips this run did not write are left from an earlier run over a different
+    # Files this run did not write are left from an earlier run over a different
     # input set. Training and eval read every clip in the directory, so they
-    # would score as extra data nobody asked for. Deleting them here would be
-    # too eager (the dir is the user's), so say so and name the fix.
+    # would score as extra data nobody asked for. --clean removes the leftover
+    # clips of a take this run just re-recorded (same stem, now-unused index), so
+    # the reported count matches what is on disk. It is deliberately narrow: a
+    # clip whose stem this run did not write -- an unrelated take, a source
+    # recording, hand-added audio -- is named but never auto-deleted, because it
+    # is indistinguishable from data the user curated on purpose.
+    #
+    # Scope by the stems this run actually WROTE a clip for, read back from
+    # `written`, not by the input list `stems`: an input that produced zero clips
+    # this run (silence, a bad re-recording, thresholds that dropped every
+    # segment) has no new clip to make its earlier good clips stale, so --clean
+    # must not delete them. Keying off written paths leaves them to linger and
+    # warn instead of wiping the only copy.
+    run_stems = {
+        stem for stem in (_clip_stem(p.name) for p in written) if stem is not None
+    }
     stale = _stale_clips(out_dir, written)
     if stale:
-        shown = ", ".join(p.name for p in stale[:3])
-        if len(stale) > 3:
-            shown += f", +{len(stale) - 3} more"
-        print(
-            f"warning: {len(stale)} clip(s) in {out_dir} are left from an earlier "
-            f"run ({shown}). Training and eval read every clip in this directory, "
-            f"so delete them or clear {out_dir} and rerun.",
-            file=sys.stderr,
+        removable = (
+            [p for p in stale if _clip_stem(p.name) in run_stems] if clean else []
         )
+        for p in removable:
+            p.unlink()
+        if removable:
+            print(
+                f"removed {len(removable)} clip(s) left from an earlier run "
+                f"({_summarize(removable)})"
+            )
+        lingering = [p for p in stale if p not in removable]
+        if lingering:
+            fix = (
+                "these are not clips this run re-recorded, so --clean leaves them; "
+                "remove them by hand"
+                if clean
+                else "rerun with --clean to remove them, or clear the directory by hand"
+            )
+            print(
+                f"warning: {len(lingering)} file(s) in {out_dir} are left from an "
+                f"earlier run ({_summarize(lingering)}). Training and eval read "
+                f"every clip in this directory, so {fix}.",
+                file=sys.stderr,
+            )
     if all_durs:
         a = np.array(all_durs)
         print(
@@ -416,6 +473,13 @@ def main() -> int:
     p.add_argument(
         "--max-dur", type=float, default=3.0, help="drop segments longer than this (s)"
     )
+    p.add_argument(
+        "--clean",
+        action="store_true",
+        help="remove a re-recorded take's leftover clips in --output (a prior run's "
+        "now-unused higher-numbered clips for a take in this run); leaves unrelated "
+        "or hand-added audio in place",
+    )
     args = p.parse_args()
 
     total = process(
@@ -425,6 +489,7 @@ def main() -> int:
         args.min_gap,
         args.min_dur,
         args.max_dur,
+        clean=args.clean,
     )
     return 0 if total > 0 else 1
 
