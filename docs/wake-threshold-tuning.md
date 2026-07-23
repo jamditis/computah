@@ -43,10 +43,13 @@ what it wrote there. A source recording, a hand-curated clip, and anything else
 absent from that record is named but left in place.
 
 That record proves prep made a file, not that the file belongs to what you are
-refreshing, so the manifest half only applies when the run matches the recorded
-set: same `--label`, and at least one take in common. Point `--clean` at the
-wrong directory and it falls back to the narrow stem match, which cannot reach
-past the clips the run just wrote. Prep also spares the prior clips of a take it
+refreshing. A `--label` that disagrees with the record already in the directory
+is refused outright, before anything is decoded: that is a mistyped `--output`,
+and waiting until `--clean` would be too late, since the run would already have
+overwritten that dataset's clips. Past that, a run has to be refreshing the
+record it found (at least one take in common) before it may delete from it or
+write to it. A directory with no record yet counts as yours.
+Prep also spares the prior clips of a take it
 tried and got nothing from (a silent or bad re-recording): those are the only
 copy, and it will not trade them for a run that produced nothing.
 

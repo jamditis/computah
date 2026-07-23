@@ -745,6 +745,78 @@ def test_manifest_spares_a_different_dataset_on_stray_output(d: Path) -> None:
     )
 
 
+def test_clean_disarmed_entirely_on_a_label_mismatch(d: Path) -> None:
+    """A label mismatch has to disarm the stem match too, not just the manifest.
+
+    The stems collide in practice: `take.wav` is as plausible a negatives
+    filename as a positives one. Deciding this at --clean time is too late --
+    by then the run has already overwritten take_000.wav with the wrong
+    dataset's audio -- so the check runs before any decode.
+    """
+    src = d / "mismatch_src"
+    _burst_take(src / "take.wav", 3)
+    neg = d / "mismatch_neg"
+    prep.process([src / "take.wav"], neg, "negative", 0.3, 0.2, 3.0)
+    before = sorted(p.name for p in neg.glob("*.wav"))
+    check(len(before) == 3, f"the negatives dir starts with three clips ({before})")
+
+    _burst_take(src / "take.wav", 1)
+    total = prep.process([src / "take.wav"], neg, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in neg.glob("*.wav"))
+    check(
+        total == 0 and present == before,
+        f"a mismatched --output is refused before anything is written ({present})",
+    )
+
+
+def test_clean_spares_a_hand_added_clip_under_a_recorded_stem(d: Path) -> None:
+    """The stem match consults the record once there is one.
+
+    A clip a user dropped in beside a manifested dataset shares the stem prep
+    writes, so shape alone cannot tell it from an orphan. Deleting it would break
+    the guarantee this whole change rests on: --clean removes only what prep
+    made.
+    """
+    src = d / "handadd_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "handadd_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(out / "take_007.wav", 1)  # kept by hand, never prep's
+
+    _burst_take(take, 2)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        "take_007.wav" in present and "take_002.wav" not in present,
+        f"--clean takes its own orphan and leaves the hand-added clip ({present})",
+    )
+
+
+def test_a_same_label_stray_does_not_seed_the_manifest(d: Path) -> None:
+    """A stray run must not fold its stems into another dataset's record.
+
+    Same label, no take in common: the run is disarmed, but if it still wrote
+    itself into the record then repeating the typo would find the overlap it
+    needs and start deleting the original dataset as dropped inputs. The write
+    is gated on the same question as the removals.
+    """
+    src = d / "seed_src"
+    _burst_take(src / "noise.wav", 2)
+    _burst_take(src / "computah.wav", 3)
+    out = d / "seed_out"
+    prep.process([src / "noise.wav"], out, "positive", 0.3, 0.2, 3.0)
+
+    # The typo, twice.
+    for _ in range(2):
+        prep.process([src / "computah.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        "noise_000.wav" in present and "noise_001.wav" in present,
+        f"a repeated same-label stray never gains permission to delete ({present})",
+    )
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -772,6 +844,9 @@ def main() -> int:
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
         test_manifest_unreadable_falls_back_to_stem_rule(d)
         test_manifest_spares_a_different_dataset_on_stray_output(d)
+        test_clean_disarmed_entirely_on_a_label_mismatch(d)
+        test_clean_spares_a_hand_added_clip_under_a_recorded_stem(d)
+        test_a_same_label_stray_does_not_seed_the_manifest(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

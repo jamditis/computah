@@ -353,9 +353,7 @@ def _read_manifest(out_dir: Path) -> tuple[str | None, set[str]]:
     )
 
 
-def _write_manifest(
-    out_dir: Path, label: str, names: set[str], prior_label: str | None
-) -> None:
+def _write_manifest(out_dir: Path, label: str, names: set[str]) -> None:
     """Record which files in `out_dir` prep created, for a later --clean run.
 
     Written after the clips are on disk, and a failure only warns: the clips are
@@ -363,22 +361,10 @@ def _write_manifest(
     --clean, not correctness. A run that wrote nothing into a directory that does
     not exist has nothing to record and does not create one.
 
-    A directory already recorded under a different label is left alone. Rewriting
-    it would relabel the other dataset's files as this one's, and a second stray
-    run into the same directory would then find a matching label and an
-    overlapping stem and read them as its own orphans. The mismatch is worth
-    saying out loud either way: it usually means ``--output`` points somewhere
-    unintended.
+    The caller decides whether this run may claim the directory (see
+    ``refreshes_prior``); this only writes.
     """
     if not out_dir.is_dir():
-        return
-    if prior_label is not None and prior_label != label:
-        print(
-            f"warning: {out_dir} was last written as {prior_label!r} clips, not "
-            f"{label!r}; leaving its record alone. If --output is right, clear the "
-            f"directory (or remove {MANIFEST_NAME}) to start its record over",
-            file=sys.stderr,
-        )
         return
     try:
         (out_dir / MANIFEST_NAME).write_text(
@@ -432,6 +418,21 @@ def process(
         )
         return 0
 
+    # Refused before any audio is decoded, because by the time --clean is
+    # evaluated the damage is already done: _write_unique would have overwritten
+    # this directory's take_000.wav with the new dataset's. A label mismatch is
+    # the signature of a mistyped --output, and there is no reading of it where
+    # writing positives into a directory of negatives is what the user meant.
+    prior_label, prior = _read_manifest(out_dir)
+    if prior_label is not None and prior_label != label:
+        print(
+            f"error: --output {out_dir} holds {prior_label!r} clips, not {label!r}; "
+            f"nothing was written. Point --output at this run's directory, or clear "
+            f"that one (or remove its {MANIFEST_NAME}) to reuse it",
+            file=sys.stderr,
+        )
+        return 0
+
     files = _inputs(inputs)
     if not files:
         joined = ", ".join(str(p) for p in inputs)
@@ -439,9 +440,6 @@ def process(
         return 0
 
     stems = _unique_stems(files)
-    # Read before anything is written, so it describes the directory as this run
-    # found it.
-    prior_label, prior = _read_manifest(out_dir)
     written: set[Path] = set()
     seen_inodes: set[int] = set()
     all_durs: list[float] = []
@@ -508,17 +506,31 @@ def process(
     # not say the file is expendable.
     attempted = set(stems)
     prior_stems = {stem for stem in (_clip_stem(n) for n in prior) if stem is not None}
-    refreshes_prior = prior_label == label and bool(run_stems & prior_stems)
+    # A mismatched label was already refused above, so the question left is
+    # whether this run is refreshing the record it found or landed beside it: a
+    # directory with no record is unclaimed and counts as ours, and one with a
+    # record needs a take in common. Without the overlap, prep neither deletes nor
+    # writes -- folding this run's stems into that record would hand a repeat of
+    # the same mistake the overlap it needs to start deleting.
+    refreshes_prior = not prior or bool(run_stems & prior_stems)
     stale = _stale_clips(out_dir, written)
     removable = (
         [
             p
             for p in stale
-            if _clip_stem(p.name) in run_stems
-            or (
-                refreshes_prior
-                and p.name in prior
-                and _clip_stem(p.name) not in attempted
+            if refreshes_prior
+            and (
+                # A re-recorded take's now-unused clips. Once there is a record,
+                # this consults it too: without that, a hand-added take_003.wav
+                # beside a manifested `take` dataset would be deleted by shape
+                # alone, and the promise that --clean only removes what prep made
+                # would hold everywhere except the case a user is most likely to
+                # hit. With no record (a directory from before manifests), shape
+                # is all there is.
+                (_clip_stem(p.name) in run_stems and (not prior or p.name in prior))
+                # An orphan of a take this run does not have: a dropped input, or
+                # a collider whose disambiguated stem changed.
+                or (p.name in prior and _clip_stem(p.name) not in attempted)
             )
         ]
         if clean
@@ -535,12 +547,19 @@ def process(
     # Carry forward the prior run's record for files still on disk, so a
     # directory built up over several runs keeps one provenance list rather than
     # only remembering the most recent run.
-    _write_manifest(
-        out_dir,
-        label,
-        {p.name for p in written} | {p.name for p in lingering if p.name in prior},
-        prior_label,
-    )
+    if refreshes_prior:
+        _write_manifest(
+            out_dir,
+            label,
+            {p.name for p in written} | {p.name for p in lingering if p.name in prior},
+        )
+    elif out_dir.is_dir():
+        print(
+            f"warning: {out_dir} holds a {label!r} dataset with no take in common "
+            f"with this run, so its record was left as it was. Clips this run wrote "
+            f"are on disk; a later --clean will not treat them as part of it",
+            file=sys.stderr,
+        )
     if lingering:
         # Why a file lingered decides what the user should do about it, and the
         # cases want opposite advice. A take this run re-recorded and got nothing
