@@ -540,7 +540,14 @@ def test_manifest_cleans_dropped_input_orphans(d: Path) -> None:
     _burst_take(src / "a" / "take.wav", 3)
     _burst_take(src / "b" / "other.wav", 2)
     out = d / "dropped_out"
-    prep.process([src / "a" / "take.wav", src / "b" / "other.wav"], out, "positive", 0.3, 0.2, 3.0)
+    prep.process(
+        [src / "a" / "take.wav", src / "b" / "other.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
+    )
     check(
         (out / prep.MANIFEST_NAME).is_file(),
         "a run records what it wrote in the manifest",
@@ -565,7 +572,9 @@ def test_manifest_cleans_changed_collider_stem_orphans(d: Path) -> None:
     _burst_take(src / "a" / "take.wav", 3)
     _burst_take(src / "b" / "take.wav", 2)
     out = d / "collider_out"
-    prep.process([src / "a" / "take.wav", src / "b" / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    prep.process(
+        [src / "a" / "take.wav", src / "b" / "take.wav"], out, "positive", 0.3, 0.2, 3.0
+    )
     first = sorted(p.name for p in out.glob("*.wav"))
     check(
         any(n.startswith("take-1_") for n in first),
@@ -620,8 +629,7 @@ def test_manifest_spares_prior_clips_when_rerun_writes_nothing(d: Path) -> None:
     second = prep.process([take], out, "positive", 0.3, 5.0, 10.0, clean=True)
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
-        second == 0
-        and present == ["take_000.wav", "take_001.wav", "take_002.wav"],
+        second == 0 and present == ["take_000.wav", "take_001.wav", "take_002.wav"],
         f"a manifested clip is still spared when its take wrote nothing ({present})",
     )
 
@@ -676,11 +684,20 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
     _burst_take(src / "a" / "take.wav", 3)
     _burst_take(src / "b" / "other.wav", 2)
     out = d / "corrupt_out"
-    prep.process([src / "a" / "take.wav", src / "b" / "other.wav"], out, "positive", 0.3, 0.2, 3.0)
+    prep.process(
+        [src / "a" / "take.wav", src / "b" / "other.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
+    )
     (out / prep.MANIFEST_NAME).write_text("{not json")
 
     _burst_take(src / "a" / "take.wav", 2)
-    total = prep.process([src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    total = prep.process(
+        [src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True
+    )
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
         total == 2 and "take_002.wav" not in present and "other_000.wav" in present,
@@ -702,7 +719,9 @@ def test_manifest_spares_a_different_dataset_on_stray_output(d: Path) -> None:
     bg = d / "stray_background"
     prep.process([src / "noise.wav"], bg, "background", 0.3, 0.2, 3.0)
     before = sorted(p.name for p in bg.glob("*.wav"))
-    check(before == ["noise_000.wav"], f"the background dir starts populated ({before})")
+    check(
+        before == ["noise_000.wav"], f"the background dir starts populated ({before})"
+    )
 
     # The typo: a positives run pointed at the background dir.
     _burst_take(src / "computah.wav", 3)

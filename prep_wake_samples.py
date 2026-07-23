@@ -382,9 +382,7 @@ def _write_manifest(
         return
     try:
         (out_dir / MANIFEST_NAME).write_text(
-            json.dumps(
-                {"version": 1, "label": label, "clips": sorted(names)}, indent=2
-            )
+            json.dumps({"version": 1, "label": label, "clips": sorted(names)}, indent=2)
             + "\n"
         )
     except OSError as e:
@@ -509,9 +507,7 @@ def process(
     # clips are the only copy. The manifest says prep created a file; it does
     # not say the file is expendable.
     attempted = set(stems)
-    prior_stems = {
-        stem for stem in (_clip_stem(n) for n in prior) if stem is not None
-    }
+    prior_stems = {stem for stem in (_clip_stem(n) for n in prior) if stem is not None}
     refreshes_prior = prior_label == label and bool(run_stems & prior_stems)
     stale = _stale_clips(out_dir, written)
     removable = (
