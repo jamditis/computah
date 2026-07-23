@@ -399,7 +399,16 @@ def process(
     # clip whose stem this run did not write -- an unrelated take, a source
     # recording, hand-added audio -- is named but never auto-deleted, because it
     # is indistinguishable from data the user curated on purpose.
-    run_stems = set(stems)
+    #
+    # Scope by the stems this run actually WROTE a clip for, read back from
+    # `written`, not by the input list `stems`: an input that produced zero clips
+    # this run (silence, a bad re-recording, thresholds that dropped every
+    # segment) has no new clip to make its earlier good clips stale, so --clean
+    # must not delete them. Keying off written paths leaves them to linger and
+    # warn instead of wiping the only copy.
+    run_stems = {
+        stem for stem in (_clip_stem(p.name) for p in written) if stem is not None
+    }
     stale = _stale_clips(out_dir, written)
     if stale:
         removable = (

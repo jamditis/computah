@@ -375,6 +375,36 @@ def test_clean_removes_disambiguated_stem_orphans(d: Path) -> None:
     )
 
 
+def test_clean_spares_prior_clips_when_rerun_writes_nothing(d: Path) -> None:
+    """A re-recording that yields zero clips must not let --clean wipe the good
+    run before it. The take's stem is still in the input list, but it wrote
+    nothing this run, so its earlier clips are the only copy -- --clean has to
+    leave them. Scoping by written stems (not input stems) is what protects them.
+    """
+    src = d / "wipe_src"
+    src.mkdir()
+    take = src / "take.wav"
+    sf.write(
+        take, make_bursts(3, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    out = d / "wipe_out"
+    first = prep.process([take], out, "positive", 0.3, 0.2, 3.0)  # take_000.._002
+    check(first == 3, f"first run writes the good clips (got {first})")
+
+    # Re-record badly: a --min-dur longer than every burst drops all segments, so
+    # this run writes nothing. Without the written-stem scoping, --clean would read
+    # the take's prior clips as stale-for-its-own-stem and delete the only copy.
+    sf.write(
+        take, make_bursts(3, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+    second = prep.process([take], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        second == 0 and present == ["take_000.wav", "take_001.wav", "take_002.wav"],
+        f"--clean keeps the prior good clips when the rerun writes nothing ({present})",
+    )
+
+
 def test_in_run_collision_raises(d: Path) -> None:
     """Two clips in one run mapping to the same file must fail loud.
 
@@ -507,6 +537,7 @@ def main() -> int:
         test_rerun_with_fewer_clips_orphans_then_clean(d)
         test_clean_spares_files_this_run_did_not_record(d)
         test_clean_removes_disambiguated_stem_orphans(d)
+        test_clean_spares_prior_clips_when_rerun_writes_nothing(d)
         test_in_run_collision_raises(d)
         test_refresh_after_adding_collider_leaves_no_orphans(d)
         test_stem_assignment_ignores_input_order(d)
