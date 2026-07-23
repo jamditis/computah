@@ -7,6 +7,16 @@ All notable changes to computah are recorded here. The format follows
 ## [Unreleased]
 
 ### Added
+- `prep_wake_samples.py --clean` (#8): removes leftover clips of a take the run
+  just re-recorded (a `<stem>_NNN.wav` clip whose stem this run wrote) from
+  `--output`, so re-recording with fewer utterances no longer strands orphaned
+  higher-numbered clips that training and eval would still read. Off by default
+  (deletion is opt-in) and deliberately narrow: a source recording, an unrelated
+  take's clips, or a hand-curated clip whose stem this run did not write is named
+  but never auto-deleted. Without `--clean` the run still warns and names the
+  leftover count. `test_prep_wake_samples.py` covers the re-run-with-fewer-clips
+  case with and without `--clean`, and that `--clean` spares files this run did
+  not record.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,
