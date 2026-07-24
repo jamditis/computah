@@ -43,8 +43,8 @@ All notable changes to computah are recorded here. The format follows
   being replaced by a partial source map, leaving fallback output explicitly
   unrecorded until the user reviews the directory and reboots ownership. That
   fallback cannot distinguish a prep leftover from a hand-added
-  `<same-stem>_NNN.wav`. A readable older manifest without source ownership is
-  refused until the user removes it to bootstrap ownership explicitly.
+  `<same-stem>_NNN.wav`. Any manifest version other than v2 is refused until the
+  user removes it to bootstrap ownership explicitly.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,

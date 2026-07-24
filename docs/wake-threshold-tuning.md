@@ -80,8 +80,8 @@ unrecorded. That fallback has no provenance: `--clean` can remove any
 `<same-stem>_NNN.wav` file, including a hand-added file with that shape. Check the
 warning list and move any such file before cleaning. After reviewing the output
 directory, remove an unreadable manifest and rerun the full source set to
-bootstrap ownership. A readable older manifest without source ownership is
-refused and requires the same deliberate removal.
+bootstrap ownership. Any manifest version other than v2 is refused, even if it
+has similar fields, and requires the same deliberate removal.
 
 ```bash
 .venv/bin/python prep_wake_samples.py --input computah_normal.wav computah_styles.wav \

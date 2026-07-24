@@ -380,7 +380,6 @@ def _read_manifest(
             isinstance(name, str)
             and name == Path(name).name
             and "/" not in name
-            and "\\" not in name
             and _CLIP_NAME.fullmatch(name) is not None
         )
 
@@ -391,6 +390,13 @@ def _read_manifest(
         )
         return label if isinstance(label, str) else None, set(), None
     clip_names = set(clips)
+    version = raw.get("version")
+    if version != 2:
+        warn_manifest_problem(
+            f"unsupported manifest version {version!r}; expected 2",
+            legacy_fallback=not isinstance(label, str),
+        )
+        return label if isinstance(label, str) else None, clip_names, None
     sources_raw = raw.get("sources")
     if not isinstance(sources_raw, dict):
         warn_manifest_problem(
