@@ -562,11 +562,27 @@ def test_manifest_cleans_dropped_input_orphans(d: Path) -> None:
         "a run records what it wrote in the manifest",
     )
 
-    prep.process([src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process(
+            [src / "a" / "take.wav"],
+            out,
+            "positive",
+            0.3,
+            0.2,
+            3.0,
+            clean=True,
+        )
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
         present == ["take_000.wav", "take_001.wav", "take_002.wav"],
         f"--clean removes a dropped input's orphans ({present})",
+    )
+    check(
+        str(src / "b" / "other.wav") in errors.getvalue()
+        and "will remove" in errors.getvalue()
+        and "2 prep-owned clip" in errors.getvalue(),
+        "a dropped source and its deletion count are warned before cleanup",
     )
 
 
@@ -863,13 +879,8 @@ def test_manifest_spares_a_silent_take_alongside_a_good_one(d: Path) -> None:
     )
 
 
-def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
-    """A corrupt manifest degrades --clean, it does not fail the run.
-
-    The clips are the output that matters. Reading garbage as "no record" costs
-    precision on the orphans only the manifest can reach; treating it as fatal
-    would block a run that has real work to do.
-    """
+def test_manifest_unreadable_is_refused(d: Path) -> None:
+    """A corrupt manifest cannot disable label and source ownership guards."""
     src = d / "corrupt_src"
     _burst_take(src / "a" / "take.wav", 3)
     _burst_take(src / "b" / "other.wav", 2)
@@ -894,17 +905,20 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
         )
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
-        total == 2 and "take_002.wav" not in present and "other_000.wav" in present,
-        f"a corrupt manifest leaves the stem rule working ({present})",
+        total == 0
+        and present
+        == [
+            "other_000.wav",
+            "other_001.wav",
+            "take_000.wav",
+            "take_001.wav",
+            "take_002.wav",
+        ],
+        f"a corrupt manifest refuses the run before any clip changes ({present})",
     )
     check(
-        "manifest" in errors.getvalue()
-        and "legacy filename cleanup" in errors.getvalue(),
-        "a corrupt manifest warns that ownership protection is unavailable",
-    )
-    check(
-        "hand-added" in errors.getvalue(),
-        "a corrupt-manifest clean warns that curated same-stem clips are deletable",
+        "manifest" in errors.getvalue() and "nothing was written" in errors.getvalue(),
+        "a corrupt manifest explains the fail-closed ownership refusal",
     )
     check(
         manifest.read_text() == corrupt_payload,
@@ -912,8 +926,8 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
     )
 
 
-def test_manifest_wrong_shape_warns_before_legacy_fallback(d: Path) -> None:
-    """Readable JSON with an invalid manifest shape must not degrade silently."""
+def test_manifest_wrong_shape_is_refused(d: Path) -> None:
+    """Readable JSON with an invalid manifest shape must fail closed."""
     src = d / "malformed_manifest_src"
     take = src / "take.wav"
     _burst_take(take, 3)
@@ -924,11 +938,12 @@ def test_manifest_wrong_shape_warns_before_legacy_fallback(d: Path) -> None:
     _burst_take(take, 2)
     errors = io.StringIO()
     with redirect_stderr(errors):
-        prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
     check(
-        "manifest" in errors.getvalue()
-        and "legacy filename cleanup" in errors.getvalue(),
-        "a wrong-shape manifest warns before ownership protection degrades",
+        total == 0
+        and "manifest" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "a wrong-shape manifest refuses to disable ownership protection",
     )
 
 
@@ -1387,8 +1402,8 @@ def main() -> int:
         test_manifest_empty_source_remains_refreshable(d)
         test_new_zero_output_source_does_not_gain_cleanup_authority(d)
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
-        test_manifest_unreadable_falls_back_to_stem_rule(d)
-        test_manifest_wrong_shape_warns_before_legacy_fallback(d)
+        test_manifest_unreadable_is_refused(d)
+        test_manifest_wrong_shape_is_refused(d)
         test_manifest_bad_sources_warns_before_ownership_refusal(d)
         test_manifest_clip_names_cannot_escape_output_directory(d)
         test_manifest_rejects_unsupported_version_with_v2_shape(d)
