@@ -35,23 +35,37 @@ re-recording yields fewer clips than last time, the extra clips from the old run
 would linger and the training globs would still read them, so prep warns and
 names the count. Pass `--clean` to remove those leftovers in the same run.
 
-`--clean` only ever deletes clips prep itself made. It removes the now-unused
-higher-numbered clips of a take this run re-recorded, and the clips a previous
-run recorded for a take that is no longer in the inputs -- the second kind is
-matched against `.prep-manifest.json`, a record prep keeps in the output dir of
-what it wrote there. A source recording, a hand-curated clip, and anything else
-absent from that record is named but left in place.
+With a readable source-aware manifest, `--clean` only deletes clips prep recorded
+making. It removes the now-unused higher-numbered clips of a take this run
+re-recorded, and the clips a previous run recorded for a take that is no longer
+in the inputs. The `.prep-manifest.json` in the output dir maps each resolved
+source path to the clips prep wrote for it. A source recording, a hand-curated
+clip, and anything else absent from that map is named but left in place.
 
 That record proves prep made a file, not that the file belongs to what you are
 refreshing. A `--label` that disagrees with the record already in the directory
 is refused outright, before anything is decoded: that is a mistyped `--output`,
 and waiting until `--clean` would be too late, since the run would already have
-overwritten that dataset's clips. Past that, a run has to be refreshing the
-record it found (at least one take in common) before it may delete from it or
-write to it. A directory with no record yet counts as yours.
-Prep also spares the prior clips of a take it
-tried and got nothing from (a silent or bad re-recording): those are the only
-copy, and it will not trade them for a run that produced nothing.
+overwritten that dataset's clips. Past that, a run must contain at least one
+exact source path from the record before it may delete from the dataset or write
+to it. A shared basename is not ownership. A directory with no record yet counts
+as yours; its first successful run also records same-stem legacy leftovers so a
+follow-up `--clean` can remove them. A run that produces no clips does not claim
+an unrecorded directory. Prep also spares the prior clips of a source it tried
+and got nothing from (a silent or bad re-recording): those are the only copy, and
+it will not trade them for a run that produced nothing.
+
+To add a new recording to an existing dataset, include at least one source
+already recorded there in the same invocation. This gives prep explicit
+ownership proof while it adds the new source to the manifest.
+
+An absent or unreadable manifest falls back to the narrow same-stem cleanup
+rule. That fallback has no provenance: `--clean` can remove any
+`<same-stem>_NNN.wav` file, including a hand-added file with that shape. Check the
+warning list and move any such file before cleaning. A readable older manifest
+without source ownership is refused; after confirming the output directory,
+remove that manifest once to bootstrap the source map from the next successful
+run.
 
 ```bash
 .venv/bin/python prep_wake_samples.py --input computah_normal.wav \

@@ -8,6 +8,7 @@ mono and that background audio is kept whole.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -456,7 +457,13 @@ def test_refresh_after_adding_collider_leaves_no_orphans(d: Path) -> None:
     out = d / "refresh_out"
     prep.process([a / "computah.wav"], out, "positive", 0.3, 0.2, 3.0)
     prep.process(
-        [a / "computah.wav", b / "computah.wav"], out, "positive", 0.3, 0.2, 3.0
+        [a / "computah.wav", b / "computah.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
+        clean=True,
     )
 
     files = sorted(p.name for p in out.glob("*.wav"))
@@ -589,6 +596,39 @@ def test_manifest_cleans_changed_collider_stem_orphans(d: Path) -> None:
     )
 
 
+def test_manifest_tracks_a_silent_colliding_source_by_path(d: Path) -> None:
+    """A silent rerun keeps its own prior clips even when its stem changes.
+
+    Two same-basename inputs need source-level ownership: when only the second
+    source returns and produces no clips, its old disambiguated clips are the
+    copy to preserve, while the dropped first source's clips can be cleaned.
+    Stem membership alone cannot tell those cases apart.
+    """
+    src = d / "silent_collider_src"
+    first = src / "a" / "take.wav"
+    silent = src / "b" / "take.wav"
+    _burst_take(first, 3)
+    _burst_take(silent, 2)
+    out = d / "silent_collider_out"
+    prep.process([first, silent], out, "positive", 0.3, 0.2, 3.0)
+
+    _label, _clips, sources = prep._read_manifest(out)
+    source_keys = {prep._source_key(first), prep._source_key(silent)}
+    check(
+        sources is not None and set(sources) == source_keys,
+        "the manifest records exact source ownership",
+    )
+    silent_clips = sources[prep._source_key(silent)] if sources is not None else set()
+
+    total = prep.process([silent], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 0 and present == sorted(silent_clips),
+        f"a silent colliding source keeps its clips while the dropped source cleans "
+        f"({present})",
+    )
+
+
 def test_manifest_never_authorizes_deleting_curated_audio(d: Path) -> None:
     """The manifest widens --clean only to files prep recorded writing.
 
@@ -631,6 +671,25 @@ def test_manifest_spares_prior_clips_when_rerun_writes_nothing(d: Path) -> None:
     check(
         second == 0 and present == ["take_000.wav", "take_001.wav", "take_002.wav"],
         f"a manifested clip is still spared when its take wrote nothing ({present})",
+    )
+
+
+def test_manifest_empty_source_remains_refreshable(d: Path) -> None:
+    """An owned source with no clips must not deadlock its output directory."""
+    src = d / "empty_source_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "empty_source_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    for clip in out.glob("*.wav"):
+        clip.unlink()
+
+    empty = prep.process([take], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    refreshed = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        empty == 0 and refreshed == 3 and len(present) == 3,
+        f"an empty owned source accepts its next successful refresh ({present})",
     )
 
 
@@ -702,6 +761,30 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
     check(
         total == 2 and "take_002.wav" not in present and "other_000.wav" in present,
         f"a corrupt manifest leaves the stem rule working ({present})",
+    )
+
+
+def test_manifest_without_source_ownership_is_refused(d: Path) -> None:
+    """A readable legacy record cannot prove which dataset owns the output."""
+    src = d / "legacy_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "legacy_manifest_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+
+    manifest_path = out / prep.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["version"] = 1
+    manifest.pop("sources")
+    manifest_path.write_text(json.dumps(manifest))
+    before = sorted(p.name for p in out.glob("*.wav"))
+
+    _burst_take(take, 1)
+    total = prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 0 and present == before,
+        f"a manifest without source ownership cannot authorize a write ({present})",
     )
 
 
@@ -902,10 +985,13 @@ def main() -> int:
         test_stem_assignment_ignores_input_order(d)
         test_manifest_cleans_dropped_input_orphans(d)
         test_manifest_cleans_changed_collider_stem_orphans(d)
+        test_manifest_tracks_a_silent_colliding_source_by_path(d)
         test_manifest_never_authorizes_deleting_curated_audio(d)
         test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
+        test_manifest_empty_source_remains_refreshable(d)
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
         test_manifest_unreadable_falls_back_to_stem_rule(d)
+        test_manifest_without_source_ownership_is_refused(d)
         test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
         test_manifest_spares_a_different_dataset_on_stray_output(d)
         test_same_label_shared_stem_stray_is_refused_before_writing(d)

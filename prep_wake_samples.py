@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -327,48 +328,78 @@ def _summarize(paths: list[Path], limit: int = 3) -> str:
 MANIFEST_NAME = ".prep-manifest.json"
 
 
-def _read_manifest(out_dir: Path) -> tuple[str | None, set[str]]:
-    """The label and clip names a previous prep run recorded here.
+def _source_key(path: Path) -> str:
+    """A stable local identity for one source recording."""
+    return os.path.normcase(str(path.resolve()))
+
+
+def _read_manifest(
+    out_dir: Path,
+) -> tuple[str | None, set[str], dict[str, set[str]] | None]:
+    """The label, clips, and source ownership a previous prep run recorded here.
 
     Fails soft on every read problem -- absent, unreadable, not JSON, wrong
-    shape -- returning ``(None, set())``. An empty record means "no record of
-    what prep made," which narrows `--clean` back to the stem rule below.
-    Failing loud would be worse in both directions: a corrupt manifest would
-    abort a run that has real work to do, and a manifest trusted despite a
-    partial read could name files prep never wrote.
+    shape -- returning ``(None, set(), None)``. An empty record means "no record
+    of what prep made," which narrows `--clean` back to the stem rule below.
+    A version-1 record still returns its label and clips but no source map; the
+    caller can then refuse to guess ownership and tell the user how to bootstrap
+    a new record explicitly.
     """
     try:
         raw = json.loads((out_dir / MANIFEST_NAME).read_text())
     except (OSError, ValueError):
-        return None, set()
+        return None, set(), None
     if not isinstance(raw, dict):
-        return None, set()
+        return None, set(), None
     clips = raw.get("clips")
     if not isinstance(clips, list):
-        return None, set()
+        return None, set(), None
     label = raw.get("label")
-    return (
-        label if isinstance(label, str) else None,
-        {c for c in clips if isinstance(c, str)},
-    )
+    clip_names = {c for c in clips if isinstance(c, str)}
+    sources_raw = raw.get("sources")
+    if not isinstance(sources_raw, dict):
+        return label if isinstance(label, str) else None, clip_names, None
+
+    sources: dict[str, set[str]] = {}
+    for source, names in sources_raw.items():
+        if not isinstance(source, str) or not isinstance(names, list):
+            return label if isinstance(label, str) else None, clip_names, None
+        sources[source] = {name for name in names if isinstance(name, str)}
+    owned_clips = set().union(*sources.values()) if sources else set()
+    if owned_clips != clip_names:
+        return label if isinstance(label, str) else None, clip_names, None
+    return label if isinstance(label, str) else None, clip_names, sources
 
 
-def _write_manifest(out_dir: Path, label: str, names: set[str]) -> None:
-    """Record which files in `out_dir` prep created, for a later --clean run.
+def _write_manifest(
+    out_dir: Path, label: str, source_clips: dict[str, set[str]]
+) -> None:
+    """Record each source and the clips it owns, for a later --clean run.
 
     Written after the clips are on disk, and a failure only warns: the clips are
     the output that matters, and losing the manifest costs precision on a future
     --clean, not correctness. A run that wrote nothing into a directory that does
     not exist has nothing to record and does not create one.
 
-    The caller decides whether this run may claim the directory (see
-    ``refreshes_prior``); this only writes.
+    The caller verifies ownership and assembles the source map; this only writes.
     """
     if not out_dir.is_dir():
         return
     try:
+        clips = set().union(*source_clips.values()) if source_clips else set()
         (out_dir / MANIFEST_NAME).write_text(
-            json.dumps({"version": 1, "label": label, "clips": sorted(names)}, indent=2)
+            json.dumps(
+                {
+                    "version": 2,
+                    "label": label,
+                    "clips": sorted(clips),
+                    "sources": {
+                        source: sorted(names)
+                        for source, names in sorted(source_clips.items())
+                    },
+                },
+                indent=2,
+            )
             + "\n"
         )
     except OSError as e:
@@ -400,11 +431,11 @@ def process(
     writes, so its count matches what is on disk. Two kinds qualify: a
     re-recorded take's now-unused higher-numbered clips (matched by stem), and
     clips a previous run recorded for a take that is not in this run's inputs at
-    all (matched against ``MANIFEST_NAME``, and only when this run refreshes the
-    recorded set -- same label, overlapping stems). Everything else is named but
-    never deleted -- a source recording, hand-added audio, another dataset a
-    stray ``--output`` landed in, and the prior clips of a take this run
-    attempted but wrote nothing for.
+    all (matched against ``MANIFEST_NAME``, and only when this run contains a
+    source path recorded for that dataset). Everything else is named but never
+    deleted -- a source recording, hand-added audio, another dataset a stray
+    ``--output`` landed in, and the prior clips of a take this run attempted but
+    wrote nothing for.
     """
     # Checked before any audio is decoded, so an occupied --output is named once
     # rather than surfacing as whichever exception the run happens to reach first:
@@ -423,12 +454,21 @@ def process(
     # this directory's take_000.wav with the new dataset's. A label mismatch is
     # the signature of a mistyped --output, and there is no reading of it where
     # writing positives into a directory of negatives is what the user meant.
-    prior_label, prior = _read_manifest(out_dir)
+    prior_label, _prior_clips, prior_sources = _read_manifest(out_dir)
     if prior_label is not None and prior_label != label:
         print(
             f"error: --output {out_dir} holds {prior_label!r} clips, not {label!r}; "
             f"nothing was written. Point --output at this run's directory, or clear "
             f"that one (or remove its {MANIFEST_NAME}) to reuse it",
+            file=sys.stderr,
+        )
+        return 0
+    if prior_label is not None and prior_sources is None:
+        print(
+            f"error: --output {out_dir} has a {MANIFEST_NAME} without source "
+            "ownership, so this run cannot prove it belongs there; nothing was "
+            f"written. Remove {out_dir / MANIFEST_NAME} to bootstrap ownership "
+            "from these inputs, or clear the directory first",
             file=sys.stderr,
         )
         return 0
@@ -439,22 +479,42 @@ def process(
         print(f"no audio files found at {joined}", file=sys.stderr)
         return 0
 
+    source_keys = [_source_key(f) for f in files]
+    # This guards writes as well as --clean: _write_unique intentionally refreshes
+    # prior filenames in place, so a different source with the same basename could
+    # overwrite take_000.wav before cleanup runs. Add a new source alongside one
+    # recorded source in the same invocation to prove which dataset owns the dir.
+    if prior_sources is not None and not (set(source_keys) & prior_sources.keys()):
+        print(
+            f"error: --output {out_dir} belongs to a {label!r} dataset with "
+            "different source recordings; nothing was written. Point --output at "
+            f"this run's directory, or clear that one (or remove its {MANIFEST_NAME}) "
+            "to reuse it",
+            file=sys.stderr,
+        )
+        return 0
+
     stems = _unique_stems(files)
     written: set[Path] = set()
+    written_by_source: dict[str, set[Path]] = {source: set() for source in source_keys}
     seen_inodes: set[int] = set()
     all_durs: list[float] = []
-    for f, stem in zip(files, stems):
+    for f, stem, source in zip(files, stems, source_keys):
         audio = load_mono_16k(f)
         dur = len(audio) / TARGET_SR
         if label == "background":
             # Continuous negative audio: keep it whole, just normalized.
-            written.add(_write_unique(out_dir, stem, 0, audio, seen_inodes))
+            path = _write_unique(out_dir, stem, 0, audio, seen_inodes)
+            written.add(path)
+            written_by_source[source].add(path)
             print(f"  {f.name}: {dur:.1f}s background -> 1 file")
             continue
 
         clips, stats = segment_on_silence(audio, min_gap_s, min_dur_s, max_dur_s)
         for i, clip in enumerate(clips):
-            written.add(_write_unique(out_dir, stem, i, clip, seen_inodes))
+            path = _write_unique(out_dir, stem, i, clip, seen_inodes)
+            written.add(path)
+            written_by_source[source].add(path)
             all_durs.append(len(clip) / TARGET_SR)
         note = ""
         if stats["too_short"] or stats["too_long"]:
@@ -466,100 +526,89 @@ def process(
     total = len(written)
     print(f"\nwrote {total} {label} clip(s) to {out_dir}")
 
-    # Files this run did not write are left from an earlier run over a different
-    # input set. Training and eval read every clip in the directory, so they
-    # would score as extra data nobody asked for. --clean removes the leftover
-    # clips of a take this run just re-recorded (same stem, now-unused index), so
-    # the reported count matches what is on disk. It is deliberately narrow: a
-    # clip whose stem this run did not write -- an unrelated take, a source
-    # recording, hand-added audio -- is named but never auto-deleted, because it
-    # is indistinguishable from data the user curated on purpose.
+    # Files this run did not write are left from an earlier input set. Once a
+    # manifest exists, cleanup is based on source ownership rather than inferred
+    # from output stems: prior clips belonging to a source this run successfully
+    # re-recorded, or to a source dropped from this run, are removable. Prior clips
+    # belonging to a source this run attempted but got no clips from are kept as
+    # the only good copy. Files absent from the source map are user-owned.
     #
-    # Scope by the stems this run actually WROTE a clip for, read back from
-    # `written`, not by the input list `stems`: an input that produced zero clips
-    # this run (silence, a bad re-recording, thresholds that dropped every
-    # segment) has no new clip to make its earlier good clips stale, so --clean
-    # must not delete them. Keying off written paths leaves them to linger and
-    # warn instead of wiping the only copy.
+    # Without a readable manifest, the older stem rule remains the narrow
+    # fallback. It can clean a re-recorded take's higher-numbered leftovers but
+    # cannot reach a dropped input safely.
     run_stems = {
         stem for stem in (_clip_stem(p.name) for p in written) if stem is not None
     }
-    # The manifest widens --clean to the orphans the stem rule cannot reach: a
-    # clip prep recorded writing on an earlier run, whose stem is not in this
-    # run's inputs at all. That covers a dropped input and a basename collision
-    # whose disambiguated stem changed -- both leave clips no rerun will ever
-    # overwrite, and the manifest is what proves prep made them rather than a
-    # user curating the directory.
-    #
-    # But "prep made this file" is provenance, not permission. It does not say
-    # the file belongs to the dataset this run is refreshing, and without that
-    # second fact a mistyped --output -- positives re-run into the background
-    # directory -- would delete every clip there, since none of those stems are
-    # in the inputs. So the manifest rule only arms when this run looks like a
-    # refresh of the recorded set: same label, and at least one stem in common.
-    # A stray --output shares neither, and falls back to the stem rule, which
-    # cannot reach outside what this run just wrote.
-    #
-    # A stem this run DID attempt but wrote nothing for is excluded on purpose,
-    # manifest or not: that is the silent-re-recording case, where the prior
-    # clips are the only copy. The manifest says prep created a file; it does
-    # not say the file is expendable.
-    attempted = set(stems)
-    prior_stems = {stem for stem in (_clip_stem(n) for n in prior) if stem is not None}
-    # A mismatched label was already refused above, so the question left is
-    # whether this run is refreshing the record it found or landed beside it: a
-    # directory with no record is unclaimed and counts as ours, and one with a
-    # record needs a take in common. Without the overlap, prep neither deletes nor
-    # writes -- folding this run's stems into that record would hand a repeat of
-    # the same mistake the overlap it needs to start deleting.
-    refreshes_prior = not prior or bool(run_stems & prior_stems)
+    current_sources = set(source_keys)
+    written_sources = {source for source, paths in written_by_source.items() if paths}
     stale = _stale_clips(out_dir, written)
-    removable = (
-        [
-            p
-            for p in stale
-            if refreshes_prior
-            and (
-                # A re-recorded take's now-unused clips. Once there is a record,
-                # this consults it too: without that, a hand-added take_003.wav
-                # beside a manifested `take` dataset would be deleted by shape
-                # alone, and the promise that --clean only removes what prep made
-                # would hold everywhere except the case a user is most likely to
-                # hit. With no record (a directory from before manifests), shape
-                # is all there is.
-                (_clip_stem(p.name) in run_stems and (not prior or p.name in prior))
-                # An orphan of a take this run does not have: a dropped input, or
-                # a collider whose disambiguated stem changed.
-                or (p.name in prior and _clip_stem(p.name) not in attempted)
+    removable: list[Path] = []
+    if clean:
+        if prior_sources is None:
+            removable = [p for p in stale if _clip_stem(p.name) in run_stems]
+        else:
+            replaceable_sources = {
+                source
+                for source in prior_sources
+                if source not in current_sources or source in written_sources
+            }
+            removable_names = set().union(
+                *(prior_sources[source] for source in replaceable_sources)
             )
-        ]
-        if clean
-        else []
-    )
-    for p in removable:
-        p.unlink()
-    if removable:
+            removable = [p for p in stale if p.name in removable_names]
+    removed: list[Path] = []
+    for path in removable:
+        try:
+            path.unlink()
+        except OSError as e:
+            print(
+                f"warning: could not remove {path} ({e}); leaving it recorded for "
+                "a later --clean",
+                file=sys.stderr,
+            )
+        else:
+            removed.append(path)
+    if removed:
         print(
-            f"removed {len(removable)} clip(s) left from an earlier run "
-            f"({_summarize(removable)})"
+            f"removed {len(removed)} clip(s) left from an earlier run "
+            f"({_summarize(removed)})"
         )
-    lingering = [p for p in stale if p not in removable]
-    # Carry forward the prior run's record for files still on disk, so a
-    # directory built up over several runs keeps one provenance list rather than
-    # only remembering the most recent run.
-    if refreshes_prior:
-        _write_manifest(
-            out_dir,
-            label,
-            {p.name for p in written} | {p.name for p in lingering if p.name in prior},
-        )
-    elif out_dir.is_dir():
-        print(
-            f"warning: {out_dir} holds a {label!r} dataset with no take in common "
-            f"with this run, so its record was left as it was. Clips this run wrote "
-            f"are on disk; a later --clean will not treat them as part of it",
-            file=sys.stderr,
-        )
+    lingering = [p for p in stale if p not in removed]
+    lingering_names = {p.name for p in lingering}
+
+    # Carry forward every still-present owned clip under its original source,
+    # then replace or add the clips written for current sources. On the first
+    # manifest run, claim legacy leftovers only when their stem maps to a source
+    # that successfully wrote this run; that preserves the old cleanup fallback
+    # and keeps a silent take from claiming unknown files.
+    next_sources: dict[str, set[str]] = {}
+    if prior_sources is not None:
+        for source, names in prior_sources.items():
+            kept = names & lingering_names
+            if kept:
+                next_sources[source] = kept
+    else:
+        source_for_stem = {
+            stem: source
+            for stem, source in zip(stems, source_keys)
+            if source in written_sources
+        }
+        for path in lingering:
+            source = source_for_stem.get(_clip_stem(path.name))
+            if source is not None:
+                next_sources.setdefault(source, set()).add(path.name)
+    # Keep current sources in the record even when they wrote nothing. If their
+    # old clips are already absent, the empty entry still proves the next rerun
+    # comes from the same source instead of deadlocking the directory.
+    for source, paths in written_by_source.items():
+        next_sources.setdefault(source, set()).update(path.name for path in paths)
+
+    # A no-output run cannot establish ownership in an unrecorded directory.
+    # Leaving it unclaimed lets a later successful rerun bootstrap the legacy
+    # clips instead of stranding them behind an empty manifest.
+    if prior_sources is not None or written:
+        _write_manifest(out_dir, label, next_sources)
+
     if lingering:
         # Why a file lingered decides what the user should do about it, and the
         # cases want opposite advice. A take this run re-recorded and got nothing
@@ -568,7 +617,20 @@ def process(
         # recording. Split the message rather than send one that is right for the
         # common case and harmful for the case prep went out of its way to
         # protect.
-        empty_takes = [p for p in lingering if _clip_stem(p.name) in attempted]
+        if prior_sources is None:
+            attempted = set(stems)
+            empty_takes = [
+                p for p in lingering if _clip_stem(p.name) in attempted - run_stems
+            ]
+        else:
+            silent_names = set().union(
+                *(
+                    prior_sources[source]
+                    for source in current_sources - written_sources
+                    if source in prior_sources
+                )
+            )
+            empty_takes = [p for p in lingering if p.name in silent_names]
         if empty_takes and clean:
             fix = (
                 "this run re-recorded "
@@ -634,7 +696,8 @@ def main() -> int:
         action="store_true",
         help="remove prep's own leftover clips in --output: a re-recorded take's "
         "now-unused higher-numbered clips, plus clips a previous run recorded for a "
-        "take no longer in the inputs; leaves hand-added audio in place",
+        "take no longer in the inputs; without a readable manifest, falls back to "
+        "same-stem filenames",
     )
     args = p.parse_args()
 
