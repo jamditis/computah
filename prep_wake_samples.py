@@ -374,7 +374,23 @@ def _read_manifest(
         warn_manifest_problem("expected a clips list", legacy_fallback=True)
         return None, set(), None
     label = raw.get("label")
-    clip_names = {c for c in clips if isinstance(c, str)}
+
+    def safe_clip_name(name: object) -> bool:
+        return (
+            isinstance(name, str)
+            and name == Path(name).name
+            and "/" not in name
+            and "\\" not in name
+            and _CLIP_NAME.fullmatch(name) is not None
+        )
+
+    if not all(safe_clip_name(name) for name in clips):
+        warn_manifest_problem(
+            "clips must contain safe output filenames, not paths",
+            legacy_fallback=not isinstance(label, str),
+        )
+        return label if isinstance(label, str) else None, set(), None
+    clip_names = set(clips)
     sources_raw = raw.get("sources")
     if not isinstance(sources_raw, dict):
         warn_manifest_problem(
@@ -390,7 +406,13 @@ def _read_manifest(
                 legacy_fallback=not isinstance(label, str),
             )
             return label if isinstance(label, str) else None, clip_names, None
-        sources[source] = {name for name in names if isinstance(name, str)}
+        if not all(safe_clip_name(name) for name in names):
+            warn_manifest_problem(
+                "sources must own safe output filenames, not paths",
+                legacy_fallback=not isinstance(label, str),
+            )
+            return label if isinstance(label, str) else None, clip_names, None
+        sources[source] = set(names)
     owned_clips = set().union(*sources.values()) if sources else set()
     if owned_clips != clip_names:
         warn_manifest_problem(
@@ -589,18 +611,6 @@ def process(
     # writing positives into a directory of negatives is what the user meant.
     manifest_present = (out_dir / MANIFEST_NAME).exists()
     prior_label, _prior_clips, prior_sources = _read_manifest(out_dir)
-    if (
-        clean
-        and not manifest_present
-        and out_dir.is_dir()
-        and any(path.suffix.lower() in AUDIO_EXTS for path in out_dir.iterdir())
-    ):
-        print(
-            f"warning: {out_dir} has no {MANIFEST_NAME}; this --clean will use "
-            "legacy filename cleanup without source ownership protection and may "
-            "remove hand-added <same-stem>_NNN.wav files",
-            file=sys.stderr,
-        )
     if prior_label is not None and prior_label != label:
         print(
             f"error: --output {out_dir} holds {prior_label!r} clips, not {label!r}; "
@@ -618,6 +628,23 @@ def process(
             file=sys.stderr,
         )
         return 0
+    if (
+        clean
+        and prior_sources is None
+        and out_dir.is_dir()
+        and any(path.suffix.lower() in AUDIO_EXTS for path in out_dir.iterdir())
+    ):
+        manifest_state = (
+            f"{out_dir / MANIFEST_NAME} is unusable"
+            if manifest_present
+            else f"{out_dir} has no {MANIFEST_NAME}"
+        )
+        print(
+            f"warning: {manifest_state}; this --clean will use legacy filename "
+            "cleanup without source ownership protection and may remove hand-added "
+            "<same-stem>_NNN.wav files",
+            file=sys.stderr,
+        )
 
     files = _inputs(inputs)
     if not files:
@@ -788,6 +815,9 @@ def process(
                 )
             )
             empty_takes = [p for p in lingering if p.name in silent_names]
+        owned_names = (
+            set().union(*prior_sources.values()) if prior_sources is not None else set()
+        )
         failed_removals = [p for p in lingering if p in removable]
         if empty_takes:
             other_lingering = [
@@ -809,11 +839,18 @@ def process(
                         "they are not wanted"
                     )
                 else:
-                    fix += (
-                        f". For the other leftovers ({_summarize(other_lingering)}), "
-                        "rerun with --clean or review and remove only those files "
-                        "by hand"
-                    )
+                    cleanable = [p for p in other_lingering if p.name in owned_names]
+                    manual = [p for p in other_lingering if p not in cleanable]
+                    if cleanable:
+                        fix += (
+                            f". Rerun with --clean to remove prep-owned "
+                            f"{_summarize(cleanable)}"
+                        )
+                    if manual:
+                        fix += (
+                            f". {_summarize(manual)} have no prep ownership record; "
+                            "remove only those files by hand if they are not wanted"
+                        )
             if failed_removals:
                 fix += (
                     f". {_summarize(failed_removals)} were selected for cleanup "
@@ -837,7 +874,26 @@ def process(
                 )
             fix = ". ".join(fixes)
         else:
-            fix = "rerun with --clean to remove them, or clear the directory by hand"
+            if prior_sources is None:
+                fix = (
+                    "review these legacy filenames, then rerun with --clean or "
+                    "remove only the unwanted files by hand"
+                )
+            else:
+                cleanable = [p for p in lingering if p.name in owned_names]
+                manual = [p for p in lingering if p not in cleanable]
+                fixes = []
+                if cleanable:
+                    fixes.append(
+                        f"rerun with --clean to remove prep-owned "
+                        f"{_summarize(cleanable)}"
+                    )
+                if manual:
+                    fixes.append(
+                        f"{_summarize(manual)} have no prep ownership record; "
+                        "remove them by hand if they are not wanted"
+                    )
+                fix = ". ".join(fixes)
         print(
             f"warning: {len(lingering)} file(s) in {out_dir} are left from an "
             f"earlier run ({_summarize(lingering)}). Training and eval read every "

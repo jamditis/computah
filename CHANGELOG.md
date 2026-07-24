@@ -26,6 +26,8 @@ All notable changes to computah are recorded here. The format follows
   (`take-1_000.wav`) that a later run no longer produces. A run must share an
   exact recorded source path before it may write to that dataset, so a different
   dataset with the same label and generic basename cannot overwrite or clean it.
+  Malformed ownership maps, including clip names that are paths instead of safe
+  output filenames, are refused before any audio is decoded or written.
   Manifested stems remain reserved for their source while new output names are
   assigned, so a new same-basename recording cannot overwrite the only good
   clips from a source whose rerun is silent. A source this run attempted but got
