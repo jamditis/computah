@@ -338,12 +338,11 @@ def _read_manifest(
 ) -> tuple[str | None, set[str], dict[str, set[str]] | None]:
     """The label, clips, and source ownership a previous prep run recorded here.
 
-    Fails soft on every read problem -- absent, unreadable, not JSON, wrong
-    shape -- returning ``(None, set(), None)``. An empty record means "no record
-    of what prep made," which narrows `--clean` back to the stem rule below.
-    A version-1 record still returns its label and clips but no source map; the
-    caller can then refuse to guess ownership and tell the user how to bootstrap
-    a new record explicitly.
+    An absent file returns ``(None, set(), None)`` and lets the caller use the
+    warned legacy stem rule. Every present-but-unreadable, malformed, or
+    unsupported record returns no source map; the caller sees that the file
+    exists and refuses to decode or write until ownership is bootstrapped
+    explicitly.
     """
     manifest_path = out_dir / MANIFEST_NAME
 
@@ -369,6 +368,9 @@ def _read_manifest(
         warn_manifest_problem("expected a clips list")
         return None, set(), None
     label = raw.get("label")
+    if not isinstance(label, str):
+        warn_manifest_problem("expected a string label")
+        return None, set(), None
 
     def safe_clip_name(name: object) -> bool:
         return (
@@ -380,16 +382,16 @@ def _read_manifest(
 
     if not all(safe_clip_name(name) for name in clips):
         warn_manifest_problem("clips must contain safe output filenames, not paths")
-        return label if isinstance(label, str) else None, set(), None
+        return label, set(), None
     clip_names = set(clips)
     version = raw.get("version")
     if version != 2:
         warn_manifest_problem(f"unsupported manifest version {version!r}; expected 2")
-        return label if isinstance(label, str) else None, clip_names, None
+        return label, clip_names, None
     sources_raw = raw.get("sources")
     if not isinstance(sources_raw, dict):
         warn_manifest_problem("expected a sources map")
-        return label if isinstance(label, str) else None, clip_names, None
+        return label, clip_names, None
 
     sources: dict[str, set[str]] = {}
     for source, names in sources_raw.items():
@@ -397,16 +399,16 @@ def _read_manifest(
             warn_manifest_problem(
                 "expected every sources entry to map a path to a clip list"
             )
-            return label if isinstance(label, str) else None, clip_names, None
+            return label, clip_names, None
         if not all(safe_clip_name(name) for name in names):
             warn_manifest_problem("sources must own safe output filenames, not paths")
-            return label if isinstance(label, str) else None, clip_names, None
+            return label, clip_names, None
         sources[source] = set(names)
     owned_clips = set().union(*sources.values()) if sources else set()
     if owned_clips != clip_names:
         warn_manifest_problem("sources do not own exactly the recorded clips")
-        return label if isinstance(label, str) else None, clip_names, None
-    return label if isinstance(label, str) else None, clip_names, sources
+        return label, clip_names, None
+    return label, clip_names, sources
 
 
 def _write_manifest(
@@ -621,15 +623,10 @@ def process(
         and out_dir.is_dir()
         and any(path.suffix.lower() in AUDIO_EXTS for path in out_dir.iterdir())
     ):
-        manifest_state = (
-            f"{out_dir / MANIFEST_NAME} is unusable"
-            if manifest_present
-            else f"{out_dir} has no {MANIFEST_NAME}"
-        )
         print(
-            f"warning: {manifest_state}; this --clean will use legacy filename "
-            "cleanup without source ownership protection and may remove hand-added "
-            "<same-stem>_NNN.wav files",
+            f"warning: {out_dir} has no {MANIFEST_NAME}; this --clean will use "
+            "legacy filename cleanup without source ownership protection and may "
+            "remove hand-added <same-stem>_NNN.wav files",
             file=sys.stderr,
         )
 

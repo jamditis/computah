@@ -44,6 +44,8 @@ All notable changes to computah are recorded here. The format follows
   explicit warning; that fallback cannot distinguish a prep leftover from a
   hand-added `<same-stem>_NNN.wav`. An unreadable, malformed, or non-v2 manifest
   fails closed until the user removes it to bootstrap ownership explicitly.
+  Existing pre-manifest directories must bootstrap with the complete source set;
+  clips under stems omitted from a partial first run remain deliberately unowned.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,

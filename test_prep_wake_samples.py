@@ -1183,9 +1183,9 @@ def test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d: Path) -> None:
 
     A normal refresh without --clean warns that its higher-numbered leftovers
     can be removed by rerunning with --clean. When that refresh is also the run
-    that introduces the manifest, the record has to retain provenance for those
-    leftovers; otherwise the promised follow-up clean can no longer distinguish
-    them from hand-added audio.
+    that would introduce the manifest, prep withholds the record while ambiguous
+    same-stem files remain. The follow-up clean therefore stays on the legacy
+    filename rule, removes those leftovers, and only then records v2 ownership.
     """
     src = d / "bootstrap_src"
     take = src / "take.wav"

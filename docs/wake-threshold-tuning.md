@@ -64,6 +64,13 @@ that produced nothing. A new source that produces no clips is not added to the
 ownership record, so it cannot authorize a later cleanup until a successful run
 actually contributes audio.
 
+When upgrading an existing pre-manifest `samples/` directory, bootstrap it with
+the complete source list for that label. A partial first run can record only the
+sources it receives; legacy clips under omitted stems then remain deliberately
+unowned and future `--clean` runs will only warn about them. If the complete
+source set is unavailable, move or clear the old output before starting a new
+partial dataset.
+
 To add a new recording to an existing dataset without `--clean`, include at
 least one source already recorded there in the same invocation. This gives prep
 explicit ownership proof while it adds the new source to the manifest. If you
