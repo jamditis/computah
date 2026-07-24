@@ -13,12 +13,12 @@ All notable changes to computah are recorded here. The format follows
   higher-numbered clips that training and eval would still read. Off by default
   (deletion is opt-in). The source manifest below broadens cleanup to the
   prep-owned clips of an intentionally omitted take while still sparing source
-  recordings and hand-curated audio. With no manifest or an unreadable one, the
-  narrow same-stem rule remains as a warned legacy fallback; readable older
-  records without source ownership fail closed until removed. Without `--clean`
-  the run still warns and names the leftover count. `test_prep_wake_samples.py`
-  covers the re-run-with-fewer-clips case with and without `--clean`, and that
-  source-aware `--clean` spares files prep did not record.
+  recordings and hand-curated audio. With no manifest, the narrow same-stem rule
+  remains as a warned legacy fallback; any present-but-unusable record fails
+  closed until removed. Without `--clean` the run still warns and names the
+  leftover count. `test_prep_wake_samples.py` covers the
+  re-run-with-fewer-clips case with and without `--clean`, and that source-aware
+  `--clean` spares files prep did not record.
 - `prep_wake_samples.py` output manifest (#84): prep records each resolved source
   path and the clips it owns in `.prep-manifest.json` in the output dir.
   `--clean` uses that provenance to remove orphans the stem match cannot reach --

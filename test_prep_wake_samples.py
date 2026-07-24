@@ -797,7 +797,7 @@ def test_legacy_mixed_warning_keeps_cleanable_leftovers_automated(d: Path) -> No
         prep.process([good, silent], out, "positive", 0.3, 0.2, 1.0)
     check(
         "check the recording" in errors.getvalue()
-        and "rerun with --clean to remove prep-owned good_001.wav" in errors.getvalue(),
+        and "Rerun with --clean to remove prep-owned good_001.wav" in errors.getvalue(),
         "legacy mixed guidance protects silent clips and automates true leftovers",
     )
 

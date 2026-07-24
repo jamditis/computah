@@ -827,7 +827,15 @@ def process(
                         "they are not wanted"
                     )
                 else:
-                    cleanable = [p for p in other_lingering if p.name in owned_names]
+                    cleanable = [
+                        p
+                        for p in other_lingering
+                        if (
+                            p.name in owned_names
+                            if prior_sources is not None
+                            else _clip_stem(p.name) in run_stems
+                        )
+                    ]
                     manual = [p for p in other_lingering if p not in cleanable]
                     if cleanable:
                         fix += (
