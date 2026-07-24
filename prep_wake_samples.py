@@ -354,7 +354,7 @@ def _read_manifest(
         )
 
     try:
-        raw = json.loads(manifest_path.read_text())
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None, set(), None
     except (OSError, ValueError) as e:
@@ -394,6 +394,7 @@ def _read_manifest(
         return label, clip_names, None
 
     sources: dict[str, set[str]] = {}
+    claimed_clips: set[str] = set()
     for source, names in sources_raw.items():
         if not isinstance(source, str) or not isinstance(names, list):
             warn_manifest_problem(
@@ -403,9 +404,15 @@ def _read_manifest(
         if not all(safe_clip_name(name) for name in names):
             warn_manifest_problem("sources must own safe output filenames, not paths")
             return label, clip_names, None
-        sources[source] = set(names)
-    owned_clips = set().union(*sources.values()) if sources else set()
-    if owned_clips != clip_names:
+        source_clips = set(names)
+        if claimed_clips & source_clips:
+            warn_manifest_problem(
+                "each recorded clip must have exactly one source owner"
+            )
+            return label, clip_names, None
+        sources[source] = source_clips
+        claimed_clips.update(source_clips)
+    if claimed_clips != clip_names:
         warn_manifest_problem("sources do not own exactly the recorded clips")
         return label, clip_names, None
     return label, clip_names, sources

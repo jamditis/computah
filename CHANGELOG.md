@@ -29,7 +29,9 @@ All notable changes to computah are recorded here. The format follows
   that dataset, so a different dataset with the same label and generic basename
   cannot overwrite or clean it.
   Malformed ownership maps, including clip names that are paths instead of safe
-  output filenames, are refused before any audio is decoded or written.
+  output filenames or clips claimed by multiple sources, are refused before any
+  audio is decoded or written. Manifests are read and written explicitly as
+  UTF-8 so non-ASCII recording paths round-trip across supported platforms.
   Manifested stems remain reserved for their source while new output names are
   assigned, so a new same-basename recording cannot overwrite the only good
   clips from a source whose rerun is silent. A source this run attempted but got
