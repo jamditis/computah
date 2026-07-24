@@ -347,15 +347,10 @@ def _read_manifest(
     """
     manifest_path = out_dir / MANIFEST_NAME
 
-    def warn_manifest_problem(reason: object, *, legacy_fallback: bool) -> None:
-        consequence = (
-            "this run will use legacy filename cleanup"
-            if legacy_fallback
-            else "this manifest cannot authorize a write"
-        )
+    def warn_manifest_problem(reason: object) -> None:
         print(
             f"warning: could not use {manifest_path} ({reason}); source ownership "
-            f"protection is unavailable, so {consequence}",
+            "protection is unavailable, so this manifest cannot authorize a write",
             file=sys.stderr,
         )
 
@@ -364,14 +359,14 @@ def _read_manifest(
     except FileNotFoundError:
         return None, set(), None
     except (OSError, ValueError) as e:
-        warn_manifest_problem(e, legacy_fallback=True)
+        warn_manifest_problem(e)
         return None, set(), None
     if not isinstance(raw, dict):
-        warn_manifest_problem("expected a JSON object", legacy_fallback=True)
+        warn_manifest_problem("expected a JSON object")
         return None, set(), None
     clips = raw.get("clips")
     if not isinstance(clips, list):
-        warn_manifest_problem("expected a clips list", legacy_fallback=True)
+        warn_manifest_problem("expected a clips list")
         return None, set(), None
     label = raw.get("label")
 
@@ -384,47 +379,32 @@ def _read_manifest(
         )
 
     if not all(safe_clip_name(name) for name in clips):
-        warn_manifest_problem(
-            "clips must contain safe output filenames, not paths",
-            legacy_fallback=not isinstance(label, str),
-        )
+        warn_manifest_problem("clips must contain safe output filenames, not paths")
         return label if isinstance(label, str) else None, set(), None
     clip_names = set(clips)
     version = raw.get("version")
     if version != 2:
-        warn_manifest_problem(
-            f"unsupported manifest version {version!r}; expected 2",
-            legacy_fallback=not isinstance(label, str),
-        )
+        warn_manifest_problem(f"unsupported manifest version {version!r}; expected 2")
         return label if isinstance(label, str) else None, clip_names, None
     sources_raw = raw.get("sources")
     if not isinstance(sources_raw, dict):
-        warn_manifest_problem(
-            "expected a sources map", legacy_fallback=not isinstance(label, str)
-        )
+        warn_manifest_problem("expected a sources map")
         return label if isinstance(label, str) else None, clip_names, None
 
     sources: dict[str, set[str]] = {}
     for source, names in sources_raw.items():
         if not isinstance(source, str) or not isinstance(names, list):
             warn_manifest_problem(
-                "expected every sources entry to map a path to a clip list",
-                legacy_fallback=not isinstance(label, str),
+                "expected every sources entry to map a path to a clip list"
             )
             return label if isinstance(label, str) else None, clip_names, None
         if not all(safe_clip_name(name) for name in names):
-            warn_manifest_problem(
-                "sources must own safe output filenames, not paths",
-                legacy_fallback=not isinstance(label, str),
-            )
+            warn_manifest_problem("sources must own safe output filenames, not paths")
             return label if isinstance(label, str) else None, clip_names, None
         sources[source] = set(names)
     owned_clips = set().union(*sources.values()) if sources else set()
     if owned_clips != clip_names:
-        warn_manifest_problem(
-            "sources do not own exactly the recorded clips",
-            legacy_fallback=not isinstance(label, str),
-        )
+        warn_manifest_problem("sources do not own exactly the recorded clips")
         return label if isinstance(label, str) else None, clip_names, None
     return label if isinstance(label, str) else None, clip_names, sources
 
@@ -625,12 +605,13 @@ def process(
             file=sys.stderr,
         )
         return 0
-    if prior_label is not None and prior_sources is None:
+    if manifest_present and prior_sources is None:
         print(
-            f"error: --output {out_dir} has a {MANIFEST_NAME} without source "
-            "ownership, so this run cannot prove it belongs there; nothing was "
-            f"written. Remove {out_dir / MANIFEST_NAME} to bootstrap ownership "
-            "from these inputs, or clear the directory first",
+            f"error: --output {out_dir} has an unusable {MANIFEST_NAME}, so this "
+            "run cannot prove its label or source ownership; nothing was written. "
+            f"After reviewing the directory, remove {out_dir / MANIFEST_NAME} to "
+            "bootstrap ownership from the full input set, or clear the directory "
+            "first",
             file=sys.stderr,
         )
         return 0
@@ -672,6 +653,16 @@ def process(
             file=sys.stderr,
         )
         return 0
+    if clean and prior_sources is not None:
+        present_names = {path.name for path in _stale_clips(out_dir, set())}
+        for source in sorted(prior_sources.keys() - set(source_keys)):
+            count = len(prior_sources[source] & present_names)
+            if count:
+                print(
+                    f"warning: source {source} is not in this run; --clean will "
+                    f"remove its {count} prep-owned clip(s) from {out_dir}",
+                    file=sys.stderr,
+                )
 
     stems = _manifest_aware_stems(files, source_keys, prior_sources)
     written: set[Path] = set()
@@ -783,17 +774,7 @@ def process(
     # A no-output run cannot establish ownership in an unrecorded directory.
     # Leaving it unclaimed lets a later successful rerun bootstrap the legacy
     # clips instead of stranding them behind an empty manifest.
-    unusable_manifest = manifest_present and prior_sources is None
-    if unusable_manifest:
-        if written:
-            print(
-                f"warning: the unreadable {out_dir / MANIFEST_NAME} was preserved; "
-                "clips written by this run are unrecorded. After reviewing the "
-                "output directory, remove that manifest and rerun the full input "
-                "set to bootstrap ownership again",
-                file=sys.stderr,
-            )
-    elif (prior_sources is not None or written) and not ambiguous_legacy:
+    if (prior_sources is not None or written) and not ambiguous_legacy:
         _write_manifest(out_dir, label, next_sources)
     elif ambiguous_legacy:
         print(

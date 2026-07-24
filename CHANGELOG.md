@@ -23,9 +23,11 @@ All notable changes to computah are recorded here. The format follows
   path and the clips it owns in `.prep-manifest.json` in the output dir.
   `--clean` uses that provenance to remove orphans the stem match cannot reach --
   clips from an input dropped between runs, and clips under a disambiguated stem
-  (`take-1_000.wav`) that a later run no longer produces. A run must share an
-  exact recorded source path before it may write to that dataset, so a different
-  dataset with the same label and generic basename cannot overwrite or clean it.
+  (`take-1_000.wav`) that a later run no longer produces. Before a destructive
+  run, prep names every omitted source and how many of its clips `--clean` will
+  remove. A run must share an exact recorded source path before it may write to
+  that dataset, so a different dataset with the same label and generic basename
+  cannot overwrite or clean it.
   Malformed ownership maps, including clip names that are paths instead of safe
   output filenames, are refused before any audio is decoded or written.
   Manifested stems remain reserved for their source while new output names are
@@ -37,14 +39,11 @@ All notable changes to computah are recorded here. The format follows
   next `--clean` remains on the documented filename fallback instead of turning
   a guess into durable provenance. A no-output run cannot claim an unrecorded
   directory, and a first-time source that writes no clips cannot gain cleanup
-  authority over an existing dataset. Manifest writes use atomic replacement,
-  and an absent or unreadable manifest degrades `--clean` to the narrow stem
-  match with an explicit warning. An unreadable manifest is preserved instead of
-  being replaced by a partial source map, leaving fallback output explicitly
-  unrecorded until the user reviews the directory and reboots ownership. That
-  fallback cannot distinguish a prep leftover from a hand-added
-  `<same-stem>_NNN.wav`. Any manifest version other than v2 is refused until the
-  user removes it to bootstrap ownership explicitly.
+  authority over an existing dataset. Manifest writes use atomic replacement.
+  Only an absent manifest degrades `--clean` to the narrow stem match with an
+  explicit warning; that fallback cannot distinguish a prep leftover from a
+  hand-added `<same-stem>_NNN.wav`. An unreadable, malformed, or non-v2 manifest
+  fails closed until the user removes it to bootstrap ownership explicitly.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,

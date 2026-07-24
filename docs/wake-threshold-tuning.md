@@ -69,19 +69,20 @@ least one source already recorded there in the same invocation. This gives prep
 explicit ownership proof while it adds the new source to the manifest. If you
 use `--clean`, include every source whose clips the dataset should keep: omitted
 sources are treated as intentionally dropped and their prep-owned clips are
-removed. A safe incremental workflow is to add recordings without `--clean`,
-then run a full-input `--clean` pass after reviewing the complete source list.
+removed. Before decoding, prep warns with each omitted source path and the
+number of its clips scheduled for removal. A safe incremental workflow is to add
+recordings without `--clean`, then run a full-input `--clean` pass after
+reviewing the complete source list.
 
-Manifest updates use atomic replacement. An absent or unreadable manifest falls
-back to the narrow same-stem cleanup rule with a warning that source ownership
-protection is unavailable. An unreadable manifest is preserved rather than
-replaced with a partial source map, so clips written during that fallback remain
-unrecorded. That fallback has no provenance: `--clean` can remove any
-`<same-stem>_NNN.wav` file, including a hand-added file with that shape. Check the
-warning list and move any such file before cleaning. After reviewing the output
-directory, remove an unreadable manifest and rerun the full source set to
-bootstrap ownership. Any manifest version other than v2 is refused, even if it
-has similar fields, and requires the same deliberate removal.
+Manifest updates use atomic replacement. Only an absent manifest falls back to
+the narrow same-stem cleanup rule, with a warning that source ownership
+protection is unavailable. That fallback has no provenance: `--clean` can remove
+any `<same-stem>_NNN.wav` file, including a hand-added file with that shape.
+Check the warning list and move any such file before cleaning. An unreadable,
+malformed, or non-v2 manifest fails closed before any decode or write because
+neither its dataset label nor its source ownership can be trusted. After
+reviewing the output directory, remove that manifest and rerun the full source
+set to bootstrap ownership.
 
 ```bash
 .venv/bin/python prep_wake_samples.py --input computah_normal.wav computah_styles.wav \
