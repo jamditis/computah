@@ -587,7 +587,20 @@ def process(
     # this directory's take_000.wav with the new dataset's. A label mismatch is
     # the signature of a mistyped --output, and there is no reading of it where
     # writing positives into a directory of negatives is what the user meant.
+    manifest_present = (out_dir / MANIFEST_NAME).exists()
     prior_label, _prior_clips, prior_sources = _read_manifest(out_dir)
+    if (
+        clean
+        and not manifest_present
+        and out_dir.is_dir()
+        and any(path.suffix.lower() in AUDIO_EXTS for path in out_dir.iterdir())
+    ):
+        print(
+            f"warning: {out_dir} has no {MANIFEST_NAME}; this --clean will use "
+            "legacy filename cleanup without source ownership protection and may "
+            "remove hand-added <same-stem>_NNN.wav files",
+            file=sys.stderr,
+        )
     if prior_label is not None and prior_label != label:
         print(
             f"error: --output {out_dir} holds {prior_label!r} clips, not {label!r}; "
