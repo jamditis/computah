@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 from contextlib import redirect_stderr
@@ -989,6 +990,59 @@ def test_manifest_clip_names_cannot_escape_output_directory(d: Path) -> None:
     )
 
 
+def test_manifest_rejects_unsupported_version_with_v2_shape(d: Path) -> None:
+    """A version-1 declaration cannot gain v2 cleanup authority by shape."""
+    src = d / "unsupported_version_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "unsupported_version_out"
+    out.mkdir()
+    source_key = prep._source_key(take)
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "label": "positive",
+                "clips": ["take_000.wav"],
+                "sources": {source_key: ["take_000.wav"]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        total == 0
+        and not list(out.glob("*.wav"))
+        and "version" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "an unsupported manifest version is refused despite a v2-shaped map",
+    )
+
+
+def test_posix_backslash_basename_round_trips_manifest(d: Path) -> None:
+    """A POSIX basename the writer accepts must remain readable next run."""
+    if os.sep != "/":
+        check(True, "the POSIX backslash-basename check is not applicable")
+        return
+
+    src = d / "backslash_basename_src"
+    take = src / "rec\\take.wav"
+    _burst_take(take, 2)
+    out = d / "backslash_basename_out"
+    first = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    second = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    _label, _clips, sources = prep._read_manifest(out)
+    check(
+        first == 2
+        and second == 2
+        and sources is not None
+        and prep._source_key(take) in sources,
+        "a POSIX backslash basename survives its manifest round trip",
+    )
+
+
 def test_manifest_replace_failure_describes_authoritative_old_record(d: Path) -> None:
     """An atomic replace failure leaves the previous manifest in force."""
     out = d / "manifest_replace_failure_out"
@@ -1337,6 +1391,8 @@ def main() -> int:
         test_manifest_wrong_shape_warns_before_legacy_fallback(d)
         test_manifest_bad_sources_warns_before_ownership_refusal(d)
         test_manifest_clip_names_cannot_escape_output_directory(d)
+        test_manifest_rejects_unsupported_version_with_v2_shape(d)
+        test_posix_backslash_basename_round_trips_manifest(d)
         test_manifest_replace_failure_describes_authoritative_old_record(d)
         test_failed_unlink_summary_keeps_recorded_ownership(d)
         test_manifest_without_source_ownership_is_refused(d)
