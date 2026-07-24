@@ -347,10 +347,15 @@ def _read_manifest(
     """
     manifest_path = out_dir / MANIFEST_NAME
 
-    def warn_legacy_fallback(reason: object) -> None:
+    def warn_manifest_problem(reason: object, *, legacy_fallback: bool) -> None:
+        consequence = (
+            "this run will use legacy filename cleanup"
+            if legacy_fallback
+            else "this manifest cannot authorize a write"
+        )
         print(
             f"warning: could not use {manifest_path} ({reason}); source ownership "
-            "protection is unavailable, so this run will use legacy filename cleanup",
+            f"protection is unavailable, so {consequence}",
             file=sys.stderr,
         )
 
@@ -359,28 +364,39 @@ def _read_manifest(
     except FileNotFoundError:
         return None, set(), None
     except (OSError, ValueError) as e:
-        warn_legacy_fallback(e)
+        warn_manifest_problem(e, legacy_fallback=True)
         return None, set(), None
     if not isinstance(raw, dict):
-        warn_legacy_fallback("expected a JSON object")
+        warn_manifest_problem("expected a JSON object", legacy_fallback=True)
         return None, set(), None
     clips = raw.get("clips")
     if not isinstance(clips, list):
-        warn_legacy_fallback("expected a clips list")
+        warn_manifest_problem("expected a clips list", legacy_fallback=True)
         return None, set(), None
     label = raw.get("label")
     clip_names = {c for c in clips if isinstance(c, str)}
     sources_raw = raw.get("sources")
     if not isinstance(sources_raw, dict):
+        warn_manifest_problem(
+            "expected a sources map", legacy_fallback=not isinstance(label, str)
+        )
         return label if isinstance(label, str) else None, clip_names, None
 
     sources: dict[str, set[str]] = {}
     for source, names in sources_raw.items():
         if not isinstance(source, str) or not isinstance(names, list):
+            warn_manifest_problem(
+                "expected every sources entry to map a path to a clip list",
+                legacy_fallback=not isinstance(label, str),
+            )
             return label if isinstance(label, str) else None, clip_names, None
         sources[source] = {name for name in names if isinstance(name, str)}
     owned_clips = set().union(*sources.values()) if sources else set()
     if owned_clips != clip_names:
+        warn_manifest_problem(
+            "sources do not own exactly the recorded clips",
+            legacy_fallback=not isinstance(label, str),
+        )
         return label if isinstance(label, str) else None, clip_names, None
     return label if isinstance(label, str) else None, clip_names, sources
 
@@ -431,9 +447,21 @@ def _write_manifest(
             os.fsync(tmp.fileno())
         os.replace(temporary, out_dir / MANIFEST_NAME)
     except OSError as e:
+        manifest_path = out_dir / MANIFEST_NAME
+        if manifest_path.exists():
+            recovery = (
+                "the previous manifest remains in force and clips written by this "
+                "run are unrecorded. Fix the write problem and rerun the full input "
+                f"set, or remove {manifest_path} to bootstrap ownership again"
+            )
+        else:
+            recovery = (
+                "no manifest was recorded, so clips written by this run have no "
+                "source ownership protection. Fix the write problem and rerun the "
+                "full input set"
+            )
         print(
-            f"warning: could not write {out_dir / MANIFEST_NAME} ({e}); "
-            f"a later --clean will fall back to matching re-recorded stems only",
+            f"warning: could not write {manifest_path} ({e}); {recovery}",
             file=sys.stderr,
         )
     finally:
