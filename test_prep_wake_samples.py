@@ -776,6 +776,40 @@ def test_manifest_empty_source_remains_refreshable(d: Path) -> None:
     )
 
 
+def test_new_zero_output_source_does_not_gain_cleanup_authority(d: Path) -> None:
+    """A source that contributed no clips cannot authorize a later clean."""
+    src = d / "zero_owner_src"
+    good = src / "good.wav"
+    junk = src / "junk.wav"
+    _burst_take(good, 3)
+    out = d / "zero_owner_out"
+    prep.process([good], out, "positive", 0.3, 0.2, 3.0)
+
+    sf.write(
+        junk,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    prep.process([good, junk], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    _label, _clips, sources = prep._read_manifest(out)
+    junk_key = prep._source_key(junk)
+    check(
+        sources is not None and junk_key not in sources,
+        "a first-time zero-output source is not recorded as an owner",
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([junk], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["good_000.wav", "good_001.wav", "good_002.wav"]
+        and "different source recordings" in errors.getvalue(),
+        f"a zero-output newcomer cannot later clean the real dataset ({present})",
+    )
+
+
 def test_manifest_spares_a_silent_take_alongside_a_good_one(d: Path) -> None:
     """The `attempted` guard, with the manifest rule actually armed.
 
@@ -1297,6 +1331,7 @@ def main() -> int:
         test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
         test_nonclean_silent_rerun_protects_only_copy_in_warning(d)
         test_manifest_empty_source_remains_refreshable(d)
+        test_new_zero_output_source_does_not_gain_cleanup_authority(d)
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
         test_manifest_unreadable_falls_back_to_stem_rule(d)
         test_manifest_wrong_shape_warns_before_legacy_fallback(d)
