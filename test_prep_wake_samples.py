@@ -1036,6 +1036,35 @@ def test_manifest_rejects_unsupported_version_with_v2_shape(d: Path) -> None:
     )
 
 
+def test_manifest_requires_a_string_label(d: Path) -> None:
+    """A v2 source map cannot authorize writes without a trusted label."""
+    src = d / "missing_label_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "missing_label_out"
+    out.mkdir()
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "clips": ["take_000.wav"],
+                "sources": {prep._source_key(take): ["take_000.wav"]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        total == 0
+        and not list(out.glob("*.wav"))
+        and "label" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "a v2 manifest without a string label fails closed",
+    )
+
+
 def test_posix_backslash_basename_round_trips_manifest(d: Path) -> None:
     """A POSIX basename the writer accepts must remain readable next run."""
     if os.sep != "/":
@@ -1407,6 +1436,7 @@ def main() -> int:
         test_manifest_bad_sources_warns_before_ownership_refusal(d)
         test_manifest_clip_names_cannot_escape_output_directory(d)
         test_manifest_rejects_unsupported_version_with_v2_shape(d)
+        test_manifest_requires_a_string_label(d)
         test_posix_backslash_basename_round_trips_manifest(d)
         test_manifest_replace_failure_describes_authoritative_old_record(d)
         test_failed_unlink_summary_keeps_recorded_ownership(d)
