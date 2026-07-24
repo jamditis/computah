@@ -656,7 +656,7 @@ def process(
             count = len(prior_sources[source] & present_names)
             if count:
                 print(
-                    f"warning: source {source} is not in this run; --clean will "
+                    f"warning: source {source!r} is not in this run; --clean will "
                     f"remove its {count} prep-owned clip(s) from {out_dir}",
                     file=sys.stderr,
                 )
