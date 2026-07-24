@@ -688,6 +688,17 @@ def test_manifest_never_authorizes_deleting_curated_audio(d: Path) -> None:
     _burst_take(out / "custom_001.wav", 1)
     _burst_take(out / "my_recording.wav", 1)
 
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        "custom_001.wav" in errors.getvalue()
+        and "remove" in errors.getvalue()
+        and "by hand" in errors.getvalue()
+        and "rerun with --clean to remove them" not in errors.getvalue(),
+        "a non-clean refresh gives manual-only guidance for curated audio",
+    )
+
     prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
@@ -857,6 +868,10 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
         "a corrupt manifest warns that ownership protection is unavailable",
     )
     check(
+        "hand-added" in errors.getvalue(),
+        "a corrupt-manifest clean warns that curated same-stem clips are deletable",
+    )
+    check(
         manifest.read_text() == corrupt_payload,
         "a fallback run preserves the unreadable manifest for deliberate recovery",
     )
@@ -905,6 +920,38 @@ def test_manifest_bad_sources_warns_before_ownership_refusal(d: Path) -> None:
         and "sources" in errors.getvalue()
         and "source ownership" in errors.getvalue(),
         "a malformed sources map reports why ownership is unavailable",
+    )
+
+
+def test_manifest_clip_names_cannot_escape_output_directory(d: Path) -> None:
+    """Manifest ownership must never turn a path into an output stem."""
+    src = d / "hostile_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "hostile_manifest_out"
+    out.mkdir()
+    escaped = d / "escaped_000.wav"
+    hostile_name = "../escaped_000.wav"
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": [hostile_name],
+                "sources": {prep._source_key(take): [hostile_name]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        total == 0
+        and not escaped.exists()
+        and "manifest" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "a manifest path is refused before any write can escape --output",
     )
 
 
@@ -1254,6 +1301,7 @@ def main() -> int:
         test_manifest_unreadable_falls_back_to_stem_rule(d)
         test_manifest_wrong_shape_warns_before_legacy_fallback(d)
         test_manifest_bad_sources_warns_before_ownership_refusal(d)
+        test_manifest_clip_names_cannot_escape_output_directory(d)
         test_manifest_replace_failure_describes_authoritative_old_record(d)
         test_failed_unlink_summary_keeps_recorded_ownership(d)
         test_manifest_without_source_ownership_is_refused(d)
