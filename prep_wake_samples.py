@@ -11,6 +11,9 @@ Each output clip is a 16 kHz mono int16 WAV. The script reports per-file segment
 counts and a duration summary so a bad take (clipped words, no gaps, silence) is
 obvious before training.
 
+Successful runs also write `.prep-manifest.json` in `--output`; it records the
+dataset label and exact source ownership used to guard later refreshes and cleanup.
+
 Recordings are personal data: write them under samples/ (gitignored), not into the
 tree.
 
@@ -377,6 +380,7 @@ def _read_manifest(
             isinstance(name, str)
             and name == Path(name).name
             and "/" not in name
+            and "\x00" not in name
             and _CLIP_NAME.fullmatch(name) is not None
         )
 
@@ -649,11 +653,15 @@ def process(
     # overwrite take_000.wav before cleanup runs. Add a new source alongside one
     # recorded source in the same invocation to prove which dataset owns the dir.
     if prior_sources is not None and not (set(source_keys) & prior_sources.keys()):
+        recorded = sorted(prior_sources)
+        preview = ", ".join(repr(source) for source in recorded[:2])
+        if len(recorded) > 2:
+            preview += f", +{len(recorded) - 2} more"
         print(
             f"error: --output {out_dir} belongs to a {label!r} dataset with "
-            "different source recordings; nothing was written. Point --output at "
-            f"this run's directory, or clear that one (or remove its {MANIFEST_NAME}) "
-            "to reuse it",
+            f"different source recordings; nothing was written. Recorded sources "
+            f"include {preview}. Point --output at this run's directory, or clear "
+            f"that one (or remove its {MANIFEST_NAME}) to reuse it",
             file=sys.stderr,
         )
         return 0
@@ -924,7 +932,11 @@ def main() -> int:
         nargs="+",
         help="audio file(s), a shell glob, or a folder of them",
     )
-    p.add_argument("--output", required=True, help="output directory for clips")
+    p.add_argument(
+        "--output",
+        required=True,
+        help=f"output directory for clips and the {MANIFEST_NAME} ownership record",
+    )
     p.add_argument(
         "--label",
         choices=("positive", "negative", "background"),
@@ -948,8 +960,8 @@ def main() -> int:
         action="store_true",
         help="remove prep's own leftover clips in --output: a re-recorded take's "
         "now-unused higher-numbered clips, plus clips a previous run recorded for a "
-        "take no longer in the inputs; without a readable manifest, falls back to "
-        "same-stem filenames",
+        "take no longer in the inputs; when no manifest exists, falls back to "
+        "same-stem filenames, while an unusable manifest fails closed",
     )
     args = p.parse_args()
 
