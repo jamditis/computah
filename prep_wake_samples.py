@@ -746,7 +746,17 @@ def process(
     # A no-output run cannot establish ownership in an unrecorded directory.
     # Leaving it unclaimed lets a later successful rerun bootstrap the legacy
     # clips instead of stranding them behind an empty manifest.
-    if (prior_sources is not None or written) and not ambiguous_legacy:
+    unusable_manifest = manifest_present and prior_sources is None
+    if unusable_manifest:
+        if written:
+            print(
+                f"warning: the unreadable {out_dir / MANIFEST_NAME} was preserved; "
+                "clips written by this run are unrecorded. After reviewing the "
+                "output directory, remove that manifest and rerun the full input "
+                "set to bootstrap ownership again",
+                file=sys.stderr,
+            )
+    elif (prior_sources is not None or written) and not ambiguous_legacy:
         _write_manifest(out_dir, label, next_sources)
     elif ambiguous_legacy:
         print(
@@ -778,8 +788,8 @@ def process(
                 )
             )
             empty_takes = [p for p in lingering if p.name in silent_names]
+        failed_removals = [p for p in lingering if p in removable]
         if empty_takes and clean:
-            failed_removals = [p for p in lingering if p in removable]
             unrecorded = [
                 p
                 for p in lingering
@@ -804,10 +814,21 @@ def process(
                     "--clean"
                 )
         elif clean:
-            fix = (
-                "prep has no record of creating these, so --clean leaves them; "
-                "remove them by hand if they are not wanted"
-            )
+            unrecorded = [p for p in lingering if p not in failed_removals]
+            fixes: list[str] = []
+            if unrecorded:
+                fixes.append(
+                    "prep has no record of creating "
+                    f"{_summarize(unrecorded)}, so --clean leaves them; remove "
+                    "them by hand if they are not wanted"
+                )
+            if failed_removals:
+                fixes.append(
+                    f"{_summarize(failed_removals)} were selected for cleanup "
+                    "but could not be removed; address the earlier errors and "
+                    "rerun --clean"
+                )
+            fix = ". ".join(fixes)
         else:
             fix = "rerun with --clean to remove them, or clear the directory by hand"
         print(

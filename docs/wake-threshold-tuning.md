@@ -36,7 +36,7 @@ would linger and the training globs would still read them, so prep warns and
 names the count. Pass `--clean` to remove those leftovers in the same run.
 
 With a readable source-aware manifest, `--clean` only deletes clips prep recorded
-making. It removes the now-unused higher-numbered clips of a take this run
+as its output. It removes the now-unused higher-numbered clips of a take this run
 re-recorded, and the clips a previous run recorded for a take that is no longer
 in the inputs. The `.prep-manifest.json` in the output dir maps each resolved
 source path to the clips prep wrote for it. A source recording, a hand-curated
@@ -72,12 +72,14 @@ then run a full-input `--clean` pass after reviewing the complete source list.
 
 Manifest updates use atomic replacement. An absent or unreadable manifest falls
 back to the narrow same-stem cleanup rule with a warning that source ownership
-protection is unavailable. That fallback has no provenance: `--clean` can remove any
+protection is unavailable. An unreadable manifest is preserved rather than
+replaced with a partial source map, so clips written during that fallback remain
+unrecorded. That fallback has no provenance: `--clean` can remove any
 `<same-stem>_NNN.wav` file, including a hand-added file with that shape. Check the
-warning list and move any such file before cleaning. A readable older manifest
-without source ownership is refused; after confirming the output directory,
-remove that manifest once to bootstrap the source map from the next successful
-run.
+warning list and move any such file before cleaning. After reviewing the output
+directory, remove an unreadable manifest and rerun the full source set to
+bootstrap ownership. A readable older manifest without source ownership is
+refused and requires the same deliberate removal.
 
 ```bash
 .venv/bin/python prep_wake_samples.py --input computah_normal.wav computah_styles.wav \
