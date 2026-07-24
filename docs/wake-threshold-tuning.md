@@ -58,9 +58,13 @@ prior clips of a source it tried and got nothing from (a silent or bad
 re-recording): those are the only copy, and it will not trade them for a run
 that produced nothing.
 
-To add a new recording to an existing dataset, include at least one source
-already recorded there in the same invocation. This gives prep explicit
-ownership proof while it adds the new source to the manifest.
+To add a new recording to an existing dataset without `--clean`, include at
+least one source already recorded there in the same invocation. This gives prep
+explicit ownership proof while it adds the new source to the manifest. If you
+use `--clean`, include every source whose clips the dataset should keep: omitted
+sources are treated as intentionally dropped and their prep-owned clips are
+removed. A safe incremental workflow is to add recordings without `--clean`,
+then run a full-input `--clean` pass after reviewing the complete source list.
 
 Manifest updates use atomic replacement. An absent or unreadable manifest falls
 back to the narrow same-stem cleanup rule with a warning that source ownership
