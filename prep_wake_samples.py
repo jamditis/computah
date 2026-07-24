@@ -789,24 +789,31 @@ def process(
             )
             empty_takes = [p for p in lingering if p.name in silent_names]
         failed_removals = [p for p in lingering if p in removable]
-        if empty_takes and clean:
-            unrecorded = [
+        if empty_takes:
+            other_lingering = [
                 p
                 for p in lingering
                 if p not in empty_takes and p not in failed_removals
             ]
             fix = (
                 f"{_summarize(empty_takes)} are prior clips for a source this run "
-                "re-recorded but got no clips from, so --clean kept them rather "
+                "re-recorded but got no clips from, so prep kept them rather "
                 "than leave you with none; check the recording before removing "
                 "anything"
             )
-            if unrecorded:
-                fix += (
-                    f". {_summarize(unrecorded)} have no prep ownership record, "
-                    "so --clean leaves them; remove them by hand if they are not "
-                    "wanted"
-                )
+            if other_lingering:
+                if clean:
+                    fix += (
+                        f". {_summarize(other_lingering)} have no prep ownership "
+                        "record, so --clean leaves them; remove them by hand if "
+                        "they are not wanted"
+                    )
+                else:
+                    fix += (
+                        f". For the other leftovers ({_summarize(other_lingering)}), "
+                        "rerun with --clean or review and remove only those files "
+                        "by hand"
+                    )
             if failed_removals:
                 fix += (
                     f". {_summarize(failed_removals)} were selected for cleanup "
