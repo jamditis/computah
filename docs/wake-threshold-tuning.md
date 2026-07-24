@@ -60,7 +60,9 @@ filename rule rather than recording that guess as provenance. A run that
 produces no clips does not claim an unrecorded directory. Prep also spares the
 prior clips of a source it tried and got nothing from (a silent or bad
 re-recording): those are the only copy, and it will not trade them for a run
-that produced nothing.
+that produced nothing. A new source that produces no clips is not added to the
+ownership record, so it cannot authorize a later cleanup until a successful run
+actually contributes audio.
 
 To add a new recording to an existing dataset without `--clean`, include at
 least one source already recorded there in the same invocation. This gives prep

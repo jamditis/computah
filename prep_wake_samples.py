@@ -764,10 +764,14 @@ def process(
             kept = names & lingering_names
             if kept:
                 next_sources[source] = kept
-    # Keep current sources in the record even when they wrote nothing. If their
-    # old clips are already absent, the empty entry still proves the next rerun
-    # comes from the same source instead of deadlocking the directory.
+    # Keep an already-owned current source in the record even when it wrote
+    # nothing. If its old clips are already absent, the empty entry still proves
+    # the next rerun comes from the same source instead of deadlocking the
+    # directory. A brand-new source earns no cleanup authority until it actually
+    # contributes a clip.
     for source, paths in written_by_source.items():
+        if not paths and (prior_sources is None or source not in prior_sources):
+            continue
         next_sources.setdefault(source, set()).update(path.name for path in paths)
 
     # A no-output run cannot establish ownership in an unrecorded directory.
