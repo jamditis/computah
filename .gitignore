@@ -20,6 +20,7 @@ test_audio/*
 # Wake-word recordings and processed clips — personal voice data, never committed
 samples/
 recordings/
+.prep-manifest.json
 
 # Local experiment/training scripts (machine-specific paths), not part of the published project
 experiments/
