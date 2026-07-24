@@ -1001,6 +1001,40 @@ def test_manifest_bad_sources_warns_before_ownership_refusal(d: Path) -> None:
     )
 
 
+def test_manifest_source_warning_escapes_control_characters(d: Path) -> None:
+    """An untrusted source key cannot forge a destructive-warning line."""
+    src = d / "escaped_source_warning_src"
+    current = src / "current.wav"
+    _burst_take(current, 2)
+    out = d / "escaped_source_warning_out"
+    out.mkdir()
+    _burst_take(out / "current_000.wav", 1)
+    _burst_take(out / "old_000.wav", 1)
+    hostile_source = "old.wav\nwarning: forged"
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": ["current_000.wav", "old_000.wav"],
+                "sources": {
+                    prep._source_key(current): ["current_000.wav"],
+                    hostile_source: ["old_000.wav"],
+                },
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([current], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        "old.wav\\nwarning: forged" in errors.getvalue()
+        and hostile_source not in errors.getvalue(),
+        "a manifest source key is escaped in the pre-clean warning",
+    )
+
+
 def test_manifest_clip_names_cannot_escape_output_directory(d: Path) -> None:
     """Manifest ownership must never turn a path into an output stem."""
     src = d / "hostile_manifest_src"
@@ -1463,6 +1497,7 @@ def main() -> int:
         test_manifest_unreadable_is_refused(d)
         test_manifest_wrong_shape_is_refused(d)
         test_manifest_bad_sources_warns_before_ownership_refusal(d)
+        test_manifest_source_warning_escapes_control_characters(d)
         test_manifest_clip_names_cannot_escape_output_directory(d)
         test_manifest_rejects_unsupported_version_with_v2_shape(d)
         test_manifest_requires_a_string_label(d)
