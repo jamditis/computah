@@ -465,7 +465,6 @@ def test_refresh_after_adding_collider_leaves_no_orphans(d: Path) -> None:
         0.3,
         0.2,
         3.0,
-        clean=True,
     )
 
     files = sorted(p.name for p in out.glob("*.wav"))
@@ -631,6 +630,49 @@ def test_manifest_tracks_a_silent_colliding_source_by_path(d: Path) -> None:
     )
 
 
+def test_new_collider_cannot_overwrite_a_silent_sources_prior_stem(d: Path) -> None:
+    """A new collider must not take a silent source's manifested filenames.
+
+    Cleanup is too late to protect the only good clips if another input has
+    already refreshed their paths in place. Manifested stems therefore stay
+    reserved for their source while output names are assigned.
+    """
+    src = d / "stem_theft_src"
+    first = src / "a" / "take.wav"
+    silent = src / "b" / "take.wav"
+    newcomer = src / "c" / "take.wav"
+    _burst_take(first, 3)
+    _burst_take(silent, 2)
+    out = d / "stem_theft_out"
+    prep.process([first, silent], out, "positive", 0.3, 0.2, 3.0)
+
+    _label, _clips, sources = prep._read_manifest(out)
+    silent_key = prep._source_key(silent)
+    silent_names = sources[silent_key] if sources is not None else set()
+    silent_bytes = {name: (out / name).read_bytes() for name in silent_names}
+
+    sf.write(
+        silent,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    _burst_take(newcomer, 3)
+    prep.process([silent, newcomer], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    _label, _clips, refreshed_sources = prep._read_manifest(out)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    preserved = all(
+        (out / name).exists() and (out / name).read_bytes() == payload
+        for name, payload in silent_bytes.items()
+    )
+    check(
+        preserved
+        and refreshed_sources is not None
+        and refreshed_sources.get(silent_key) == silent_names,
+        f"a newcomer cannot overwrite a silent source's only good clips ({present})",
+    )
+
+
 def test_manifest_never_authorizes_deleting_curated_audio(d: Path) -> None:
     """The manifest widens --clean only to files prep recorded writing.
 
@@ -770,6 +812,26 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
         "manifest" in errors.getvalue()
         and "legacy filename cleanup" in errors.getvalue(),
         "a corrupt manifest warns that ownership protection is unavailable",
+    )
+
+
+def test_manifest_wrong_shape_warns_before_legacy_fallback(d: Path) -> None:
+    """Readable JSON with an invalid manifest shape must not degrade silently."""
+    src = d / "malformed_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "malformed_manifest_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).write_text("[]\n")
+
+    _burst_take(take, 2)
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        "manifest" in errors.getvalue()
+        and "legacy filename cleanup" in errors.getvalue(),
+        "a wrong-shape manifest warns before ownership protection degrades",
     )
 
 
@@ -1022,11 +1084,13 @@ def main() -> int:
         test_manifest_cleans_dropped_input_orphans(d)
         test_manifest_cleans_changed_collider_stem_orphans(d)
         test_manifest_tracks_a_silent_colliding_source_by_path(d)
+        test_new_collider_cannot_overwrite_a_silent_sources_prior_stem(d)
         test_manifest_never_authorizes_deleting_curated_audio(d)
         test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
         test_manifest_empty_source_remains_refreshable(d)
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
         test_manifest_unreadable_falls_back_to_stem_rule(d)
+        test_manifest_wrong_shape_warns_before_legacy_fallback(d)
         test_manifest_without_source_ownership_is_refused(d)
         test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
         test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(d)
