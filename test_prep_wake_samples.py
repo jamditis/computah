@@ -774,6 +774,34 @@ def test_nonclean_silent_rerun_protects_only_copy_in_warning(d: Path) -> None:
     )
 
 
+def test_legacy_mixed_warning_keeps_cleanable_leftovers_automated(d: Path) -> None:
+    """Legacy leftovers beside a silent take remain --clean-removable."""
+    src = d / "legacy_mixed_src"
+    good = src / "good.wav"
+    silent = src / "silent.wav"
+    _burst_take(good, 2)
+    _burst_take(silent, 2)
+    out = d / "legacy_mixed_out"
+    prep.process([good, silent], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()
+
+    _burst_take(good, 1)
+    sf.write(
+        silent,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([good, silent], out, "positive", 0.3, 0.2, 1.0)
+    check(
+        "check the recording" in errors.getvalue()
+        and "rerun with --clean to remove prep-owned good_001.wav" in errors.getvalue(),
+        "legacy mixed guidance protects silent clips and automates true leftovers",
+    )
+
+
 def test_manifest_empty_source_remains_refreshable(d: Path) -> None:
     """An owned source with no clips must not deadlock its output directory."""
     src = d / "empty_source_src"
@@ -1428,6 +1456,7 @@ def main() -> int:
         test_manifest_never_authorizes_deleting_curated_audio(d)
         test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
         test_nonclean_silent_rerun_protects_only_copy_in_warning(d)
+        test_legacy_mixed_warning_keeps_cleanable_leftovers_automated(d)
         test_manifest_empty_source_remains_refreshable(d)
         test_new_zero_output_source_does_not_gain_cleanup_authority(d)
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
