@@ -33,14 +33,67 @@ repo. The evaluation script below is committed; the audio it reads is not.
 Re-running prep into a populated `samples/` dir refreshes it in place. If a
 re-recording yields fewer clips than last time, the extra clips from the old run
 would linger and the training globs would still read them, so prep warns and
-names the count. Pass `--clean` to remove those leftovers in the same run. It is
-deliberately narrow: it only deletes leftover clips of a take this run
-re-recorded (a `<stem>_NNN.wav` clip whose stem the run wrote), so a source
-recording or a hand-curated clip for a different stem is named but left in place.
+names the count. Pass `--clean` to remove those leftovers in the same run.
+
+With a readable source-aware manifest, `--clean` only deletes clips prep recorded
+as its output. It removes the now-unused higher-numbered clips of a take this run
+re-recorded, and the clips a previous run recorded for a take that is no longer
+in the inputs. The `.prep-manifest.json` in the output dir maps each resolved
+source path to the clips prep wrote for it. A source recording, a hand-curated
+clip, and anything else absent from that map is named but left in place.
+Recorded output stems also remain reserved for their source while the next run
+assigns names. A new same-basename recording therefore cannot overwrite another
+source's manifested clips before `--clean` has a chance to apply its ownership
+rules.
+
+That record proves prep made a file, not that the file belongs to what you are
+refreshing. A `--label` that disagrees with the record already in the directory
+is refused outright, before anything is decoded: that is a mistyped `--output`,
+and waiting until `--clean` would be too late, since the run would already have
+overwritten that dataset's clips. Past that, a run must contain at least one
+exact source path from the record before it may delete from the dataset or write
+to it. A shared basename is not ownership. A directory with no record yet counts
+as yours. If a non-clean legacy refresh leaves same-stem files behind, prep does
+not write a manifest because it cannot prove whether those files are old prep
+output or audio curated by hand. The follow-up `--clean` stays on the legacy
+filename rule rather than recording that guess as provenance. A run that
+produces no clips does not claim an unrecorded directory. Prep also spares the
+prior clips of a source it tried and got nothing from (a silent or bad
+re-recording): those are the only copy, and it will not trade them for a run
+that produced nothing. A new source that produces no clips is not added to the
+ownership record, so it cannot authorize a later cleanup until a successful run
+actually contributes audio.
+
+When upgrading an existing pre-manifest `samples/` directory, bootstrap it with
+the complete source list for that label. A partial first run can record only the
+sources it receives; legacy clips under omitted stems then remain deliberately
+unowned and future `--clean` runs will only warn about them. If the complete
+source set is unavailable, move or clear the old output before starting a new
+partial dataset.
+
+To add a new recording to an existing dataset without `--clean`, include at
+least one source already recorded there in the same invocation. This gives prep
+explicit ownership proof while it adds the new source to the manifest. If you
+use `--clean`, include every source whose clips the dataset should keep: omitted
+sources are treated as intentionally dropped and their prep-owned clips are
+removed. Before decoding, prep warns with each omitted source path and the
+number of its clips scheduled for removal. A safe incremental workflow is to add
+recordings without `--clean`, then run a full-input `--clean` pass after
+reviewing the complete source list.
+
+Manifest updates use atomic replacement. Only an absent manifest falls back to
+the narrow same-stem cleanup rule, with a warning that source ownership
+protection is unavailable. That fallback has no provenance: `--clean` can remove
+any `<same-stem>_NNN.wav` file, including a hand-added file with that shape.
+Check the warning list and move any such file before cleaning. An unreadable,
+malformed, or non-v2 manifest fails closed before any decode or write because
+neither its dataset label nor its source ownership can be trusted. After
+reviewing the output directory, remove that manifest and rerun the full source
+set to bootstrap ownership.
 
 ```bash
-.venv/bin/python prep_wake_samples.py --input computah_normal.wav \
-    --output samples/positive --label positive --clean
+.venv/bin/python prep_wake_samples.py --input computah_normal.wav computah_styles.wav \
+    computah_distance.wav --output samples/positive --label positive --clean
 ```
 
 ## 2. Run the sweep

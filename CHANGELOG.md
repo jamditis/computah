@@ -11,12 +11,43 @@ All notable changes to computah are recorded here. The format follows
   just re-recorded (a `<stem>_NNN.wav` clip whose stem this run wrote) from
   `--output`, so re-recording with fewer utterances no longer strands orphaned
   higher-numbered clips that training and eval would still read. Off by default
-  (deletion is opt-in) and deliberately narrow: a source recording, an unrelated
-  take's clips, or a hand-curated clip whose stem this run did not write is named
-  but never auto-deleted. Without `--clean` the run still warns and names the
-  leftover count. `test_prep_wake_samples.py` covers the re-run-with-fewer-clips
-  case with and without `--clean`, and that `--clean` spares files this run did
-  not record.
+  (deletion is opt-in). The source manifest below broadens cleanup to the
+  prep-owned clips of an intentionally omitted take while still sparing source
+  recordings and hand-curated audio. With no manifest, the narrow same-stem rule
+  remains as a warned legacy fallback; any present-but-unusable record fails
+  closed until removed. Without `--clean` the run still warns and names the
+  leftover count. `test_prep_wake_samples.py` covers the
+  re-run-with-fewer-clips case with and without `--clean`, and that source-aware
+  `--clean` spares files prep did not record.
+- `prep_wake_samples.py` output manifest (#84): prep records each resolved source
+  path and the clips it owns in `.prep-manifest.json` in the output dir.
+  `--clean` uses that provenance to remove orphans the stem match cannot reach --
+  clips from an input dropped between runs, and clips under a disambiguated stem
+  (`take-1_000.wav`) that a later run no longer produces. Before a destructive
+  run, prep names every omitted source and how many of its clips `--clean` will
+  remove. A run must share an exact recorded source path before it may write to
+  that dataset, so a different dataset with the same label and generic basename
+  cannot overwrite or clean it.
+  Malformed ownership maps, including clip names that are paths instead of safe
+  output filenames or clips claimed by multiple sources, are refused before any
+  audio is decoded or written. Manifests are read and written explicitly as
+  UTF-8 so non-ASCII recording paths round-trip across supported platforms.
+  Manifested stems remain reserved for their source while new output names are
+  assigned, so a new same-basename recording cannot overwrite the only good
+  clips from a source whose rerun is silent. A source this run attempted but got
+  no clips from retains those prior clips. With a readable source map,
+  hand-curated audio stays outside it and is never deleted. A non-clean legacy
+  refresh that leaves ambiguous same-stem files does not write a manifest; the
+  next `--clean` remains on the documented filename fallback instead of turning
+  a guess into durable provenance. A no-output run cannot claim an unrecorded
+  directory, and a first-time source that writes no clips cannot gain cleanup
+  authority over an existing dataset. Manifest writes use atomic replacement.
+  Only an absent manifest degrades `--clean` to the narrow stem match with an
+  explicit warning; that fallback cannot distinguish a prep leftover from a
+  hand-added `<same-stem>_NNN.wav`. An unreadable, malformed, or non-v2 manifest
+  fails closed until the user removes it to bootstrap ownership explicitly.
+  Existing pre-manifest directories must bootstrap with the complete source set;
+  clips under stems omitted from a partial first run remain deliberately unowned.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,

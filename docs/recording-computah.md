@@ -76,6 +76,18 @@ reports per-file segment counts and a duration summary, and writes 16 kHz mono i
 WAVs ready for verifier training. `samples/` is gitignored — the recordings are
 personal data and stay out of version control.
 
+When adding manifests to an existing `samples/` directory, run the first refresh
+with the complete source list for that label. A partial bootstrap cannot prove
+ownership of legacy clips under omitted stems, so those files remain manual-only
+leftovers. Move or clear the old output first if the complete source set is no
+longer available.
+
+Once an output directory has a source manifest, an incremental run must include at
+least one recording already listed there along with any new recording. Keep added
+microphone takes under the same positive-file glob, or list them beside an existing
+source explicitly. With `--clean`, pass every source whose clips the dataset should
+keep; omitted sources are treated as intentionally dropped.
+
 ## Training
 
 Training runs externally (openWakeWord 0.4.0 ships no train submodule) on a GPU host.

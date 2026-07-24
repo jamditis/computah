@@ -8,8 +8,12 @@ mono and that background audio is kept whole.
 
 from __future__ import annotations
 
+import io
+import json
+import os
 import sys
 import tempfile
+from contextlib import redirect_stderr
 from pathlib import Path
 
 import numpy as np
@@ -456,7 +460,12 @@ def test_refresh_after_adding_collider_leaves_no_orphans(d: Path) -> None:
     out = d / "refresh_out"
     prep.process([a / "computah.wav"], out, "positive", 0.3, 0.2, 3.0)
     prep.process(
-        [a / "computah.wav", b / "computah.wav"], out, "positive", 0.3, 0.2, 3.0
+        [a / "computah.wav", b / "computah.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
     )
 
     files = sorted(p.name for p in out.glob("*.wav"))
@@ -521,6 +530,1058 @@ def test_stem_assignment_ignores_input_order(d: Path) -> None:
     )
 
 
+def _burst_take(path: Path, n: int) -> None:
+    """Write a take of `n` well-separated utterances at `path`."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sf.write(
+        path, make_bursts(n, 0.5, 0.8, prep.TARGET_SR), prep.TARGET_SR, subtype="PCM_16"
+    )
+
+
+def test_manifest_cleans_dropped_input_orphans(d: Path) -> None:
+    """--clean removes the orphans of an input dropped between runs (#84 case 1).
+
+    The stem rule alone cannot reach these: `other` is not in the rerun at all,
+    so no clip this run writes ever makes its old ones stale. The manifest is
+    what distinguishes them from audio a user put in the directory.
+    """
+    src = d / "dropped_src"
+    _burst_take(src / "a" / "take.wav", 3)
+    _burst_take(src / "b" / "other.wav", 2)
+    out = d / "dropped_out"
+    prep.process(
+        [src / "a" / "take.wav", src / "b" / "other.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
+    )
+    check(
+        (out / prep.MANIFEST_NAME).is_file(),
+        "a run records what it wrote in the manifest",
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process(
+            [src / "a" / "take.wav"],
+            out,
+            "positive",
+            0.3,
+            0.2,
+            3.0,
+            clean=True,
+        )
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["take_000.wav", "take_001.wav", "take_002.wav"],
+        f"--clean removes a dropped input's orphans ({present})",
+    )
+    check(
+        prep._source_key(src / "b" / "other.wav") in errors.getvalue()
+        and "will remove" in errors.getvalue()
+        and "2 prep-owned clip" in errors.getvalue(),
+        "a dropped source and its deletion count are warned before cleanup",
+    )
+
+
+def test_manifest_cleans_changed_collider_stem_orphans(d: Path) -> None:
+    """--clean removes a dropped collider without renaming the survivor.
+
+    Two `take.wav` inputs become stems `take` and `take-1`. Rerunning only the
+    second source keeps its manifested `take-1` stem so its refresh cannot take
+    another source's filenames; the manifest removes the dropped first source's
+    bare-stem clips.
+    """
+    src = d / "collider_src"
+    _burst_take(src / "a" / "take.wav", 3)
+    _burst_take(src / "b" / "take.wav", 2)
+    out = d / "collider_out"
+    prep.process(
+        [src / "a" / "take.wav", src / "b" / "take.wav"], out, "positive", 0.3, 0.2, 3.0
+    )
+    first = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        any(n.startswith("take-1_") for n in first),
+        f"the collider run writes a disambiguated stem ({first})",
+    )
+
+    prep.process([src / "b" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["take-1_000.wav", "take-1_001.wav"],
+        f"--clean drops the omitted collider without renaming the survivor ({present})",
+    )
+
+
+def test_manifest_tracks_a_silent_colliding_source_by_path(d: Path) -> None:
+    """A silent rerun keeps its own prior clips even when its stem changes.
+
+    Two same-basename inputs need source-level ownership: when only the second
+    source returns and produces no clips, its old disambiguated clips are the
+    copy to preserve, while the dropped first source's clips can be cleaned.
+    Stem membership alone cannot tell those cases apart.
+    """
+    src = d / "silent_collider_src"
+    first = src / "a" / "take.wav"
+    silent = src / "b" / "take.wav"
+    _burst_take(first, 3)
+    _burst_take(silent, 2)
+    out = d / "silent_collider_out"
+    prep.process([first, silent], out, "positive", 0.3, 0.2, 3.0)
+
+    _label, _clips, sources = prep._read_manifest(out)
+    source_keys = {prep._source_key(first), prep._source_key(silent)}
+    check(
+        sources is not None and set(sources) == source_keys,
+        "the manifest records exact source ownership",
+    )
+    silent_clips = sources[prep._source_key(silent)] if sources is not None else set()
+
+    total = prep.process([silent], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 0 and present == sorted(silent_clips),
+        f"a silent colliding source keeps its clips while the dropped source cleans "
+        f"({present})",
+    )
+
+
+def test_new_collider_cannot_overwrite_a_silent_sources_prior_stem(d: Path) -> None:
+    """A new collider must not take a silent source's manifested filenames.
+
+    Cleanup is too late to protect the only good clips if another input has
+    already refreshed their paths in place. Manifested stems therefore stay
+    reserved for their source while output names are assigned.
+    """
+    src = d / "stem_theft_src"
+    first = src / "a" / "take.wav"
+    silent = src / "b" / "take.wav"
+    newcomer = src / "c" / "take.wav"
+    _burst_take(first, 3)
+    _burst_take(silent, 2)
+    out = d / "stem_theft_out"
+    prep.process([first, silent], out, "positive", 0.3, 0.2, 3.0)
+
+    _label, _clips, sources = prep._read_manifest(out)
+    silent_key = prep._source_key(silent)
+    silent_names = sources[silent_key] if sources is not None else set()
+    silent_bytes = {name: (out / name).read_bytes() for name in silent_names}
+
+    sf.write(
+        silent,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    _burst_take(newcomer, 3)
+    prep.process([silent, newcomer], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    _label, _clips, refreshed_sources = prep._read_manifest(out)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    preserved = all(
+        (out / name).exists() and (out / name).read_bytes() == payload
+        for name, payload in silent_bytes.items()
+    )
+    check(
+        preserved
+        and refreshed_sources is not None
+        and refreshed_sources.get(silent_key) == silent_names,
+        f"a newcomer cannot overwrite a silent source's only good clips ({present})",
+    )
+
+
+def test_manifest_never_authorizes_deleting_curated_audio(d: Path) -> None:
+    """The manifest widens --clean only to files prep recorded writing.
+
+    A hand-added clip whose stem no run ever wrote is exactly the shape the new
+    rule reaches for -- an orphan of an unattempted stem -- so this pins that it
+    is still spared. Being absent from the manifest is the whole guarantee.
+    """
+    src = d / "curated_src"
+    _burst_take(src / "take.wav", 3)
+    out = d / "curated_out"
+    prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(out / "custom_001.wav", 1)
+    _burst_take(out / "my_recording.wav", 1)
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        "custom_001.wav" in errors.getvalue()
+        and "remove" in errors.getvalue()
+        and "by hand" in errors.getvalue()
+        and "rerun with --clean to remove them" not in errors.getvalue(),
+        "a non-clean refresh gives manual-only guidance for curated audio",
+    )
+
+    prep.process([src / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        "custom_001.wav" in present and "my_recording.wav" in present,
+        f"--clean spares audio prep did not create ({present})",
+    )
+
+
+def test_manifest_spares_prior_clips_when_rerun_writes_nothing(d: Path) -> None:
+    """The manifest must not reopen the silent-re-recording data loss.
+
+    Those clips ARE in the manifest, so a rule that removed every manifested
+    clip the run did not rewrite would delete the only copy of a take whose
+    re-recording came back silent. The stem has to be excluded because the run
+    attempted it, regardless of what the manifest says.
+    """
+    src = d / "silent_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "silent_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+
+    _burst_take(take, 3)
+    second = prep.process([take], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        second == 0 and present == ["take_000.wav", "take_001.wav", "take_002.wav"],
+        f"a manifested clip is still spared when its take wrote nothing ({present})",
+    )
+
+
+def test_nonclean_silent_rerun_protects_only_copy_in_warning(d: Path) -> None:
+    """A warning must not invite deletion of a silent source's prior clips."""
+    src = d / "nonclean_silent_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "nonclean_silent_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+
+    sf.write(
+        take,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([take], out, "positive", 0.3, 0.2, 1.0)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["take_000.wav", "take_001.wav", "take_002.wav"]
+        and "check the recording" in errors.getvalue()
+        and "clear the directory" not in errors.getvalue()
+        and "rerun with --clean" not in errors.getvalue(),
+        f"a non-clean silent rerun protects its only-copy clips in guidance ({present})",
+    )
+
+
+def test_legacy_mixed_warning_keeps_cleanable_leftovers_automated(d: Path) -> None:
+    """Legacy leftovers beside a silent take remain --clean-removable."""
+    src = d / "legacy_mixed_src"
+    good = src / "good.wav"
+    silent = src / "silent.wav"
+    _burst_take(good, 2)
+    _burst_take(silent, 2)
+    out = d / "legacy_mixed_out"
+    prep.process([good, silent], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()
+
+    _burst_take(good, 1)
+    sf.write(
+        silent,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([good, silent], out, "positive", 0.3, 0.2, 1.0)
+    check(
+        "check the recording" in errors.getvalue()
+        and "Rerun with --clean to remove prep-owned good_001.wav" in errors.getvalue(),
+        "legacy mixed guidance protects silent clips and automates true leftovers",
+    )
+
+
+def test_manifest_empty_source_remains_refreshable(d: Path) -> None:
+    """An owned source with no clips must not deadlock its output directory."""
+    src = d / "empty_source_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "empty_source_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    for clip in out.glob("*.wav"):
+        clip.unlink()
+
+    empty = prep.process([take], out, "positive", 0.3, 5.0, 10.0, clean=True)
+    refreshed = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        empty == 0 and refreshed == 3 and len(present) == 3,
+        f"an empty owned source accepts its next successful refresh ({present})",
+    )
+
+
+def test_new_zero_output_source_does_not_gain_cleanup_authority(d: Path) -> None:
+    """A source that contributed no clips cannot authorize a later clean."""
+    src = d / "zero_owner_src"
+    good = src / "good.wav"
+    junk = src / "junk.wav"
+    _burst_take(good, 3)
+    out = d / "zero_owner_out"
+    prep.process([good], out, "positive", 0.3, 0.2, 3.0)
+
+    sf.write(
+        junk,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    prep.process([good, junk], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    _label, _clips, sources = prep._read_manifest(out)
+    junk_key = prep._source_key(junk)
+    check(
+        sources is not None and junk_key not in sources,
+        "a first-time zero-output source is not recorded as an owner",
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([junk], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["good_000.wav", "good_001.wav", "good_002.wav"]
+        and "different source recordings" in errors.getvalue(),
+        f"a zero-output newcomer cannot later clean the real dataset ({present})",
+    )
+
+
+def test_manifest_spares_a_silent_take_alongside_a_good_one(d: Path) -> None:
+    """The `attempted` guard, with the manifest rule actually armed.
+
+    When the whole run comes back empty nothing is written, so the manifest rule
+    never arms and the guard is never reached. The case that reaches it is a run
+    where one take records fine and another comes back silent: the good take
+    supplies the stem overlap that arms the rule, and then only `attempted`
+    stands between the silent take's earlier clips -- its only copy -- and
+    unlink(). Delete that clause and this is the test that goes red.
+    """
+    src = d / "mixed_src"
+    good = src / "good.wav"
+    flaky = src / "flaky.wav"
+    _burst_take(good, 2)
+    _burst_take(flaky, 3)
+    out = d / "mixed_out"
+    prep.process([good, flaky], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(out / "custom_001.wav", 1)
+    before = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        len(before) == 6,
+        f"both takes record and curated audio is present ({before})",
+    )
+
+    # Re-record both. `good` is fine; `flaky` comes back as one long unbroken
+    # tone -- a mic left running, say -- which the max-duration cap drops
+    # entirely, so it writes nothing while `good` writes and arms the rule.
+    _burst_take(good, 2)
+    sf.write(
+        flaky,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([good, flaky], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        sorted(n for n in present if n.startswith("flaky_"))
+        == ["flaky_000.wav", "flaky_001.wav", "flaky_002.wav"],
+        f"--clean spares a silent take's only copy while cleaning beside it ({present})",
+    )
+    check(
+        "check the recording" in errors.getvalue()
+        and "custom_001.wav" in errors.getvalue()
+        and "remove" in errors.getvalue()
+        and "by hand" in errors.getvalue(),
+        "mixed lingering guidance protects silent clips and identifies manual cleanup",
+    )
+
+
+def test_manifest_unreadable_is_refused(d: Path) -> None:
+    """A corrupt manifest cannot disable label and source ownership guards."""
+    src = d / "corrupt_src"
+    _burst_take(src / "a" / "take.wav", 3)
+    _burst_take(src / "b" / "other.wav", 2)
+    out = d / "corrupt_out"
+    prep.process(
+        [src / "a" / "take.wav", src / "b" / "other.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
+    )
+    corrupt_payload = "{not json"
+    manifest = out / prep.MANIFEST_NAME
+    manifest.write_text(corrupt_payload)
+
+    _burst_take(src / "a" / "take.wav", 2)
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process(
+            [src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True
+        )
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 0
+        and present
+        == [
+            "other_000.wav",
+            "other_001.wav",
+            "take_000.wav",
+            "take_001.wav",
+            "take_002.wav",
+        ],
+        f"a corrupt manifest refuses the run before any clip changes ({present})",
+    )
+    check(
+        "manifest" in errors.getvalue() and "nothing was written" in errors.getvalue(),
+        "a corrupt manifest explains the fail-closed ownership refusal",
+    )
+    check(
+        manifest.read_text() == corrupt_payload,
+        "a fallback run preserves the unreadable manifest for deliberate recovery",
+    )
+
+
+def test_manifest_wrong_shape_is_refused(d: Path) -> None:
+    """Readable JSON with an invalid manifest shape must fail closed."""
+    src = d / "malformed_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "malformed_manifest_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).write_text("[]\n")
+
+    _burst_take(take, 2)
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        total == 0
+        and "manifest" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "a wrong-shape manifest refuses to disable ownership protection",
+    )
+
+
+def test_manifest_bad_sources_warns_before_ownership_refusal(d: Path) -> None:
+    """A malformed source map must be diagnosed as corrupt, not legacy."""
+    out = d / "bad_sources_manifest_out"
+    out.mkdir()
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": ["take_000.wav"],
+                "sources": "not a source map",
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep._read_manifest(out)
+    check(
+        "manifest" in errors.getvalue()
+        and "sources" in errors.getvalue()
+        and "source ownership" in errors.getvalue(),
+        "a malformed sources map reports why ownership is unavailable",
+    )
+
+
+def test_manifest_rejects_overlapping_source_ownership(d: Path) -> None:
+    """Two sources cannot both authorize deletion of the same clip."""
+    src = d / "overlapping_owners_src"
+    current = src / "b" / "take.wav"
+    _burst_take(current, 2)
+    out = d / "overlapping_owners_out"
+    out.mkdir()
+    _burst_take(out / "take_000.wav", 1)
+    manifest = out / prep.MANIFEST_NAME
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": ["take_000.wav"],
+                "sources": {
+                    str((src / "a" / "take.wav").resolve()): ["take_000.wav"],
+                    prep._source_key(current): ["take_000.wav"],
+                },
+            }
+        )
+    )
+    before = (out / "take_000.wav").read_bytes()
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([current], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        total == 0
+        and (out / "take_000.wav").read_bytes() == before
+        and "ownership" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "overlapping source ownership fails closed before cleanup",
+    )
+
+
+def test_manifest_reader_requests_utf8(d: Path) -> None:
+    """Manifest paths must decode with the UTF-8 encoding used by the writer."""
+    out = d / "utf8_manifest_out"
+    out.mkdir()
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": [],
+                "sources": {"/recordings/José/take.wav": []},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    original_read_text = prep.Path.read_text
+    requested: list[str | None] = []
+
+    def require_utf8(path: Path, *args: object, **kwargs: object) -> str:
+        requested.append(kwargs.get("encoding"))
+        if kwargs.get("encoding") != "utf-8":
+            raise UnicodeDecodeError("ascii", b"\x81", 0, 1, "simulated locale")
+        return original_read_text(path, *args, **kwargs)
+
+    try:
+        prep.Path.read_text = require_utf8
+        label, _clips, sources = prep._read_manifest(out)
+    finally:
+        prep.Path.read_text = original_read_text
+    check(
+        requested == ["utf-8"] and label == "positive" and sources is not None,
+        "the manifest reader explicitly decodes UTF-8",
+    )
+
+
+def test_manifest_source_warning_escapes_control_characters(d: Path) -> None:
+    """An untrusted source key cannot forge a destructive-warning line."""
+    src = d / "escaped_source_warning_src"
+    current = src / "current.wav"
+    _burst_take(current, 2)
+    out = d / "escaped_source_warning_out"
+    out.mkdir()
+    _burst_take(out / "current_000.wav", 1)
+    _burst_take(out / "old_000.wav", 1)
+    hostile_source = "old.wav\nwarning: forged"
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": ["current_000.wav", "old_000.wav"],
+                "sources": {
+                    prep._source_key(current): ["current_000.wav"],
+                    hostile_source: ["old_000.wav"],
+                },
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([current], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        "old.wav\\nwarning: forged" in errors.getvalue()
+        and hostile_source not in errors.getvalue(),
+        "a manifest source key is escaped in the pre-clean warning",
+    )
+
+
+def test_manifest_clip_names_cannot_escape_output_directory(d: Path) -> None:
+    """Manifest ownership must never turn a path into an output stem."""
+    src = d / "hostile_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "hostile_manifest_out"
+    out.mkdir()
+    escaped = d / "escaped_000.wav"
+    hostile_name = "../escaped_000.wav"
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": [hostile_name],
+                "sources": {prep._source_key(take): [hostile_name]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        total == 0
+        and not escaped.exists()
+        and "manifest" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "a manifest path is refused before any write can escape --output",
+    )
+
+
+def test_manifest_clip_names_reject_embedded_nul(d: Path) -> None:
+    """A NUL-bearing manifest stem must fail closed instead of crashing."""
+    src = d / "nul_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "nul_manifest_out"
+    out.mkdir()
+    hostile_name = "a\u0000b_000.wav"
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": [hostile_name],
+                "sources": {prep._source_key(take): [hostile_name]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    try:
+        with redirect_stderr(errors):
+            total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    except ValueError:
+        total = -1
+    check(
+        total == 0
+        and "manifest" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "an embedded NUL is refused before a manifest stem reaches the filesystem",
+    )
+
+
+def test_manifest_rejects_unsupported_version_with_v2_shape(d: Path) -> None:
+    """A version-1 declaration cannot gain v2 cleanup authority by shape."""
+    src = d / "unsupported_version_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "unsupported_version_out"
+    out.mkdir()
+    source_key = prep._source_key(take)
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "label": "positive",
+                "clips": ["take_000.wav"],
+                "sources": {source_key: ["take_000.wav"]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        total == 0
+        and not list(out.glob("*.wav"))
+        and "version" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "an unsupported manifest version is refused despite a v2-shaped map",
+    )
+
+
+def test_manifest_requires_a_string_label(d: Path) -> None:
+    """A v2 source map cannot authorize writes without a trusted label."""
+    src = d / "missing_label_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "missing_label_out"
+    out.mkdir()
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "clips": ["take_000.wav"],
+                "sources": {prep._source_key(take): ["take_000.wav"]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    check(
+        total == 0
+        and not list(out.glob("*.wav"))
+        and "label" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "a v2 manifest without a string label fails closed",
+    )
+
+
+def test_posix_backslash_basename_round_trips_manifest(d: Path) -> None:
+    """A POSIX basename the writer accepts must remain readable next run."""
+    if os.sep != "/":
+        check(True, "the POSIX backslash-basename check is not applicable")
+        return
+
+    src = d / "backslash_basename_src"
+    take = src / "rec\\take.wav"
+    _burst_take(take, 2)
+    out = d / "backslash_basename_out"
+    first = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    second = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    _label, _clips, sources = prep._read_manifest(out)
+    check(
+        first == 2
+        and second == 2
+        and sources is not None
+        and prep._source_key(take) in sources,
+        "a POSIX backslash basename survives its manifest round trip",
+    )
+
+
+def test_manifest_replace_failure_describes_authoritative_old_record(d: Path) -> None:
+    """An atomic replace failure leaves the previous manifest in force."""
+    out = d / "manifest_replace_failure_out"
+    out.mkdir()
+    old_payload = '{"version": 1, "label": "positive", "clips": []}\n'
+    manifest = out / prep.MANIFEST_NAME
+    manifest.write_text(old_payload)
+    original_replace = prep.os.replace
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("simulated replace failure")
+
+    errors = io.StringIO()
+    try:
+        prep.os.replace = fail_replace
+        with redirect_stderr(errors):
+            prep._write_manifest(
+                out,
+                "positive",
+                {"/recordings/take.wav": {"take_000.wav"}},
+            )
+    finally:
+        prep.os.replace = original_replace
+
+    check(
+        manifest.read_text() == old_payload
+        and "previous manifest remains in force" in errors.getvalue()
+        and "unrecorded" in errors.getvalue(),
+        "a replace failure explains that the old record is still authoritative",
+    )
+
+
+def test_failed_unlink_summary_keeps_recorded_ownership(d: Path) -> None:
+    """A failed owned deletion must not be summarized as unrecorded audio."""
+    src = d / "failed_unlink_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "failed_unlink_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(take, 2)
+
+    original_unlink = prep.Path.unlink
+
+    def fail_one_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "take_002.wav":
+            raise OSError("simulated unlink failure")
+        original_unlink(path, *args, **kwargs)
+
+    errors = io.StringIO()
+    try:
+        prep.Path.unlink = fail_one_unlink
+        with redirect_stderr(errors):
+            prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    finally:
+        prep.Path.unlink = original_unlink
+
+    _label, _clips, sources = prep._read_manifest(out)
+    owned = sources.get(prep._source_key(take), set()) if sources is not None else set()
+    check(
+        "take_002.wav" in owned
+        and "selected for cleanup" in errors.getvalue()
+        and "could not be removed" in errors.getvalue()
+        and "no record of creating" not in errors.getvalue(),
+        "a failed unlink stays owned and gets accurate recovery guidance",
+    )
+
+
+def test_manifest_without_source_ownership_is_refused(d: Path) -> None:
+    """A readable legacy record cannot prove which dataset owns the output."""
+    src = d / "legacy_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "legacy_manifest_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+
+    manifest_path = out / prep.MANIFEST_NAME
+    manifest = json.loads(manifest_path.read_text())
+    manifest["version"] = 1
+    manifest.pop("sources")
+    manifest_path.write_text(json.dumps(manifest))
+    before = sorted(p.name for p in out.glob("*.wav"))
+
+    _burst_take(take, 1)
+    total = prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 0 and present == before,
+        f"a manifest without source ownership cannot authorize a write ({present})",
+    )
+
+
+def test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d: Path) -> None:
+    """The first manifest must not strand clips from a pre-manifest run.
+
+    A normal refresh without --clean warns that its higher-numbered leftovers
+    can be removed by rerunning with --clean. When that refresh is also the run
+    that would introduce the manifest, prep withholds the record while ambiguous
+    same-stem files remain. The follow-up clean therefore stays on the legacy
+    filename rule, removes those leftovers, and only then records v2 ownership.
+    """
+    src = d / "bootstrap_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "bootstrap_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()  # Simulate an output from before manifests.
+
+    _burst_take(take, 2)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["take_000.wav", "take_001.wav"],
+        f"the first manifest leaves its warned-about leftovers cleanable ({present})",
+    )
+
+
+def test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(
+    d: Path,
+) -> None:
+    """A non-clean legacy refresh must not claim ambiguous clips as prep-owned.
+
+    Before a manifest exists, a same-stem clip can be a prep leftover or audio
+    curated by hand. Leaving the directory on the documented legacy path keeps
+    that ambiguity visible; recording the clip in v2 would make a later
+    source-aware --clean delete it under a false provenance claim.
+    """
+    src = d / "bootstrap_curated_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "bootstrap_curated_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()
+    _burst_take(out / "take_007.wav", 1)
+
+    _burst_take(take, 2)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        not (out / prep.MANIFEST_NAME).exists() and "take_007.wav" in present,
+        f"ambiguous same-stem audio stays outside a source-aware record ({present})",
+    )
+
+
+def test_clean_without_manifest_warns_before_legacy_cleanup(d: Path) -> None:
+    """A provenance-free clean must announce its filename-only deletion rule."""
+    src = d / "legacy_clean_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "legacy_clean_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()
+    _burst_take(out / "take_007.wav", 1)
+
+    _burst_take(take, 2)
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        "manifest" in errors.getvalue()
+        and "legacy filename cleanup" in errors.getvalue(),
+        "a no-manifest --clean warns before using the provenance-free rule",
+    )
+
+
+def test_manifest_spares_a_different_dataset_on_stray_output(d: Path) -> None:
+    """A mistyped --output must not let the manifest wipe another dataset.
+
+    Provenance says prep created a file, not that the file belongs to the set
+    being refreshed, so the manifest rule only arms on a matching label with an
+    overlapping stem. Without that, every clip in a background dir is one prep
+    wrote and no positives rerun attempts, which would be enough to delete the
+    whole directory.
+    """
+    src = d / "stray_src"
+    _burst_take(src / "noise.wav", 2)
+    bg = d / "stray_background"
+    prep.process([src / "noise.wav"], bg, "background", 0.3, 0.2, 3.0)
+    before = sorted(p.name for p in bg.glob("*.wav"))
+    check(
+        before == ["noise_000.wav"], f"the background dir starts populated ({before})"
+    )
+
+    # The typo: a positives run pointed at the background dir.
+    _burst_take(src / "computah.wav", 3)
+    prep.process([src / "computah.wav"], bg, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in bg.glob("*.wav"))
+    check(
+        "noise_000.wav" in present,
+        f"--clean spares a dataset this run is not refreshing ({present})",
+    )
+
+    # And the guard has to survive the typo being repeated. If the stray run had
+    # relabeled the directory's record as "positive", this second one would find
+    # a matching label plus an overlapping stem and read the background clip as
+    # its own orphan.
+    _burst_take(src / "computah.wav", 2)
+    prep.process([src / "computah.wav"], bg, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in bg.glob("*.wav"))
+    check(
+        "noise_000.wav" in present,
+        f"a repeated stray --output still spares the other dataset ({present})",
+    )
+
+
+def test_same_label_shared_stem_stray_is_refused_before_writing(d: Path) -> None:
+    """One generic stem match is not proof that two datasets are the same.
+
+    A prior dataset and a stray run can both contain ``take.wav`` while coming
+    from different source paths. Treating that basename collision as ownership
+    lets --clean delete every other manifested stem in the prior dataset. The
+    output must remain untouched unless the run can prove it is refreshing the
+    recorded source set.
+    """
+    src = d / "shared_stem_src"
+    original = src / "original"
+    stray = src / "stray"
+    _burst_take(original / "take.wav", 3)
+    _burst_take(original / "other.wav", 2)
+    _burst_take(stray / "take.wav", 1)
+    out = d / "shared_stem_out"
+    prep.process(
+        [original / "take.wav", original / "other.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
+    )
+    before = sorted(p.name for p in out.glob("*.wav"))
+
+    total = prep.process(
+        [stray / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True
+    )
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 0 and present == before,
+        f"a same-label basename collision cannot claim another dataset ({present})",
+    )
+
+
+def test_clean_disarmed_entirely_on_a_label_mismatch(d: Path) -> None:
+    """A label mismatch has to disarm the stem match too, not just the manifest.
+
+    The stems collide in practice: `take.wav` is as plausible a negatives
+    filename as a positives one. Deciding this at --clean time is too late --
+    by then the run has already overwritten take_000.wav with the wrong
+    dataset's audio -- so the check runs before any decode.
+    """
+    src = d / "mismatch_src"
+    _burst_take(src / "take.wav", 3)
+    neg = d / "mismatch_neg"
+    prep.process([src / "take.wav"], neg, "negative", 0.3, 0.2, 3.0)
+    before = sorted(p.name for p in neg.glob("*.wav"))
+    check(len(before) == 3, f"the negatives dir starts with three clips ({before})")
+
+    _burst_take(src / "take.wav", 1)
+    total = prep.process([src / "take.wav"], neg, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in neg.glob("*.wav"))
+    check(
+        total == 0 and present == before,
+        f"a mismatched --output is refused before anything is written ({present})",
+    )
+
+
+def test_clean_spares_a_hand_added_clip_under_a_recorded_stem(d: Path) -> None:
+    """The stem match consults the record once there is one.
+
+    A clip a user dropped in beside a manifested dataset shares the stem prep
+    writes, so shape alone cannot tell it from an orphan. Deleting it would break
+    the guarantee this whole change rests on: --clean removes only what prep
+    made.
+    """
+    src = d / "handadd_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "handadd_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(out / "take_007.wav", 1)  # kept by hand, never prep's
+
+    _burst_take(take, 2)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        "take_007.wav" in present and "take_002.wav" not in present,
+        f"--clean takes its own orphan and leaves the hand-added clip ({present})",
+    )
+
+
+def test_same_label_stray_is_refused_before_writing(d: Path) -> None:
+    """A no-overlap run must not pollute another same-label dataset.
+
+    The manifest already proves the output belongs to a recorded source set.
+    With no source in common, the likely wrong --output is known before any
+    audio is decoded, so warning after clips have landed is too late.
+    """
+    src = d / "seed_src"
+    _burst_take(src / "noise.wav", 2)
+    _burst_take(src / "computah.wav", 3)
+    out = d / "seed_out"
+    prep.process([src / "noise.wav"], out, "positive", 0.3, 0.2, 3.0)
+
+    before = sorted(p.name for p in out.glob("*.wav"))
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        totals = [
+            prep.process(
+                [src / "computah.wav"],
+                out,
+                "positive",
+                0.3,
+                0.2,
+                3.0,
+                clean=True,
+            )
+            for _ in range(2)
+        ]
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        totals == [0, 0] and present == before,
+        f"a repeated same-label stray writes nothing ({present})",
+    )
+    check(
+        repr(prep._source_key(src / "noise.wav")) in errors.getvalue(),
+        "a no-overlap refusal names an escaped recorded source",
+    )
+
+
 def main() -> int:
     test_segment_count()
     with tempfile.TemporaryDirectory(prefix="prep-wake-") as tmp:
@@ -541,6 +1602,39 @@ def main() -> int:
         test_in_run_collision_raises(d)
         test_refresh_after_adding_collider_leaves_no_orphans(d)
         test_stem_assignment_ignores_input_order(d)
+        test_manifest_cleans_dropped_input_orphans(d)
+        test_manifest_cleans_changed_collider_stem_orphans(d)
+        test_manifest_tracks_a_silent_colliding_source_by_path(d)
+        test_new_collider_cannot_overwrite_a_silent_sources_prior_stem(d)
+        test_manifest_never_authorizes_deleting_curated_audio(d)
+        test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
+        test_nonclean_silent_rerun_protects_only_copy_in_warning(d)
+        test_legacy_mixed_warning_keeps_cleanable_leftovers_automated(d)
+        test_manifest_empty_source_remains_refreshable(d)
+        test_new_zero_output_source_does_not_gain_cleanup_authority(d)
+        test_manifest_spares_a_silent_take_alongside_a_good_one(d)
+        test_manifest_unreadable_is_refused(d)
+        test_manifest_wrong_shape_is_refused(d)
+        test_manifest_bad_sources_warns_before_ownership_refusal(d)
+        test_manifest_rejects_overlapping_source_ownership(d)
+        test_manifest_reader_requests_utf8(d)
+        test_manifest_source_warning_escapes_control_characters(d)
+        test_manifest_clip_names_cannot_escape_output_directory(d)
+        test_manifest_clip_names_reject_embedded_nul(d)
+        test_manifest_rejects_unsupported_version_with_v2_shape(d)
+        test_manifest_requires_a_string_label(d)
+        test_posix_backslash_basename_round_trips_manifest(d)
+        test_manifest_replace_failure_describes_authoritative_old_record(d)
+        test_failed_unlink_summary_keeps_recorded_ownership(d)
+        test_manifest_without_source_ownership_is_refused(d)
+        test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
+        test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(d)
+        test_clean_without_manifest_warns_before_legacy_cleanup(d)
+        test_manifest_spares_a_different_dataset_on_stray_output(d)
+        test_same_label_shared_stem_stray_is_refused_before_writing(d)
+        test_clean_disarmed_entirely_on_a_label_mismatch(d)
+        test_clean_spares_a_hand_added_clip_under_a_recorded_stem(d)
+        test_same_label_stray_is_refused_before_writing(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1
