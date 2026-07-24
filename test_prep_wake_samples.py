@@ -809,7 +809,9 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
         0.2,
         3.0,
     )
-    (out / prep.MANIFEST_NAME).write_text("{not json")
+    corrupt_payload = "{not json"
+    manifest = out / prep.MANIFEST_NAME
+    manifest.write_text(corrupt_payload)
 
     _burst_take(src / "a" / "take.wav", 2)
     errors = io.StringIO()
@@ -826,6 +828,10 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
         "manifest" in errors.getvalue()
         and "legacy filename cleanup" in errors.getvalue(),
         "a corrupt manifest warns that ownership protection is unavailable",
+    )
+    check(
+        manifest.read_text() == corrupt_payload,
+        "a fallback run preserves the unreadable manifest for deliberate recovery",
     )
 
 
@@ -904,6 +910,41 @@ def test_manifest_replace_failure_describes_authoritative_old_record(d: Path) ->
         and "previous manifest remains in force" in errors.getvalue()
         and "unrecorded" in errors.getvalue(),
         "a replace failure explains that the old record is still authoritative",
+    )
+
+
+def test_failed_unlink_summary_keeps_recorded_ownership(d: Path) -> None:
+    """A failed owned deletion must not be summarized as unrecorded audio."""
+    src = d / "failed_unlink_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "failed_unlink_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(take, 2)
+
+    original_unlink = prep.Path.unlink
+
+    def fail_one_unlink(path: Path, *args: object, **kwargs: object) -> None:
+        if path.name == "take_002.wav":
+            raise OSError("simulated unlink failure")
+        original_unlink(path, *args, **kwargs)
+
+    errors = io.StringIO()
+    try:
+        prep.Path.unlink = fail_one_unlink
+        with redirect_stderr(errors):
+            prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    finally:
+        prep.Path.unlink = original_unlink
+
+    _label, _clips, sources = prep._read_manifest(out)
+    owned = sources.get(prep._source_key(take), set()) if sources is not None else set()
+    check(
+        "take_002.wav" in owned
+        and "selected for cleanup" in errors.getvalue()
+        and "could not be removed" in errors.getvalue()
+        and "no record of creating" not in errors.getvalue(),
+        "a failed unlink stays owned and gets accurate recovery guidance",
     )
 
 
@@ -1186,6 +1227,7 @@ def main() -> int:
         test_manifest_wrong_shape_warns_before_legacy_fallback(d)
         test_manifest_bad_sources_warns_before_ownership_refusal(d)
         test_manifest_replace_failure_describes_authoritative_old_record(d)
+        test_failed_unlink_summary_keeps_recorded_ownership(d)
         test_manifest_without_source_ownership_is_refused(d)
         test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
         test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(d)
