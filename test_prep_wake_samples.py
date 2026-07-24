@@ -705,6 +705,32 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
     )
 
 
+def test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d: Path) -> None:
+    """The first manifest must not strand clips from a pre-manifest run.
+
+    A normal refresh without --clean warns that its higher-numbered leftovers
+    can be removed by rerunning with --clean. When that refresh is also the run
+    that introduces the manifest, the record has to retain provenance for those
+    leftovers; otherwise the promised follow-up clean can no longer distinguish
+    them from hand-added audio.
+    """
+    src = d / "bootstrap_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "bootstrap_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()  # Simulate an output from before manifests.
+
+    _burst_take(take, 2)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["take_000.wav", "take_001.wav"],
+        f"the first manifest leaves its warned-about leftovers cleanable ({present})",
+    )
+
+
 def test_manifest_spares_a_different_dataset_on_stray_output(d: Path) -> None:
     """A mistyped --output must not let the manifest wipe another dataset.
 
@@ -742,6 +768,42 @@ def test_manifest_spares_a_different_dataset_on_stray_output(d: Path) -> None:
     check(
         "noise_000.wav" in present,
         f"a repeated stray --output still spares the other dataset ({present})",
+    )
+
+
+def test_same_label_shared_stem_stray_is_refused_before_writing(d: Path) -> None:
+    """One generic stem match is not proof that two datasets are the same.
+
+    A prior dataset and a stray run can both contain ``take.wav`` while coming
+    from different source paths. Treating that basename collision as ownership
+    lets --clean delete every other manifested stem in the prior dataset. The
+    output must remain untouched unless the run can prove it is refreshing the
+    recorded source set.
+    """
+    src = d / "shared_stem_src"
+    original = src / "original"
+    stray = src / "stray"
+    _burst_take(original / "take.wav", 3)
+    _burst_take(original / "other.wav", 2)
+    _burst_take(stray / "take.wav", 1)
+    out = d / "shared_stem_out"
+    prep.process(
+        [original / "take.wav", original / "other.wav"],
+        out,
+        "positive",
+        0.3,
+        0.2,
+        3.0,
+    )
+    before = sorted(p.name for p in out.glob("*.wav"))
+
+    total = prep.process(
+        [stray / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True
+    )
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        total == 0 and present == before,
+        f"a same-label basename collision cannot claim another dataset ({present})",
     )
 
 
@@ -793,13 +855,12 @@ def test_clean_spares_a_hand_added_clip_under_a_recorded_stem(d: Path) -> None:
     )
 
 
-def test_a_same_label_stray_does_not_seed_the_manifest(d: Path) -> None:
-    """A stray run must not fold its stems into another dataset's record.
+def test_same_label_stray_is_refused_before_writing(d: Path) -> None:
+    """A no-overlap run must not pollute another same-label dataset.
 
-    Same label, no take in common: the run is disarmed, but if it still wrote
-    itself into the record then repeating the typo would find the overlap it
-    needs and start deleting the original dataset as dropped inputs. The write
-    is gated on the same question as the removals.
+    The manifest already proves the output belongs to a recorded source set.
+    With no source in common, the likely wrong --output is known before any
+    audio is decoded, so warning after clips have landed is too late.
     """
     src = d / "seed_src"
     _burst_take(src / "noise.wav", 2)
@@ -807,13 +868,15 @@ def test_a_same_label_stray_does_not_seed_the_manifest(d: Path) -> None:
     out = d / "seed_out"
     prep.process([src / "noise.wav"], out, "positive", 0.3, 0.2, 3.0)
 
-    # The typo, twice.
-    for _ in range(2):
+    before = sorted(p.name for p in out.glob("*.wav"))
+    totals = [
         prep.process([src / "computah.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
+        for _ in range(2)
+    ]
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
-        "noise_000.wav" in present and "noise_001.wav" in present,
-        f"a repeated same-label stray never gains permission to delete ({present})",
+        totals == [0, 0] and present == before,
+        f"a repeated same-label stray writes nothing ({present})",
     )
 
 
@@ -843,10 +906,12 @@ def main() -> int:
         test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
         test_manifest_unreadable_falls_back_to_stem_rule(d)
+        test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
         test_manifest_spares_a_different_dataset_on_stray_output(d)
+        test_same_label_shared_stem_stray_is_refused_before_writing(d)
         test_clean_disarmed_entirely_on_a_label_mismatch(d)
         test_clean_spares_a_hand_added_clip_under_a_recorded_stem(d)
-        test_a_same_label_stray_does_not_seed_the_manifest(d)
+        test_same_label_stray_is_refused_before_writing(d)
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1
