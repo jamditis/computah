@@ -755,8 +755,12 @@ def test_manifest_spares_a_silent_take_alongside_a_good_one(d: Path) -> None:
     _burst_take(flaky, 3)
     out = d / "mixed_out"
     prep.process([good, flaky], out, "positive", 0.3, 0.2, 3.0)
+    _burst_take(out / "custom_001.wav", 1)
     before = sorted(p.name for p in out.glob("*.wav"))
-    check(len(before) == 5, f"both takes record on the first run ({before})")
+    check(
+        len(before) == 6,
+        f"both takes record and curated audio is present ({before})",
+    )
 
     # Re-record both. `good` is fine; `flaky` comes back as one long unbroken
     # tone -- a mic left running, say -- which the max-duration cap drops
@@ -768,12 +772,21 @@ def test_manifest_spares_a_silent_take_alongside_a_good_one(d: Path) -> None:
         prep.TARGET_SR,
         subtype="PCM_16",
     )
-    prep.process([good, flaky], out, "positive", 0.3, 0.2, 1.0, clean=True)
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([good, flaky], out, "positive", 0.3, 0.2, 1.0, clean=True)
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
         sorted(n for n in present if n.startswith("flaky_"))
         == ["flaky_000.wav", "flaky_001.wav", "flaky_002.wav"],
         f"--clean spares a silent take's only copy while cleaning beside it ({present})",
+    )
+    check(
+        "check the recording" in errors.getvalue()
+        and "custom_001.wav" in errors.getvalue()
+        and "remove" in errors.getvalue()
+        and "by hand" in errors.getvalue(),
+        "mixed lingering guidance protects silent clips and identifies manual cleanup",
     )
 
 
