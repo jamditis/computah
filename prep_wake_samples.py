@@ -42,9 +42,9 @@ from scipy.signal import resample_poly
 TARGET_SR = 16000
 AUDIO_EXTS = {".wav", ".flac", ".ogg", ".m4a", ".mp3", ".aac", ".mp4", ".wma"}
 # prep writes each clip as "<stem>_NNN.wav" (see _write_unique; NNN is >=3 digits,
-# since :03d is a minimum width). --clean pairs this shape with the current run's
-# stems so it only removes a re-recorded take's own leftover clips, never a source
-# take, an unrelated take's clips, or hand-added audio a user left in the output dir.
+# since :03d is a minimum width). Without source ownership, --clean uses this
+# shape plus the current run's stems as its narrow legacy fallback. With a v2
+# manifest, exact recorded clip names authorize cleanup instead.
 _CLIP_NAME = re.compile(r"(.+)_\d{3,}\.wav$")
 
 
@@ -779,12 +779,30 @@ def process(
             )
             empty_takes = [p for p in lingering if p.name in silent_names]
         if empty_takes and clean:
+            failed_removals = [p for p in lingering if p in removable]
+            unrecorded = [
+                p
+                for p in lingering
+                if p not in empty_takes and p not in failed_removals
+            ]
             fix = (
-                "this run re-recorded "
-                f"{_summarize(empty_takes)} and got no clips from it, so --clean "
-                "kept the earlier ones rather than leave you with none; check the "
-                "recording before removing anything"
+                f"{_summarize(empty_takes)} are prior clips for a source this run "
+                "re-recorded but got no clips from, so --clean kept them rather "
+                "than leave you with none; check the recording before removing "
+                "anything"
             )
+            if unrecorded:
+                fix += (
+                    f". {_summarize(unrecorded)} have no prep ownership record, "
+                    "so --clean leaves them; remove them by hand if they are not "
+                    "wanted"
+                )
+            if failed_removals:
+                fix += (
+                    f". {_summarize(failed_removals)} were selected for cleanup "
+                    "but could not be removed; address the earlier errors and rerun "
+                    "--clean"
+                )
         elif clean:
             fix = (
                 "prep has no record of creating these, so --clean leaves them; "

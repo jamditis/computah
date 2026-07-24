@@ -80,8 +80,8 @@ remove that manifest once to bootstrap the source map from the next successful
 run.
 
 ```bash
-.venv/bin/python prep_wake_samples.py --input computah_normal.wav \
-    --output samples/positive --label positive --clean
+.venv/bin/python prep_wake_samples.py --input computah_normal.wav computah_styles.wav \
+    computah_distance.wav --output samples/positive --label positive --clean
 ```
 
 ## 2. Run the sweep
