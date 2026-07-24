@@ -719,6 +719,33 @@ def test_manifest_spares_prior_clips_when_rerun_writes_nothing(d: Path) -> None:
     )
 
 
+def test_nonclean_silent_rerun_protects_only_copy_in_warning(d: Path) -> None:
+    """A warning must not invite deletion of a silent source's prior clips."""
+    src = d / "nonclean_silent_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "nonclean_silent_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+
+    sf.write(
+        take,
+        np.ones(int(prep.TARGET_SR * 4.0), dtype=np.float32) * 0.5,
+        prep.TARGET_SR,
+        subtype="PCM_16",
+    )
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([take], out, "positive", 0.3, 0.2, 1.0)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        present == ["take_000.wav", "take_001.wav", "take_002.wav"]
+        and "check the recording" in errors.getvalue()
+        and "clear the directory" not in errors.getvalue()
+        and "rerun with --clean" not in errors.getvalue(),
+        f"a non-clean silent rerun protects its only-copy clips in guidance ({present})",
+    )
+
+
 def test_manifest_empty_source_remains_refreshable(d: Path) -> None:
     """An owned source with no clips must not deadlock its output directory."""
     src = d / "empty_source_src"
@@ -1221,6 +1248,7 @@ def main() -> int:
         test_new_collider_cannot_overwrite_a_silent_sources_prior_stem(d)
         test_manifest_never_authorizes_deleting_curated_audio(d)
         test_manifest_spares_prior_clips_when_rerun_writes_nothing(d)
+        test_nonclean_silent_rerun_protects_only_copy_in_warning(d)
         test_manifest_empty_source_remains_refreshable(d)
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
         test_manifest_unreadable_falls_back_to_stem_rule(d)
