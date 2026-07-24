@@ -346,21 +346,27 @@ def _read_manifest(
     a new record explicitly.
     """
     manifest_path = out_dir / MANIFEST_NAME
+
+    def warn_legacy_fallback(reason: object) -> None:
+        print(
+            f"warning: could not use {manifest_path} ({reason}); source ownership "
+            "protection is unavailable, so this run will use legacy filename cleanup",
+            file=sys.stderr,
+        )
+
     try:
         raw = json.loads(manifest_path.read_text())
     except FileNotFoundError:
         return None, set(), None
     except (OSError, ValueError) as e:
-        print(
-            f"warning: could not read {manifest_path} ({e}); source ownership "
-            "protection is unavailable, so this run will use legacy filename cleanup",
-            file=sys.stderr,
-        )
+        warn_legacy_fallback(e)
         return None, set(), None
     if not isinstance(raw, dict):
+        warn_legacy_fallback("expected a JSON object")
         return None, set(), None
     clips = raw.get("clips")
     if not isinstance(clips, list):
+        warn_legacy_fallback("expected a clips list")
         return None, set(), None
     label = raw.get("label")
     clip_names = {c for c in clips if isinstance(c, str)}
@@ -444,6 +450,77 @@ def _clip_stem(name: str) -> str | None:
     return m.group(1) if m else None
 
 
+def _manifest_aware_stems(
+    files: list[Path],
+    source_keys: list[str],
+    prior_sources: dict[str, set[str]] | None,
+) -> list[str]:
+    """Assign output stems without taking names owned by another source.
+
+    The first run uses the path-stable basename rule. Once a source manifest
+    exists, a returning source keeps one of its recorded stems when possible,
+    and every prior stem stays reserved from other sources. That reservation is
+    needed before any clip is written: cleanup cannot save a silent source's
+    only good clips after a newcomer has already overwritten their filenames.
+    """
+    generated = _unique_stems(files)
+    if prior_sources is None:
+        return generated
+
+    source_stems: dict[str, set[str]] = {}
+    owners_by_stem: dict[str, set[str]] = {}
+    for source, names in prior_sources.items():
+        stems = {stem for name in names if (stem := _clip_stem(name)) is not None}
+        source_stems[source] = stems
+        for stem in stems:
+            owners_by_stem.setdefault(stem, set()).add(source)
+
+    assigned: dict[int, str] = {}
+    used: set[str] = set()
+
+    # Anchor returning sources to a stem they already own. Prefer the stem the
+    # current basename rule would choose, then a sole prior stem. A malformed
+    # record in which two sources share a stem is never used as an anchor.
+    for i in sorted(range(len(files)), key=lambda j: str(files[j].resolve())):
+        source = source_keys[i]
+        owned = source_stems.get(source, set())
+        preferred: str | None = None
+        if generated[i] in owned and owners_by_stem.get(generated[i]) == {source}:
+            preferred = generated[i]
+        elif len(owned) == 1:
+            candidate = next(iter(owned))
+            if owners_by_stem.get(candidate) == {source}:
+                preferred = candidate
+        if preferred is not None and preferred not in used:
+            assigned[i] = preferred
+            used.add(preferred)
+
+    # Keep the ordinary mapping for inputs whose candidate has no recorded
+    # owner. Anchors run first so a newcomer cannot claim a returning source's
+    # prior stem merely because it appeared earlier in the invocation.
+    for i in sorted(range(len(files)), key=lambda j: str(files[j].resolve())):
+        if i in assigned:
+            continue
+        candidate = generated[i]
+        if candidate not in owners_by_stem and candidate not in used:
+            assigned[i] = candidate
+            used.add(candidate)
+
+    # Any remaining candidate collides with recorded ownership. Give it a fresh
+    # deterministic suffix, avoiding both prior stems and raw basenames that a
+    # different pending input may need.
+    pending = [i for i in range(len(files)) if i not in assigned]
+    unavailable = set(owners_by_stem) | used | {files[i].stem for i in pending}
+    for i in sorted(pending, key=lambda j: (files[j].stem, str(files[j].resolve()))):
+        n = 1
+        while f"{files[i].stem}-{n}" in unavailable:
+            n += 1
+        assigned[i] = f"{files[i].stem}-{n}"
+        unavailable.add(assigned[i])
+
+    return [assigned[i] for i in range(len(files))]
+
+
 def process(
     inputs: list[Path],
     out_dir: Path,
@@ -522,7 +599,7 @@ def process(
         )
         return 0
 
-    stems = _unique_stems(files)
+    stems = _manifest_aware_stems(files, source_keys, prior_sources)
     written: set[Path] = set()
     written_by_source: dict[str, set[Path]] = {source: set() for source in source_keys}
     seen_inodes: set[int] = set()

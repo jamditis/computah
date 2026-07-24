@@ -24,18 +24,19 @@ All notable changes to computah are recorded here. The format follows
   (`take-1_000.wav`) that a later run no longer produces. A run must share an
   exact recorded source path before it may write to that dataset, so a different
   dataset with the same label and generic basename cannot overwrite or clean it.
-  A source this run attempted but got no clips from retains its prior clips as the
-  only good copy, including when same-basename inputs changed its output stem.
-  With a readable source map, hand-curated audio stays outside it and is never
-  deleted. A non-clean legacy refresh that leaves ambiguous same-stem files does
-  not write a manifest; the next `--clean` remains on the documented filename
-  fallback instead of turning a guess into durable provenance. A no-output run
-  cannot claim an unrecorded directory. Manifest writes use atomic replacement,
-  and an absent or unreadable manifest degrades `--clean` to the narrow stem
-  match with an explicit warning. That fallback cannot distinguish a prep
-  leftover from a hand-added `<same-stem>_NNN.wav`. A readable older manifest
-  without source ownership is refused until the user removes it to bootstrap
-  ownership explicitly.
+  Manifested stems remain reserved for their source while new output names are
+  assigned, so a new same-basename recording cannot overwrite the only good
+  clips from a source whose rerun is silent. A source this run attempted but got
+  no clips from retains those prior clips. With a readable source map,
+  hand-curated audio stays outside it and is never deleted. A non-clean legacy
+  refresh that leaves ambiguous same-stem files does not write a manifest; the
+  next `--clean` remains on the documented filename fallback instead of turning
+  a guess into durable provenance. A no-output run cannot claim an unrecorded
+  directory. Manifest writes use atomic replacement, and an absent or unreadable
+  manifest degrades `--clean` to the narrow stem match with an explicit warning.
+  That fallback cannot distinguish a prep leftover from a hand-added
+  `<same-stem>_NNN.wav`. A readable older manifest without source ownership is
+  refused until the user removes it to bootstrap ownership explicitly.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,

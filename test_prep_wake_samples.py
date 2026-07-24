@@ -570,11 +570,12 @@ def test_manifest_cleans_dropped_input_orphans(d: Path) -> None:
 
 
 def test_manifest_cleans_changed_collider_stem_orphans(d: Path) -> None:
-    """--clean removes orphans whose disambiguated stem vanished (#84 case 2).
+    """--clean removes a dropped collider without renaming the survivor.
 
-    Two `take.wav` inputs become stems `take` and `take-1`. Rerun with only one
-    and `take-1` is not a stem any more, so its clips are orphaned under a name
-    nothing will overwrite.
+    Two `take.wav` inputs become stems `take` and `take-1`. Rerunning only the
+    second source keeps its manifested `take-1` stem so its refresh cannot take
+    another source's filenames; the manifest removes the dropped first source's
+    bare-stem clips.
     """
     src = d / "collider_src"
     _burst_take(src / "a" / "take.wav", 3)
@@ -592,8 +593,8 @@ def test_manifest_cleans_changed_collider_stem_orphans(d: Path) -> None:
     prep.process([src / "b" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
-        not any(n.startswith("take-1_") for n in present),
-        f"--clean removes orphans of a stem the rerun no longer produces ({present})",
+        present == ["take-1_000.wav", "take-1_001.wav"],
+        f"--clean drops the omitted collider without renaming the survivor ({present})",
     )
 
 

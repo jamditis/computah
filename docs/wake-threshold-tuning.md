@@ -41,6 +41,10 @@ re-recorded, and the clips a previous run recorded for a take that is no longer
 in the inputs. The `.prep-manifest.json` in the output dir maps each resolved
 source path to the clips prep wrote for it. A source recording, a hand-curated
 clip, and anything else absent from that map is named but left in place.
+Recorded output stems also remain reserved for their source while the next run
+assigns names. A new same-basename recording therefore cannot overwrite another
+source's manifested clips before `--clean` has a chance to apply its ownership
+rules.
 
 That record proves prep made a file, not that the file belongs to what you are
 refreshing. A `--label` that disagrees with the record already in the directory
