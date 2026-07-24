@@ -1139,6 +1139,39 @@ def test_manifest_clip_names_cannot_escape_output_directory(d: Path) -> None:
     )
 
 
+def test_manifest_clip_names_reject_embedded_nul(d: Path) -> None:
+    """A NUL-bearing manifest stem must fail closed instead of crashing."""
+    src = d / "nul_manifest_src"
+    take = src / "take.wav"
+    _burst_take(take, 2)
+    out = d / "nul_manifest_out"
+    out.mkdir()
+    hostile_name = "a\u0000b_000.wav"
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": [hostile_name],
+                "sources": {prep._source_key(take): [hostile_name]},
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    try:
+        with redirect_stderr(errors):
+            total = prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    except ValueError:
+        total = -1
+    check(
+        total == 0
+        and "manifest" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "an embedded NUL is refused before a manifest stem reaches the filesystem",
+    )
+
+
 def test_manifest_rejects_unsupported_version_with_v2_shape(d: Path) -> None:
     """A version-1 declaration cannot gain v2 cleanup authority by shape."""
     src = d / "unsupported_version_src"
@@ -1524,14 +1557,28 @@ def test_same_label_stray_is_refused_before_writing(d: Path) -> None:
     prep.process([src / "noise.wav"], out, "positive", 0.3, 0.2, 3.0)
 
     before = sorted(p.name for p in out.glob("*.wav"))
-    totals = [
-        prep.process([src / "computah.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True)
-        for _ in range(2)
-    ]
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        totals = [
+            prep.process(
+                [src / "computah.wav"],
+                out,
+                "positive",
+                0.3,
+                0.2,
+                3.0,
+                clean=True,
+            )
+            for _ in range(2)
+        ]
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
         totals == [0, 0] and present == before,
         f"a repeated same-label stray writes nothing ({present})",
+    )
+    check(
+        repr(prep._source_key(src / "noise.wav")) in errors.getvalue(),
+        "a no-overlap refusal names an escaped recorded source",
     )
 
 
@@ -1573,6 +1620,7 @@ def main() -> int:
         test_manifest_reader_requests_utf8(d)
         test_manifest_source_warning_escapes_control_characters(d)
         test_manifest_clip_names_cannot_escape_output_directory(d)
+        test_manifest_clip_names_reject_embedded_nul(d)
         test_manifest_rejects_unsupported_version_with_v2_shape(d)
         test_manifest_requires_a_string_label(d)
         test_posix_backslash_basename_round_trips_manifest(d)
