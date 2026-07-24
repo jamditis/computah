@@ -836,6 +836,64 @@ def test_manifest_wrong_shape_warns_before_legacy_fallback(d: Path) -> None:
     )
 
 
+def test_manifest_bad_sources_warns_before_ownership_refusal(d: Path) -> None:
+    """A malformed source map must be diagnosed as corrupt, not legacy."""
+    out = d / "bad_sources_manifest_out"
+    out.mkdir()
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": ["take_000.wav"],
+                "sources": "not a source map",
+            }
+        )
+    )
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep._read_manifest(out)
+    check(
+        "manifest" in errors.getvalue()
+        and "sources" in errors.getvalue()
+        and "source ownership" in errors.getvalue(),
+        "a malformed sources map reports why ownership is unavailable",
+    )
+
+
+def test_manifest_replace_failure_describes_authoritative_old_record(d: Path) -> None:
+    """An atomic replace failure leaves the previous manifest in force."""
+    out = d / "manifest_replace_failure_out"
+    out.mkdir()
+    old_payload = '{"version": 1, "label": "positive", "clips": []}\n'
+    manifest = out / prep.MANIFEST_NAME
+    manifest.write_text(old_payload)
+    original_replace = prep.os.replace
+
+    def fail_replace(_source: Path, _target: Path) -> None:
+        raise OSError("simulated replace failure")
+
+    errors = io.StringIO()
+    try:
+        prep.os.replace = fail_replace
+        with redirect_stderr(errors):
+            prep._write_manifest(
+                out,
+                "positive",
+                {"/recordings/take.wav": {"take_000.wav"}},
+            )
+    finally:
+        prep.os.replace = original_replace
+
+    check(
+        manifest.read_text() == old_payload
+        and "previous manifest remains in force" in errors.getvalue()
+        and "unrecorded" in errors.getvalue(),
+        "a replace failure explains that the old record is still authoritative",
+    )
+
+
 def test_manifest_without_source_ownership_is_refused(d: Path) -> None:
     """A readable legacy record cannot prove which dataset owns the output."""
     src = d / "legacy_manifest_src"
@@ -1092,6 +1150,8 @@ def main() -> int:
         test_manifest_spares_a_silent_take_alongside_a_good_one(d)
         test_manifest_unreadable_falls_back_to_stem_rule(d)
         test_manifest_wrong_shape_warns_before_legacy_fallback(d)
+        test_manifest_bad_sources_warns_before_ownership_refusal(d)
+        test_manifest_replace_failure_describes_authoritative_old_record(d)
         test_manifest_without_source_ownership_is_refused(d)
         test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
         test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(d)
