@@ -579,7 +579,7 @@ def test_manifest_cleans_dropped_input_orphans(d: Path) -> None:
         f"--clean removes a dropped input's orphans ({present})",
     )
     check(
-        str(src / "b" / "other.wav") in errors.getvalue()
+        prep._source_key(src / "b" / "other.wav") in errors.getvalue()
         and "will remove" in errors.getvalue()
         and "2 prep-owned clip" in errors.getvalue(),
         "a dropped source and its deletion count are warned before cleanup",
@@ -998,6 +998,78 @@ def test_manifest_bad_sources_warns_before_ownership_refusal(d: Path) -> None:
         and "sources" in errors.getvalue()
         and "source ownership" in errors.getvalue(),
         "a malformed sources map reports why ownership is unavailable",
+    )
+
+
+def test_manifest_rejects_overlapping_source_ownership(d: Path) -> None:
+    """Two sources cannot both authorize deletion of the same clip."""
+    src = d / "overlapping_owners_src"
+    current = src / "b" / "take.wav"
+    _burst_take(current, 2)
+    out = d / "overlapping_owners_out"
+    out.mkdir()
+    _burst_take(out / "take_000.wav", 1)
+    manifest = out / prep.MANIFEST_NAME
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": ["take_000.wav"],
+                "sources": {
+                    str((src / "a" / "take.wav").resolve()): ["take_000.wav"],
+                    prep._source_key(current): ["take_000.wav"],
+                },
+            }
+        )
+    )
+    before = (out / "take_000.wav").read_bytes()
+
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process([current], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        total == 0
+        and (out / "take_000.wav").read_bytes() == before
+        and "ownership" in errors.getvalue()
+        and "nothing was written" in errors.getvalue(),
+        "overlapping source ownership fails closed before cleanup",
+    )
+
+
+def test_manifest_reader_requests_utf8(d: Path) -> None:
+    """Manifest paths must decode with the UTF-8 encoding used by the writer."""
+    out = d / "utf8_manifest_out"
+    out.mkdir()
+    (out / prep.MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "label": "positive",
+                "clips": [],
+                "sources": {"/recordings/José/take.wav": []},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    original_read_text = prep.Path.read_text
+    requested: list[str | None] = []
+
+    def require_utf8(path: Path, *args: object, **kwargs: object) -> str:
+        requested.append(kwargs.get("encoding"))
+        if kwargs.get("encoding") != "utf-8":
+            raise UnicodeDecodeError("ascii", b"\x81", 0, 1, "simulated locale")
+        return original_read_text(path, *args, **kwargs)
+
+    try:
+        prep.Path.read_text = require_utf8
+        label, _clips, sources = prep._read_manifest(out)
+    finally:
+        prep.Path.read_text = original_read_text
+    check(
+        requested == ["utf-8"] and label == "positive" and sources is not None,
+        "the manifest reader explicitly decodes UTF-8",
     )
 
 
@@ -1497,6 +1569,8 @@ def main() -> int:
         test_manifest_unreadable_is_refused(d)
         test_manifest_wrong_shape_is_refused(d)
         test_manifest_bad_sources_warns_before_ownership_refusal(d)
+        test_manifest_rejects_overlapping_source_ownership(d)
+        test_manifest_reader_requests_utf8(d)
         test_manifest_source_warning_escapes_control_characters(d)
         test_manifest_clip_names_cannot_escape_output_directory(d)
         test_manifest_rejects_unsupported_version_with_v2_shape(d)
