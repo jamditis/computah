@@ -8,9 +8,11 @@ mono and that background audio is kept whole.
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import tempfile
+from contextlib import redirect_stderr
 from pathlib import Path
 
 import numpy as np
@@ -754,13 +756,20 @@ def test_manifest_unreadable_falls_back_to_stem_rule(d: Path) -> None:
     (out / prep.MANIFEST_NAME).write_text("{not json")
 
     _burst_take(src / "a" / "take.wav", 2)
-    total = prep.process(
-        [src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True
-    )
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        total = prep.process(
+            [src / "a" / "take.wav"], out, "positive", 0.3, 0.2, 3.0, clean=True
+        )
     present = sorted(p.name for p in out.glob("*.wav"))
     check(
         total == 2 and "take_002.wav" not in present and "other_000.wav" in present,
         f"a corrupt manifest leaves the stem rule working ({present})",
+    )
+    check(
+        "manifest" in errors.getvalue()
+        and "legacy filename cleanup" in errors.getvalue(),
+        "a corrupt manifest warns that ownership protection is unavailable",
     )
 
 
@@ -811,6 +820,33 @@ def test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d: Path) -> None:
     check(
         present == ["take_000.wav", "take_001.wav"],
         f"the first manifest leaves its warned-about leftovers cleanable ({present})",
+    )
+
+
+def test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(
+    d: Path,
+) -> None:
+    """A non-clean legacy refresh must not claim ambiguous clips as prep-owned.
+
+    Before a manifest exists, a same-stem clip can be a prep leftover or audio
+    curated by hand. Leaving the directory on the documented legacy path keeps
+    that ambiguity visible; recording the clip in v2 would make a later
+    source-aware --clean delete it under a false provenance claim.
+    """
+    src = d / "bootstrap_curated_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "bootstrap_curated_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()
+    _burst_take(out / "take_007.wav", 1)
+
+    _burst_take(take, 2)
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    present = sorted(p.name for p in out.glob("*.wav"))
+    check(
+        not (out / prep.MANIFEST_NAME).exists() and "take_007.wav" in present,
+        f"ambiguous same-stem audio stays outside a source-aware record ({present})",
     )
 
 
@@ -993,6 +1029,7 @@ def main() -> int:
         test_manifest_unreadable_falls_back_to_stem_rule(d)
         test_manifest_without_source_ownership_is_refused(d)
         test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
+        test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(d)
         test_manifest_spares_a_different_dataset_on_stray_output(d)
         test_same_label_shared_stem_stray_is_refused_before_writing(d)
         test_clean_disarmed_entirely_on_a_label_mismatch(d)

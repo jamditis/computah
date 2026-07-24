@@ -49,18 +49,22 @@ and waiting until `--clean` would be too late, since the run would already have
 overwritten that dataset's clips. Past that, a run must contain at least one
 exact source path from the record before it may delete from the dataset or write
 to it. A shared basename is not ownership. A directory with no record yet counts
-as yours; its first successful run also records same-stem legacy leftovers so a
-follow-up `--clean` can remove them. A run that produces no clips does not claim
-an unrecorded directory. Prep also spares the prior clips of a source it tried
-and got nothing from (a silent or bad re-recording): those are the only copy, and
-it will not trade them for a run that produced nothing.
+as yours. If a non-clean legacy refresh leaves same-stem files behind, prep does
+not write a manifest because it cannot prove whether those files are old prep
+output or audio curated by hand. The follow-up `--clean` stays on the legacy
+filename rule rather than recording that guess as provenance. A run that
+produces no clips does not claim an unrecorded directory. Prep also spares the
+prior clips of a source it tried and got nothing from (a silent or bad
+re-recording): those are the only copy, and it will not trade them for a run
+that produced nothing.
 
 To add a new recording to an existing dataset, include at least one source
 already recorded there in the same invocation. This gives prep explicit
 ownership proof while it adds the new source to the manifest.
 
-An absent or unreadable manifest falls back to the narrow same-stem cleanup
-rule. That fallback has no provenance: `--clean` can remove any
+Manifest updates use atomic replacement. An absent or unreadable manifest falls
+back to the narrow same-stem cleanup rule with a warning that source ownership
+protection is unavailable. That fallback has no provenance: `--clean` can remove any
 `<same-stem>_NNN.wav` file, including a hand-added file with that shape. Check the
 warning list and move any such file before cleaning. A readable older manifest
 without source ownership is refused; after confirming the output directory,

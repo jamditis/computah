@@ -27,13 +27,15 @@ All notable changes to computah are recorded here. The format follows
   A source this run attempted but got no clips from retains its prior clips as the
   only good copy, including when same-basename inputs changed its output stem.
   With a readable source map, hand-curated audio stays outside it and is never
-  deleted. The first successful manifest run adopts same-stem leftovers from a
-  pre-manifest run so a warned-about orphan remains cleanable; a no-output run
-  cannot claim an unrecorded directory. An absent or unreadable manifest degrades
-  `--clean` to the narrow stem match, which cannot distinguish a prep leftover
-  from a hand-added `<same-stem>_NNN.wav`. A readable older manifest without
-  source ownership is refused until the user removes it to bootstrap ownership
-  explicitly.
+  deleted. A non-clean legacy refresh that leaves ambiguous same-stem files does
+  not write a manifest; the next `--clean` remains on the documented filename
+  fallback instead of turning a guess into durable provenance. A no-output run
+  cannot claim an unrecorded directory. Manifest writes use atomic replacement,
+  and an absent or unreadable manifest degrades `--clean` to the narrow stem
+  match with an explicit warning. That fallback cannot distinguish a prep
+  leftover from a hand-added `<same-stem>_NNN.wav`. A readable older manifest
+  without source ownership is refused until the user removes it to bootstrap
+  ownership explicitly.
 - Configurable request endpointing (#15): the trailing-silence window that ends a
   captured request and the max-request cap that bounds a runaway are now config keys
   (`endpoint_silence_ms`, `max_request_ms`, milliseconds) instead of fixed constants,

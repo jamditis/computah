@@ -345,9 +345,17 @@ def _read_manifest(
     caller can then refuse to guess ownership and tell the user how to bootstrap
     a new record explicitly.
     """
+    manifest_path = out_dir / MANIFEST_NAME
     try:
-        raw = json.loads((out_dir / MANIFEST_NAME).read_text())
-    except (OSError, ValueError):
+        raw = json.loads(manifest_path.read_text())
+    except FileNotFoundError:
+        return None, set(), None
+    except (OSError, ValueError) as e:
+        print(
+            f"warning: could not read {manifest_path} ({e}); source ownership "
+            "protection is unavailable, so this run will use legacy filename cleanup",
+            file=sys.stderr,
+        )
         return None, set(), None
     if not isinstance(raw, dict):
         return None, set(), None
@@ -385,29 +393,49 @@ def _write_manifest(
     """
     if not out_dir.is_dir():
         return
-    try:
-        clips = set().union(*source_clips.values()) if source_clips else set()
-        (out_dir / MANIFEST_NAME).write_text(
-            json.dumps(
-                {
-                    "version": 2,
-                    "label": label,
-                    "clips": sorted(clips),
-                    "sources": {
-                        source: sorted(names)
-                        for source, names in sorted(source_clips.items())
-                    },
+    clips = set().union(*source_clips.values()) if source_clips else set()
+    payload = (
+        json.dumps(
+            {
+                "version": 2,
+                "label": label,
+                "clips": sorted(clips),
+                "sources": {
+                    source: sorted(names)
+                    for source, names in sorted(source_clips.items())
                 },
-                indent=2,
-            )
-            + "\n"
+            },
+            indent=2,
         )
+        + "\n"
+    )
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=out_dir,
+            prefix=f".{MANIFEST_NAME}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            temporary = Path(tmp.name)
+            tmp.write(payload)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(temporary, out_dir / MANIFEST_NAME)
     except OSError as e:
         print(
             f"warning: could not write {out_dir / MANIFEST_NAME} ({e}); "
             f"a later --clean will fall back to matching re-recorded stems only",
             file=sys.stderr,
         )
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _clip_stem(name: str) -> str | None:
@@ -575,28 +603,22 @@ def process(
         )
     lingering = [p for p in stale if p not in removed]
     lingering_names = {p.name for p in lingering}
+    ambiguous_legacy = prior_sources is None and any(
+        _clip_stem(path.name) in run_stems for path in lingering
+    )
 
     # Carry forward every still-present owned clip under its original source,
-    # then replace or add the clips written for current sources. On the first
-    # manifest run, claim legacy leftovers only when their stem maps to a source
-    # that successfully wrote this run; that preserves the old cleanup fallback
-    # and keeps a silent take from claiming unknown files.
+    # then replace or add the clips written for current sources. A no-manifest
+    # run cannot claim same-stem leftovers: they may be old prep output or audio
+    # curated by hand. Leave the record absent until legacy --clean resolves
+    # that ambiguity, so v2 never turns an inferred filename match into durable
+    # provenance.
     next_sources: dict[str, set[str]] = {}
     if prior_sources is not None:
         for source, names in prior_sources.items():
             kept = names & lingering_names
             if kept:
                 next_sources[source] = kept
-    else:
-        source_for_stem = {
-            stem: source
-            for stem, source in zip(stems, source_keys)
-            if source in written_sources
-        }
-        for path in lingering:
-            source = source_for_stem.get(_clip_stem(path.name))
-            if source is not None:
-                next_sources.setdefault(source, set()).add(path.name)
     # Keep current sources in the record even when they wrote nothing. If their
     # old clips are already absent, the empty entry still proves the next rerun
     # comes from the same source instead of deadlocking the directory.
@@ -606,8 +628,15 @@ def process(
     # A no-output run cannot establish ownership in an unrecorded directory.
     # Leaving it unclaimed lets a later successful rerun bootstrap the legacy
     # clips instead of stranding them behind an empty manifest.
-    if prior_sources is not None or written:
+    if (prior_sources is not None or written) and not ambiguous_legacy:
         _write_manifest(out_dir, label, next_sources)
+    elif ambiguous_legacy:
+        print(
+            f"warning: {MANIFEST_NAME} was not written because same-stem legacy "
+            "files remain and prep cannot prove whether it created them; review "
+            "the warning below before rerunning with --clean",
+            file=sys.stderr,
+        )
 
     if lingering:
         # Why a file lingered decides what the user should do about it, and the
