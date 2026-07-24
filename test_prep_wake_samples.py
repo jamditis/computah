@@ -971,6 +971,27 @@ def test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(
     )
 
 
+def test_clean_without_manifest_warns_before_legacy_cleanup(d: Path) -> None:
+    """A provenance-free clean must announce its filename-only deletion rule."""
+    src = d / "legacy_clean_src"
+    take = src / "take.wav"
+    _burst_take(take, 3)
+    out = d / "legacy_clean_out"
+    prep.process([take], out, "positive", 0.3, 0.2, 3.0)
+    (out / prep.MANIFEST_NAME).unlink()
+    _burst_take(out / "take_007.wav", 1)
+
+    _burst_take(take, 2)
+    errors = io.StringIO()
+    with redirect_stderr(errors):
+        prep.process([take], out, "positive", 0.3, 0.2, 3.0, clean=True)
+    check(
+        "manifest" in errors.getvalue()
+        and "legacy filename cleanup" in errors.getvalue(),
+        "a no-manifest --clean warns before using the provenance-free rule",
+    )
+
+
 def test_manifest_spares_a_different_dataset_on_stray_output(d: Path) -> None:
     """A mistyped --output must not let the manifest wipe another dataset.
 
@@ -1155,6 +1176,7 @@ def main() -> int:
         test_manifest_without_source_ownership_is_refused(d)
         test_manifest_bootstrap_keeps_legacy_leftovers_cleanable(d)
         test_manifest_bootstrap_does_not_adopt_ambiguous_same_stem_audio(d)
+        test_clean_without_manifest_warns_before_legacy_cleanup(d)
         test_manifest_spares_a_different_dataset_on_stray_output(d)
         test_same_label_shared_stem_stray_is_refused_before_writing(d)
         test_clean_disarmed_entirely_on_a_label_mismatch(d)
