@@ -71,6 +71,20 @@ def assess_input_device(
 
     An unknown or unparseable `native_sr` is treated as no information rather
     than a fault, so a device that advertises no rate is not warned about.
+
+    `native_sr` is what the device advertises, not a measured capability, and how
+    much that is worth depends on the host API. Under WASAPI it is the shared-mode
+    mix format, which is the rate capture actually happens at, so a low value
+    there is the fault itself. Under ALSA or CoreAudio it can be a default the
+    device is able to exceed, which makes the rate branch advisory rather than
+    conclusive -- hence the hedged wording, and why this returns a risk to report
+    rather than a verdict to act on.
+
+    Opening a stream at `target_sr` is not the counter-evidence it looks like:
+    WASAPI `auto_convert` grants that request by resampling, which is the whole
+    reason this consults the advertised rate instead of `Microphone._open_sr`.
+    Distinguishing an advertised default from a hard limit needs the audio itself,
+    which costs a capture at startup.
     """
     lowered = (name or "").lower()
     if any(marker in lowered for marker in _HFP_NAME_MARKERS):
@@ -88,9 +102,12 @@ def assess_input_device(
     if 0.0 < rate < target_sr:
         return CaptureRisk(
             "narrowband",
-            f"{name!r} is narrowband: {int(rate)} Hz native, below the "
-            f"{target_sr} Hz the pipeline needs, so transcription will be "
-            "garbled. Use a USB Audio Class mic.",
+            f"{name!r} advertises {int(rate)} Hz, below the {target_sr} Hz the "
+            "pipeline needs, so transcription is likely to come back garbled. On "
+            "Windows that figure is the shared-mode capture format and the limit "
+            "is real; on other hosts it can be a default the device exceeds. If "
+            "this is a Bluetooth mic, use it over USB; otherwise check the rate "
+            "in the OS sound settings.",
         )
 
     return None

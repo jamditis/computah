@@ -360,12 +360,16 @@ def _test_mic(name: str, seconds: float) -> int:
         print("RESULT: dead stream (only zeros) - check the mic's source")
         return 2
     if mic.capture_risk is not None:
-        # The frames are structurally perfect and the content is still unusable,
+        # The frames are structurally perfect and the content is still suspect,
         # so a bare "correct for the pipeline" here would read as a pass on a mic
-        # that garbles every sentence. Non-zero exit: this is a real finding.
+        # that garbles every sentence. Non-zero exit, and worded as the
+        # classifier's verdict rather than as ground truth: the hands-free match
+        # identifies the device, but the rate check reads an advertised figure that
+        # is conclusive only on WASAPI (see capture_quality.assess_input_device).
         print(
-            "RESULT: live frame stream, but this device is not usable for "
-            f"continuous speech ({mic.capture_risk.kind}) - see the warning above"
+            "RESULT: live frame stream, but this device is flagged as unsuitable "
+            f"for continuous speech ({mic.capture_risk.kind}) - see the warning "
+            "above"
         )
         return 3
     print("RESULT: live frame stream - shape and dtype correct for the pipeline")
@@ -381,8 +385,8 @@ def _cli() -> int:
         nargs="?",
         const="",
         help="capture from a mic (name substring; empty = default). exits 0 if "
-        "usable, 2 if nothing arrived, 3 if the device works but is unsuitable "
-        "for continuous speech",
+        "usable, 2 if nothing arrived, 3 if the device works but is flagged as "
+        "unsuitable for continuous speech",
     )
     p.add_argument("--play", metavar="WAV", help="play a WAV through an output device")
     p.add_argument(
