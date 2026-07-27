@@ -163,9 +163,16 @@ To check a device before relying on it:
 .venv/bin/python audio.py --test-mic "powerconf"  # see the exit codes below
 ```
 
-`--list` tags any input device it can tell is unsuitable and prints why. The live
-loop prints the same warning at startup and keeps running, since the device is
-still good enough for wake detection.
+`--list` tags any input device it can tell is unsuitable and prints why, judging
+the name and rate the device advertises. The live loop prints the same warning at
+startup and keeps running, since the device is still good enough for wake
+detection.
+
+`--test-mic` goes further, because it has audio to look at: after capturing, it
+inspects the spectrum for the cliff that upsampling leaves behind. Audio that
+arrived at 16 kHz but started at 8 kHz carries almost nothing above 4 kHz, and no
+amount of resampling puts it back. That is the check that catches a device whose
+advertisement looks clean, which is the usual Linux case.
 
 `--test-mic` exit codes, which point at different fixes:
 
@@ -175,11 +182,13 @@ still good enough for wake detection.
 | 2 | Nothing arrived (only zeros). The mic is muted, unplugged, or the wrong source. |
 | 3 | Frames arrived, but the device is unsuitable for speech. It works; pick a different one. |
 
-One case the check cannot see: wideband HFP negotiates 16 kHz, so it passes the
-rate test, and if the OS reports it without a hands-free marker in the name there
-is nothing to match on. On Linux that marker is usually absent, so the rate check
-is the only guard there. A clean `--list` is not proof a Bluetooth link is fine.
-Prefer USB.
+The two layers fail differently, so a clean result means less from `--list` than
+from `--test-mic`. `--list` sees only what the device advertises: wideband HFP
+negotiates 16 kHz and passes the rate test, and on Linux the hands-free marker is
+usually absent from the name, leaving nothing to match on. `--test-mic` reads the
+audio instead, which is why it catches those -- but it too has a blind spot, a
+resampler noisy enough to fill the empty band (around -30 dB, loud enough to hear
+as hiss). A clean `--list` is not proof a Bluetooth link is fine. Prefer USB.
 
 ## Configuration
 

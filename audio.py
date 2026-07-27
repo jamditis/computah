@@ -330,6 +330,7 @@ def _test_mic(name: str, seconds: float) -> int:
     peak = 0
     sumsq = 0.0
     n_samples = 0
+    captured = []
     target = int(seconds * TARGET_SR / FRAME_SIZE)
     with Microphone(subs) as mic:
         # native_sr alongside open_sr on purpose: when they differ, something is
@@ -346,6 +347,7 @@ def _test_mic(name: str, seconds: float) -> int:
                 f"bad frame: dtype={frame.dtype} shape={frame.shape}"
             )
             n_frames += 1
+            captured.append(frame)
             peak = max(peak, int(np.max(np.abs(frame))))
             sumsq += float(np.sum(frame.astype(np.float32) ** 2))
             n_samples += frame.size
@@ -359,17 +361,29 @@ def _test_mic(name: str, seconds: float) -> int:
     if peak == 0:
         print("RESULT: dead stream (only zeros) - check the mic's source")
         return 2
-    if mic.capture_risk is not None:
+
+    # The audio is already in hand, so judging it costs nothing extra -- and it is
+    # the only check that sees through a device that advertises well and resamples
+    # underneath, which is how a Linux bluez/PipeWire HFP source presents.
+    spectrum_risk = capture_quality.assess_capture_spectrum(
+        np.concatenate(captured), TARGET_SR
+    )
+    if spectrum_risk is not None:
+        print(f"WARNING: {spectrum_risk.message}")
+
+    risk = mic.capture_risk or spectrum_risk
+    if risk is not None:
         # The frames are structurally perfect and the content is still suspect,
         # so a bare "correct for the pipeline" here would read as a pass on a mic
         # that garbles every sentence. Non-zero exit, and worded as the
-        # classifier's verdict rather than as ground truth: the hands-free match
-        # identifies the device, but the rate check reads an advertised figure that
-        # is conclusive only on WASAPI (see capture_quality.assess_input_device).
+        # classifier's verdict rather than as ground truth, because the three
+        # signals differ in strength: the hands-free name identifies the device
+        # outright, the advertised rate is conclusive only on WASAPI, and the
+        # spectral cliff is measured from the audio but can be masked by a noisy
+        # resampler (see the two assess_* docstrings in capture_quality).
         print(
             "RESULT: live frame stream, but this device is flagged as unsuitable "
-            f"for continuous speech ({mic.capture_risk.kind}) - see the warning "
-            "above"
+            f"for continuous speech ({risk.kind}) - see the warning above"
         )
         return 3
     print("RESULT: live frame stream - shape and dtype correct for the pipeline")
