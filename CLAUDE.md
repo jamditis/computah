@@ -138,6 +138,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python test_confidence_guard.py  # mishear guard decision + aggregation — fast, no models
 .venv/bin/python test_preroll.py           # pre-roll buffer keeps a no-pause request's leading audio — fast, no models
 .venv/bin/python test_endpoint_config.py   # endpoint_silence_ms / max_request_ms tune capture endpointing — fast, no models
+.venv/bin/python test_capture_quality.py   # capture-device suitability verdicts + the startup warning — fast, no models, no PortAudio
 .venv/bin/python test_chime.py             # wake-acknowledgment cue generator + both-loop wiring — fast, no models
 .venv/bin/python test_live_driver.py       # live_driver hardware path honors the guard — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
@@ -178,6 +179,7 @@ bug.
 
 - `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`). `run_turn` exposes `on_wake` (fires at the wake->capture boundary, for the chime) and `on_capture` (fires after capture, for half-duplex mic pause); `run_loop` is the desktop live loop and wires both.
 - `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> chime -> STT -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
+- `capture_quality.py` — whether a capture device can carry continuous speech (issue #34): flags a Bluetooth hands-free (HFP) endpoint by name and any device whose native rate is below the pipeline's 16 kHz. Hardware-free (no sounddevice) so it is testable anywhere; `audio.py` feeds it what `sd.query_devices()` reports and stores the verdict on `Microphone.capture_risk`, which `run_loop` prints at startup and `--list`/`--test-mic` surface. Judges the device's *native* rate, not the opened one — WASAPI `auto_convert` grants a 16 kHz open on a narrowband device.
 - `chime.py` — the wake-acknowledgment cue (issue #41): a pure-DSP generator for the two-tone rising chime played the instant the wake fires, before capture. Backend-free (no sounddevice/aplay) so both live loops can render the cue and play it through their own output. Gated by the `wake_chime` config key (opt-in, default off — it regresses the no-pause case on a half-duplex device); half-duplex handling keeps the cue out of the captured request when it is on.
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.

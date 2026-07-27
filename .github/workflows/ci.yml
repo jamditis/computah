@@ -64,6 +64,7 @@ jobs:
             test_brain_bridge.py \
             test_brain_dispatch.py \
             test_sanitize_reply.py \
+            test_capture_quality.py \
             test_chime.py \
             test_config_validation.py \
             test_confidence_guard.py \
