@@ -9,16 +9,18 @@ fixed pattern that survives the degradation; a full sentence does not. The loop
 therefore looks healthy right up to the transcript, which is why this warns up
 front. README's "Choosing a microphone" is the operator-facing version.
 
-Two ways to judge a device, in increasing order of certainty:
+Two evidence sources can identify a problem:
 
-- `assess_input_device` reads what the device advertises -- its name and native
-  rate. Free, works before any audio is captured, and is what the `--listen`
-  startup warning uses. It only sees what the OS chooses to report.
+- `assess_input_device` reads what the device advertises -- its name, host API,
+  and default rate. Free, works before any audio is captured, and is what the
+  `--listen` startup warning uses. It only sees what the OS chooses to report.
 - `assess_capture_spectrum` reads the captured audio itself. It cannot run until
   something has recorded, so `--test-mic` (which already captures a few seconds)
   is its home. It catches the cases the advertised properties hide: a bluez HFP
   source on Linux exposes no hands-free name and PipeWire can report a healthy
-  16 kHz while resampling 8 kHz audio underneath.
+  16 kHz while resampling 8 kHz audio underneath. Its 4 kHz cliff test cannot
+  rule out wideband HFP codec damage, so a capture without that cliff remains
+  inconclusive.
 
 Hardware-free by design. audio.py is the one OS-specific seam (it imports
 sounddevice, which loads native PortAudio), but neither judging advertised
@@ -28,14 +30,12 @@ and are testable on a box with no PortAudio and no microphone.
 
 from __future__ import annotations
 
-from typing import NamedTuple, Sequence
+from typing import Literal, NamedTuple, Sequence
 
 import numpy as np
 
-# The pipeline consumes 16 kHz frames (audio.TARGET_SR). A device whose own
-# native rate is below that cannot supply them: something upstream is
-# upsampling, and the detail is already gone. Callers pass their own target so
-# this module stays free of audio.py and its native dependency.
+# The pipeline consumes 16 kHz frames (audio.TARGET_SR). Callers pass their own
+# target so this module stays free of audio.py and its native dependency.
 DEFAULT_TARGET_SR = 16000
 
 # Substrings that identify a Bluetooth hands-free endpoint by name. Windows
@@ -49,10 +49,17 @@ DEFAULT_TARGET_SR = 16000
 # Platform asymmetry worth knowing, because production runs on the Pi: these are
 # Windows names. A bluez/PipeWire HFP source on Linux typically carries no
 # hands-free substring, so this check never fires there, and PipeWire's resampling
-# can hide the low rate from the native-rate check too. On Linux, treat a clean
-# result here as "nothing detected", not "device is fine", and run `--test-mic`,
-# where assess_capture_spectrum judges the audio instead of the advertisement.
+# can hide the transport rate from the advertised-property check too. On Linux,
+# treat a clean result here as "nothing detected", not "device is fine", and run
+# `--test-mic`, where assess_capture_spectrum judges the audio instead of the
+# advertisement.
 _HFP_NAME_MARKERS = ("hands-free", "hands free", "handsfree", "hfp")
+
+# PortAudio's `default_samplerate` is generally a preference, not a bandwidth
+# limit. WASAPI shared mode is the exception used here: its default is the mix
+# format through which capture runs. Do not grow this list without verifying the
+# host API's field has that meaning.
+_CAPTURE_FORMAT_HOST_MARKERS = ("wasapi",)
 
 
 class CaptureRisk(NamedTuple):
@@ -68,10 +75,25 @@ class CaptureRisk(NamedTuple):
     message: str
 
 
+class SpectrumAssessment(NamedTuple):
+    """The result of inspecting captured audio for a narrowband cliff.
+
+    `status` is explicit because `None` used to mean both "no cliff" and "there
+    was nothing to analyze", and the CLI accidentally promoted both to success.
+    A non-flagged spectrum stays inconclusive: this measurement cannot detect
+    wideband HFP recompression or frame drops.
+    """
+
+    status: Literal["flagged", "inconclusive"]
+    risk: CaptureRisk | None
+    message: str
+
+
 def assess_input_device(
     name: str | None,
-    native_sr: float | int | None,
+    default_sr: float | int | None,
     target_sr: int = DEFAULT_TARGET_SR,
+    host_api: str | None = None,
 ) -> CaptureRisk | None:
     """Return a CaptureRisk if this input device will garble continuous speech.
 
@@ -84,23 +106,19 @@ def assess_input_device(
     on. Catching that needs the audio itself, which is what
     assess_capture_spectrum does once something has recorded.
 
-    An unknown or unparseable `native_sr` is treated as no information rather
+    An unknown or unparseable `default_sr` is treated as no information rather
     than a fault, so a device that advertises no rate is not warned about.
 
-    `native_sr` is what the device advertises, not a measured capability, and how
-    much that is worth depends on the host API. Under WASAPI it is the shared-mode
-    mix format, which is the rate capture actually happens at, so a low value
-    there is the fault itself. Under ALSA or CoreAudio it can be a default the
-    device is able to exceed, which makes the rate branch advisory rather than
-    conclusive -- hence the hedged wording, and why this returns a risk to report
-    rather than a verdict to act on.
+    `default_sr` is not a measured capability or maximum supported rate. The rate
+    branch is therefore limited to host APIs where that field represents the
+    active capture format. WASAPI shared mode has that meaning; ALSA and CoreAudio
+    defaults do not, so a low value from either is ignored instead of warning
+    about a stream that may open at `target_sr`.
 
     Opening a stream at `target_sr` is not the counter-evidence it looks like:
     WASAPI `auto_convert` grants that request by resampling, which is the whole
-    reason this consults the advertised rate instead of `Microphone._open_sr`.
-    Distinguishing an advertised default from a hard limit needs the audio itself
-    -- assess_capture_spectrum, which `--test-mic` runs on what it already
-    captured.
+    reason the WASAPI check consults the shared-mode format instead of
+    `Microphone._open_sr`.
     """
     lowered = (name or "").lower()
     if any(marker in lowered for marker in _HFP_NAME_MARKERS):
@@ -112,18 +130,19 @@ def assess_input_device(
         )
 
     try:
-        rate = float(native_sr) if native_sr is not None else 0.0
+        rate = float(default_sr) if default_sr is not None else 0.0
     except (TypeError, ValueError):
         rate = 0.0
-    if 0.0 < rate < target_sr:
+    host_has_capture_format = any(
+        marker in (host_api or "").lower() for marker in _CAPTURE_FORMAT_HOST_MARKERS
+    )
+    if host_has_capture_format and 0.0 < rate < target_sr:
         return CaptureRisk(
             "narrowband",
-            f"{name!r} advertises {int(rate)} Hz, below the {target_sr} Hz the "
-            "pipeline needs, so transcription is likely to come back garbled. On "
-            "Windows that figure is the shared-mode capture format and the limit "
-            "is real; on other hosts it can be a default the device exceeds. If "
-            "this is a Bluetooth mic, use it over USB; otherwise check the rate "
-            "in the OS sound settings.",
+            f"{name!r} uses a {int(rate)} Hz WASAPI shared-mode capture format, "
+            f"below the {target_sr} Hz the pipeline needs, so transcription is "
+            "likely to come back garbled. If this is a Bluetooth mic, use it over "
+            "USB; otherwise raise the rate in the Windows sound settings.",
         )
 
     return None
@@ -195,8 +214,8 @@ def assess_capture_spectrum(
     samples: Sequence[float] | np.ndarray,
     sample_rate: int,
     target_sr: int = DEFAULT_TARGET_SR,
-) -> CaptureRisk | None:
-    """Return a CaptureRisk if captured audio looks upsampled from a narrower band.
+) -> SpectrumAssessment:
+    """Assess whether captured audio looks upsampled from a narrower band.
 
     This is the check that survives a lying device. `assess_input_device` can only
     read what the OS advertises, and on Linux a bluez/PipeWire HFP source reports
@@ -217,9 +236,12 @@ def assess_capture_spectrum(
     normalizes the tilt away and puts the same cases an order of magnitude apart,
     in the right order.
 
-    Returns None when there is nothing to judge (too short, or digital silence)
-    rather than guessing. Note that near-silence is safe rather than a false
-    positive: room tone is broadband, so it produces a healthy ratio.
+    Returns an explicit inconclusive result when there is nothing to judge (too
+    short, or digital silence) rather than guessing. A ratio above the threshold
+    is also inconclusive: it rules out an 8 kHz upsampling cliff, but wideband HFP
+    genuinely has energy above 4 kHz while its codec and frame drops can still
+    garble continuous speech. Note that near-silence is safe from a false
+    positive: room tone is broadband, so it produces a ratio above the threshold.
 
     Known limit: a resampler whose noise floor is high enough to fill the empty
     band (around -30 dB, loud enough to hear as hiss) reads as genuine. Real
@@ -232,10 +254,21 @@ def assess_capture_spectrum(
     """
     edge_hz = target_sr / 4
     ratio = _cliff_ratio(samples, sample_rate, target_sr)
-    if ratio is None or ratio >= _CLIFF_RATIO_THRESHOLD:
-        return None
+    if ratio is None:
+        message = (
+            "the capture did not contain enough varying audio for the spectral "
+            "check, so microphone suitability is inconclusive"
+        )
+        return SpectrumAssessment("inconclusive", None, message)
+    if ratio >= _CLIFF_RATIO_THRESHOLD:
+        message = (
+            f"no {int(edge_hz)} Hz upsampling cliff was detected, but that check "
+            "cannot detect wideband HFP codec damage or frame drops, so microphone "
+            "suitability is inconclusive"
+        )
+        return SpectrumAssessment("inconclusive", None, message)
 
-    return CaptureRisk(
+    risk = CaptureRisk(
         "upsampled-narrowband",
         f"the captured audio carries almost nothing above {int(edge_hz)} Hz "
         f"(band ratio {ratio:.4f}), so it was upsampled from a narrower source "
@@ -243,3 +276,4 @@ def assess_capture_spectrum(
         "hands-free link does, and transcription comes back garbled. Use this "
         "mic over USB, or another wired mic.",
     )
+    return SpectrumAssessment("flagged", risk, risk.message)

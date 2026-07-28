@@ -37,6 +37,19 @@ from capture_quality import (
     assess_input_device,
 )
 
+# audio.py only needs sounddevice for hardware calls, while these tests replace
+# Microphone before exercising its capture verdict. Keep the test hardware-free
+# on hosts where PortAudio is absent.
+_saved_sounddevice = sys.modules.get("sounddevice")
+sys.modules["sounddevice"] = types.ModuleType("sounddevice")
+try:
+    import audio
+finally:
+    if _saved_sounddevice is None:
+        sys.modules.pop("sounddevice", None)
+    else:
+        sys.modules["sounddevice"] = _saved_sounddevice
+
 PASS, FAIL = "PASS", "FAIL"
 results: list[bool] = []
 
@@ -74,8 +87,8 @@ def test_hands_free_wins_over_rate() -> None:
 
 
 def test_flags_narrowband_rate() -> None:
-    """A device whose own rate is below the pipeline's 16 kHz."""
-    risk = assess_input_device("Some Telephony Mic", 8000)
+    """A WASAPI capture format below the pipeline's 16 kHz."""
+    risk = assess_input_device("Some Telephony Mic", 8000, host_api="Windows WASAPI")
     check(
         "8 kHz device flagged",
         risk is not None and risk.kind == "narrowband",
@@ -86,6 +99,64 @@ def test_flags_narrowband_rate() -> None:
         risk is not None and "8000" in risk.message,
         "message includes 8000 Hz" if risk else "no message",
     )
+
+
+def test_default_rate_is_advisory_outside_wasapi() -> None:
+    """ALSA/CoreAudio defaults do not prove the opened stream is narrowband."""
+    for host_api in ("ALSA", "Core Audio", None):
+        risk = assess_input_device(
+            "Mic with a low preferred rate", 8000, host_api=host_api
+        )
+        check(
+            f"silent for {host_api or 'unknown'} default rate",
+            risk is None,
+            "no warning" if risk is None else f"unexpected {risk.kind}",
+        )
+
+
+def test_microphone_passes_host_api_to_default_rate_check() -> None:
+    """The live/test path preserves the host distinction from find_device."""
+
+    class FakeStream:
+        active = False
+
+        def start(self):
+            self.active = True
+
+        def stop(self):
+            self.active = False
+
+        def close(self):
+            pass
+
+    saved_find_device = audio.find_device
+    saved_open = audio.Microphone._open
+    info = {
+        "name": "Mic with a low preferred rate",
+        "default_samplerate": 8000,
+        "max_input_channels": 1,
+    }
+    audio.Microphone._open = lambda self, idx, host: (
+        FakeStream(),
+        self.target_sr,
+        1,
+    )
+    try:
+        for host_api, expected_kind in (
+            ("ALSA", None),
+            ("Windows WASAPI", "narrowband"),
+        ):
+            audio.find_device = lambda name, kind, host=host_api: (0, info, host)
+            with audio.Microphone() as mic:
+                kind = mic.capture_risk.kind if mic.capture_risk else None
+                check(
+                    f"microphone preserves {host_api}",
+                    kind == expected_kind,
+                    f"kind={kind}",
+                )
+    finally:
+        audio.find_device = saved_find_device
+        audio.Microphone._open = saved_open
 
 
 def test_good_devices_are_silent() -> None:
@@ -118,7 +189,7 @@ def test_unknown_rate_is_not_a_fault() -> None:
     for sr in (None, 0, 0.0, "", "not-a-number"):
         risk = assess_input_device("Mystery Device", sr)
         check(
-            f"silent for native_sr={sr!r}",
+            f"silent for default_sr={sr!r}",
             risk is None,
             "no warning" if risk is None else f"unexpected {risk.kind}",
         )
@@ -139,7 +210,9 @@ def test_target_rate_is_honored() -> None:
     audio.py passes its TARGET_SR, so a pipeline retuned to a different frame rate
     keeps a correct warning instead of one pinned to the old rate.
     """
-    risk = assess_input_device("Some Mic", 16000, target_sr=48000)
+    risk = assess_input_device(
+        "Some Mic", 16000, target_sr=48000, host_api="Windows WASAPI"
+    )
     check(
         "16 kHz is narrowband against a 48 kHz target",
         risk is not None and risk.kind == "narrowband",
@@ -311,7 +384,8 @@ def test_spectrum_flags_upsampled_narrowband() -> None:
         ("CVSD narrowband (3.4 kHz)", _bandlimited(voice, 3400, floor_db=-50)),
     ]
     for label, signal in cases:
-        risk = assess_capture_spectrum(signal, SR)
+        assessment = assess_capture_spectrum(signal, SR)
+        risk = assessment.risk
         check(
             f"flags {label}",
             risk is not None and risk.kind == "upsampled-narrowband",
@@ -334,11 +408,20 @@ def test_spectrum_is_silent_on_genuine_full_band_audio() -> None:
         ("mild 7 kHz lowpass", _bandlimited(_speechlike(), 7000, floor_db=-50)),
     ]
     for label, signal in cases:
-        risk = assess_capture_spectrum(signal, SR)
+        assessment = assess_capture_spectrum(signal, SR)
         check(
-            f"silent for {label}",
-            risk is None,
-            "no warning" if risk is None else f"unexpected {risk.kind}",
+            f"does not flag {label}",
+            assessment.risk is None,
+            (
+                "no warning"
+                if assessment.risk is None
+                else f"unexpected {assessment.risk.kind}"
+            ),
+        )
+        check(
+            f"keeps {label} inconclusive",
+            assessment.status == "inconclusive",
+            f"status={assessment.status}",
         )
 
 
@@ -351,12 +434,97 @@ def test_spectrum_reports_no_information_rather_than_guessing() -> None:
         ("empty buffer", np.zeros(0)),
     ]
     for label, signal in cases:
-        risk = assess_capture_spectrum(signal, SR)
+        assessment = assess_capture_spectrum(signal, SR)
         check(
-            f"no verdict for {label}",
-            risk is None,
-            "returned None" if risk is None else f"unexpected {risk.kind}",
+            f"inconclusive verdict for {label}",
+            getattr(assessment, "status", None) == "inconclusive",
+            f"status={getattr(assessment, 'status', None)}",
         )
+
+
+def test_full_band_spectrum_does_not_clear_wideband_hfp() -> None:
+    """A 4 kHz cliff check cannot rule out wideband HFP codec/drop artifacts."""
+    assessment = assess_capture_spectrum(_speechlike(), SR)
+    check(
+        "full-band spectrum remains inconclusive",
+        getattr(assessment, "status", None) == "inconclusive",
+        f"status={getattr(assessment, 'status', None)}",
+    )
+    message = getattr(assessment, "message", "")
+    check(
+        "inconclusive message names the undetected artifacts",
+        "wideband HFP" in message and "frame drops" in message,
+        f"message={message!r}",
+    )
+
+
+def _run_mic_test(signal: np.ndarray, seconds: float) -> tuple[int, str]:
+    """Run audio._test_mic against deterministic frames from `signal`."""
+
+    class FakeMicrophone:
+        device_label = "Unmarked PipeWire source (ALSA)"
+        device_default_sr = SR
+        host_api = "ALSA"
+        capture_risk = None
+        _open_sr = SR
+        _open_ch = 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def frames(self):
+            usable = len(signal) - (len(signal) % audio.FRAME_SIZE)
+            for offset in range(0, usable, audio.FRAME_SIZE):
+                yield signal[offset : offset + audio.FRAME_SIZE].astype(np.int16)
+
+    saved_microphone = audio.Microphone
+    audio.Microphone = lambda name=None: FakeMicrophone()
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            exit_code = audio._test_mic("", seconds)
+    finally:
+        audio.Microphone = saved_microphone
+    return exit_code, output.getvalue()
+
+
+def test_mic_returns_inconclusive_for_unanalyzable_audio() -> None:
+    """A short or stuck nonzero stream must not receive exit code 0."""
+    cases = [
+        ("too short", (_speechlike(seconds=0.2) * 8000), 0.2),
+        ("constant nonzero", np.full(3 * SR, 1000), 3.0),
+    ]
+    for label, signal, seconds in cases:
+        exit_code, output = _run_mic_test(signal.astype(np.int16), seconds)
+        check(
+            f"{label} capture exits inconclusive",
+            exit_code == 4,
+            f"exit_code={exit_code}",
+        )
+        check(
+            f"{label} capture reports inconclusive",
+            "inconclusive" in output.lower(),
+            f"output={output!r}",
+        )
+
+
+def test_mic_does_not_pass_unmarked_wideband_hfp() -> None:
+    """Full-band energy alone cannot make an unmarked PipeWire source usable."""
+    signal = (_speechlike() * 8000).astype(np.int16)
+    exit_code, output = _run_mic_test(signal, 3.0)
+    check(
+        "full-band unmarked source exits inconclusive",
+        exit_code == 4,
+        f"exit_code={exit_code}",
+    )
+    check(
+        "full-band unmarked source explains wideband HFP gap",
+        "wideband HFP" in output,
+        f"output={output!r}",
+    )
 
 
 def test_spectrum_threshold_keeps_its_measured_margin() -> None:
@@ -394,7 +562,7 @@ def test_spectrum_threshold_keeps_its_measured_margin() -> None:
 def test_spectrum_survives_int16_frames() -> None:
     """--test-mic hands it the concatenated int16 frames, not floats."""
     frames = (_bandlimited(_speechlike(), 4000, floor_db=-60) * 8000).astype(np.int16)
-    risk = assess_capture_spectrum(frames, SR)
+    risk = assess_capture_spectrum(frames, SR).risk
     check(
         "int16 input is judged the same as float",
         risk is not None and risk.kind == "upsampled-narrowband",
@@ -407,6 +575,8 @@ def main() -> int:
     test_flags_bluetooth_hands_free_by_name()
     test_hands_free_wins_over_rate()
     test_flags_narrowband_rate()
+    test_default_rate_is_advisory_outside_wasapi()
+    test_microphone_passes_host_api_to_default_rate_check()
     test_good_devices_are_silent()
     test_unknown_rate_is_not_a_fault()
     test_survives_a_missing_name()
@@ -416,6 +586,9 @@ def main() -> int:
     test_spectrum_flags_upsampled_narrowband()
     test_spectrum_is_silent_on_genuine_full_band_audio()
     test_spectrum_reports_no_information_rather_than_guessing()
+    test_full_band_spectrum_does_not_clear_wideband_hfp()
+    test_mic_returns_inconclusive_for_unanalyzable_audio()
+    test_mic_does_not_pass_unmarked_wideband_hfp()
     test_spectrum_threshold_keeps_its_measured_margin()
     test_spectrum_survives_int16_frames()
     failed = results.count(False)

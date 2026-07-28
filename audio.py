@@ -148,12 +148,12 @@ class Microphone:
         self._open_sr = None
         self._open_ch = None
         self.device_label = None
-        # What the device itself advertises, kept separate from _open_sr. On
-        # Windows, _open() asks for 16 kHz first and WASAPI auto_convert grants
-        # it even for a narrowband device, so _open_sr reads a healthy 16000
-        # while the audio is already degraded. native_sr is the field that shows
-        # the truth, and capture_risk is its verdict (issue #34).
-        self.native_sr = None
+        # PortAudio's default is kept separate from _open_sr because it is the
+        # WASAPI shared-mode capture format, while on other host APIs it is only
+        # a preference. capture_quality receives the host API so it can make that
+        # distinction instead of treating the default as native bandwidth.
+        self.device_default_sr = None
+        self.host_api = None
         self.capture_risk = None
 
     def _callback(self, indata, frames, time_info, status):
@@ -163,17 +163,17 @@ class Microphone:
 
     def _open(self, idx: int, host: str):
         """Open the input stream, preferring 16 kHz mono via the OS engine, with
-        native-rate fallbacks. Returns (stream, open_sr, open_channels)."""
+        default-rate fallbacks. Returns (stream, open_sr, open_channels)."""
         extra = _wasapi_autoconvert(host)
         info = sd.query_devices(idx)
-        native_sr = int(info["default_samplerate"])
-        native_ch = max(1, int(info["max_input_channels"]))
-        # Order matters: clean engine-converted path first, then native fallbacks.
+        default_sr = int(info["default_samplerate"])
+        max_ch = max(1, int(info["max_input_channels"]))
+        # Order matters: clean engine-converted path first, then device defaults.
         attempts = [
             (self.target_sr, 1, extra),
-            (native_sr, 1, extra),
-            (native_sr, native_ch, extra),
-            (native_sr, native_ch, None),
+            (default_sr, 1, extra),
+            (default_sr, max_ch, extra),
+            (default_sr, max_ch, None),
         ]
         last = None
         for sr, ch, ex in attempts:
@@ -195,9 +195,13 @@ class Microphone:
     def __enter__(self):
         idx, info, host = find_device(self.name, "input")
         self.device_label = f"{info['name']} ({host})"
-        self.native_sr = int(info["default_samplerate"])
+        self.device_default_sr = int(info["default_samplerate"])
+        self.host_api = host
         self.capture_risk = capture_quality.assess_input_device(
-            info["name"], self.native_sr, self.target_sr
+            info["name"],
+            self.device_default_sr,
+            self.target_sr,
+            host_api=self.host_api,
         )
         self._stream, self._open_sr, self._open_ch = self._open(idx, host)
         self._stream.start()
@@ -309,7 +313,10 @@ def list_devices() -> None:
         risk = None
         if d["max_input_channels"] > 0:
             risk = capture_quality.assess_input_device(
-                d["name"], d["default_samplerate"], TARGET_SR
+                d["name"],
+                d["default_samplerate"],
+                TARGET_SR,
+                host_api=host,
             )
         tag = f"  <-- {risk.kind}, not for speech" if risk else ""
         if risk:
@@ -333,11 +340,8 @@ def _test_mic(name: str, seconds: float) -> int:
     captured = []
     target = int(seconds * TARGET_SR / FRAME_SIZE)
     with Microphone(subs) as mic:
-        # native_sr alongside open_sr on purpose: when they differ, something is
-        # converting, and open_sr=16000 on its own has fooled this check before
-        # (issue #34).
         print(
-            f"device: {mic.device_label}  native_sr={mic.native_sr} "
+            f"device: {mic.device_label}  default_sr={mic.device_default_sr} "
             f"open_sr={mic._open_sr} open_ch={mic._open_ch}"
         )
         if mic.capture_risk is not None:
@@ -362,16 +366,16 @@ def _test_mic(name: str, seconds: float) -> int:
         print("RESULT: dead stream (only zeros) - check the mic's source")
         return 2
 
-    # The audio is already in hand, so judging it costs nothing extra -- and it is
-    # the only check that sees through a device that advertises well and resamples
-    # underneath, which is how a Linux bluez/PipeWire HFP source presents.
-    spectrum_risk = capture_quality.assess_capture_spectrum(
+    # The audio is already in hand, so judging it costs nothing extra. The cliff
+    # check sees an 8 kHz source that PipeWire advertises and emits at 16 kHz,
+    # while leaving wideband HFP explicitly inconclusive.
+    spectrum = capture_quality.assess_capture_spectrum(
         np.concatenate(captured), TARGET_SR
     )
-    if spectrum_risk is not None:
-        print(f"WARNING: {spectrum_risk.message}")
+    if spectrum.risk is not None:
+        print(f"WARNING: {spectrum.risk.message}")
 
-    risk = mic.capture_risk or spectrum_risk
+    risk = mic.capture_risk or spectrum.risk
     if risk is not None:
         # The frames are structurally perfect and the content is still suspect,
         # so a bare "correct for the pipeline" here would read as a pass on a mic
@@ -386,8 +390,8 @@ def _test_mic(name: str, seconds: float) -> int:
             f"for continuous speech ({risk.kind}) - see the warning above"
         )
         return 3
-    print("RESULT: live frame stream - shape and dtype correct for the pipeline")
-    return 0
+    print(f"RESULT: inconclusive - {spectrum.message}")
+    return 4
 
 
 def _cli() -> int:
@@ -398,9 +402,9 @@ def _cli() -> int:
         metavar="NAME",
         nargs="?",
         const="",
-        help="capture from a mic (name substring; empty = default). exits 0 if "
-        "usable, 2 if nothing arrived, 3 if the device works but is flagged as "
-        "unsuitable for continuous speech",
+        help="capture from a mic (name substring; empty = default). exits 2 if "
+        "nothing arrived, 3 if flagged as unsuitable for continuous speech, or "
+        "4 if suitability remains inconclusive",
     )
     p.add_argument("--play", metavar="WAV", help="play a WAV through an output device")
     p.add_argument(

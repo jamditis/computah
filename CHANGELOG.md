@@ -12,14 +12,15 @@ All notable changes to computah are recorded here. The format follows
   letting it surface as a garbled transcript. A Bluetooth hands-free (HFP) mic on
   Windows downsamples to narrowband and drops frames, so faster-whisper returns
   garbled text while wake detection keeps firing at 0.998 -- the loop looks
-  healthy right up to the transcript. Two signals: a hands-free marker in the
-  device name, and a native rate below the pipeline's 16 kHz. The check reads the
-  device's advertised rate rather than the opened rate, because WASAPI
-  `auto_convert` grants a 16 kHz open on a narrowband device and hides the
-  problem. `audio.py --list` tags unsuitable inputs, `--test-mic` exits 3 on one
-  (rather than reporting a clean pass, as it used to), and the module is
-  hardware-free so `test_capture_quality.py` runs with no PortAudio. Known blind
-  spot: wideband HFP at 16 kHz with no name marker, which needs a spectral check.
+  healthy right up to the transcript. Two property signals are a hands-free
+  marker in the device name and, on WASAPI only, a default rate below the
+  pipeline's 16 kHz. Other host APIs expose a preferred default rather than a
+  bandwidth limit. `audio.py --list` tags unsuitable inputs, and `--test-mic`
+  also flags the 4 kHz cliff left by an upsampled narrowband stream. It exits 3
+  for a flagged device and 4 when the audio is unanalyzable or the narrowband
+  cliff is absent, since that check cannot rule out wideband HFP recompression
+  and frame drops. The module is hardware-free so `test_capture_quality.py` runs
+  with no PortAudio.
 - `prep_wake_samples.py --clean` (#8): removes leftover clips of a take the run
   just re-recorded (a `<stem>_NNN.wav` clip whose stem this run wrote) from
   `--output`, so re-recording with fewer utterances no longer strands orphaned
