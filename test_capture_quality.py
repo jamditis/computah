@@ -159,6 +159,44 @@ def test_microphone_passes_host_api_to_default_rate_check() -> None:
         audio.Microphone._open = saved_open
 
 
+def test_microphone_flags_an_actual_low_rate_fallback() -> None:
+    """A concrete open below target is evidence even when the default was not."""
+
+    class FakeStream:
+        active = False
+
+        def start(self):
+            self.active = True
+
+        def stop(self):
+            self.active = False
+
+        def close(self):
+            pass
+
+    saved_find_device = audio.find_device
+    saved_open = audio.Microphone._open
+    info = {
+        "name": "Mic with an 8 kHz fallback",
+        "default_samplerate": 8000,
+        "max_input_channels": 1,
+    }
+    audio.find_device = lambda name, kind: (0, info, "ALSA")
+    audio.Microphone._open = lambda self, idx, host: (FakeStream(), 8000, 1)
+    try:
+        with audio.Microphone() as mic:
+            check(
+                "actual low-rate fallback is flagged",
+                mic.capture_risk is not None
+                and mic.capture_risk.kind == "narrowband"
+                and "8000" in mic.capture_risk.message,
+                f"risk={mic.capture_risk}",
+            )
+    finally:
+        audio.find_device = saved_find_device
+        audio.Microphone._open = saved_open
+
+
 def test_good_devices_are_silent() -> None:
     """No warning for the devices the project runs on.
 
@@ -577,6 +615,7 @@ def main() -> int:
     test_flags_narrowband_rate()
     test_default_rate_is_advisory_outside_wasapi()
     test_microphone_passes_host_api_to_default_rate_check()
+    test_microphone_flags_an_actual_low_rate_fallback()
     test_good_devices_are_silent()
     test_unknown_rate_is_not_a_fault()
     test_survives_a_missing_name()

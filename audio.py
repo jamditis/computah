@@ -204,6 +204,14 @@ class Microphone:
             host_api=self.host_api,
         )
         self._stream, self._open_sr, self._open_ch = self._open(idx, host)
+        if self.capture_risk is None and 0 < self._open_sr < self.target_sr:
+            self.capture_risk = capture_quality.CaptureRisk(
+                "narrowband",
+                f"{self.device_label} opened at {self._open_sr} Hz after the "
+                f"{self.target_sr} Hz attempt failed. The pipeline can resample "
+                "that stream, but it cannot restore the missing speech bandwidth; "
+                "choose an input or profile that opens at the target rate.",
+            )
         self._stream.start()
         return self
 
