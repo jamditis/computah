@@ -1643,6 +1643,11 @@ def run_loop(
     print(f"computah listening -- wake word: {wake_word}. Ctrl-C to stop.")
     with audio.Microphone(mic_name) as mic:
         print(f"mic: {mic.device_label}")
+        # Say it once, here, while someone is still watching the terminal: a bad
+        # capture device does not announce itself later, since only the transcript
+        # is wrong (issue #34). Warn and continue -- it still serves wake fine.
+        if mic.capture_risk is not None:
+            print(f"  WARNING: {mic.capture_risk.message}")
         frames = mic.frames()
         paused = False
 

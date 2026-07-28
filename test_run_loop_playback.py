@@ -34,6 +34,9 @@ class _FakeMic:
     ended (active() is False), so run_loop breaks right after the single stubbed turn."""
 
     device_label = "fake-mic"
+    # Part of the real Microphone contract the live loop reads (issue #34). None
+    # means "nothing wrong with this device", which is what a fake should claim.
+    capture_risk = None
 
     def __enter__(self):
         return self

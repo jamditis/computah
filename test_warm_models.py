@@ -150,6 +150,8 @@ def test_run_loop_warms_before_listening() -> None:
 
     class _FakeMic:
         device_label = "fake-mic"
+        # Part of the real Microphone contract the live loop reads (issue #34).
+        capture_risk = None
 
         def __enter__(self):
             # Opening the mic is the moment the loop begins listening.

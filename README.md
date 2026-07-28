@@ -138,6 +138,65 @@ Run the pipeline on a wav file:
 
 The output path receives the spoken reply.
 
+## Choosing a microphone
+
+The live loop needs a capture device that delivers full-band audio. Use a USB
+Audio Class mic (or another wired/USB mic). **Do not use a Bluetooth mic on
+Windows for continuous speech**, including a conference mic like the Anker
+PowerConf paired over Bluetooth.
+
+Windows captures from a Bluetooth mic over the hands-free profile (HFP), which
+downsamples and recompresses the stream to narrowband and drops frames.
+faster-whisper then receives degraded audio and returns garbled transcripts. The
+same PowerConf over USB delivers its DSP-cleaned full-band stream intact and
+transcribes cleanly.
+
+This does not look like an audio problem. Wake detection keeps working over HFP --
+a live "computah ..." still scores 0.998 -- because the wake model matches a short
+fixed pattern that survives the degradation. Only the sentence after it comes back
+wrong, so the loop appears healthy right up to the transcript.
+
+To check a device before relying on it:
+
+```bash
+.venv/bin/python audio.py --list                  # flags unsuitable input devices
+.venv/bin/python audio.py --test-mic "powerconf"  # see the exit codes below
+```
+
+`--list` tags any input device it can tell is unsuitable and prints why. A
+hands-free marker in the name works on every host. A low default rate is used only
+for WASAPI, where it represents the shared-mode capture format; ALSA and CoreAudio
+defaults are preferences and do not prove the device is narrowband. The live loop
+prints the same warning at startup and keeps running, since the device is still
+good enough for wake detection.
+
+`--test-mic` goes further, because it has audio to look at: after capturing, it
+inspects the spectrum for the cliff that upsampling leaves behind. Audio that
+arrived at 16 kHz but started at 8 kHz carries almost nothing above 4 kHz, and no
+amount of resampling puts it back. That catches the common Linux case where
+PipeWire hides an 8 kHz transport behind a 16 kHz stream.
+
+The spectral check has a strict boundary: energy above 4 kHz rules out that one
+upsampling signature, but it does not rule out wideband HFP. A wideband HFP codec
+can carry energy above 4 kHz while recompression and frame drops still garble
+speech. A capture without the narrowband cliff is therefore reported as
+inconclusive, as is a capture that is too short, silent, or constant.
+
+`--test-mic` exit codes, which point at different fixes:
+
+| Code | Meaning |
+| --- | --- |
+| 2 | Nothing arrived (only zeros). The mic is muted, unplugged, or the wrong source. |
+| 3 | Frames arrived, but the device is unsuitable for speech. It works; pick a different one. |
+| 4 | Frames arrived, but the available checks cannot establish suitability. Prefer USB or verify with transcription. |
+
+The two layers fail differently. `--list` sees only what the device advertises:
+wideband HFP negotiates 16 kHz and passes the rate test, and on Linux the
+hands-free marker is usually absent from the name. `--test-mic` can flag an
+upsampled narrowband stream from the audio, while leaving wideband HFP and a
+resampler noisy enough to fill the empty band unresolved. A clean `--list` is not
+proof a Bluetooth link is fine. Prefer USB.
+
 ## Configuration
 
 `config.json` contains safe defaults that can be committed:

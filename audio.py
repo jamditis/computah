@@ -36,6 +36,8 @@ import sounddevice as sd
 import soundfile as sf
 from scipy.signal import resample_poly
 
+import capture_quality
+
 # Must match pipeline.py: openWakeWord's frame is 80 ms at 16 kHz = 1280 samples.
 TARGET_SR = 16000
 FRAME_SIZE = 1280
@@ -146,6 +148,13 @@ class Microphone:
         self._open_sr = None
         self._open_ch = None
         self.device_label = None
+        # PortAudio's default is kept separate from _open_sr because it is the
+        # WASAPI shared-mode capture format, while on other host APIs it is only
+        # a preference. capture_quality receives the host API so it can make that
+        # distinction instead of treating the default as native bandwidth.
+        self.device_default_sr = None
+        self.host_api = None
+        self.capture_risk = None
 
     def _callback(self, indata, frames, time_info, status):
         if status:
@@ -154,17 +163,17 @@ class Microphone:
 
     def _open(self, idx: int, host: str):
         """Open the input stream, preferring 16 kHz mono via the OS engine, with
-        native-rate fallbacks. Returns (stream, open_sr, open_channels)."""
+        default-rate fallbacks. Returns (stream, open_sr, open_channels)."""
         extra = _wasapi_autoconvert(host)
         info = sd.query_devices(idx)
-        native_sr = int(info["default_samplerate"])
-        native_ch = max(1, int(info["max_input_channels"]))
-        # Order matters: clean engine-converted path first, then native fallbacks.
+        default_sr = int(info["default_samplerate"])
+        max_ch = max(1, int(info["max_input_channels"]))
+        # Order matters: clean engine-converted path first, then device defaults.
         attempts = [
             (self.target_sr, 1, extra),
-            (native_sr, 1, extra),
-            (native_sr, native_ch, extra),
-            (native_sr, native_ch, None),
+            (default_sr, 1, extra),
+            (default_sr, max_ch, extra),
+            (default_sr, max_ch, None),
         ]
         last = None
         for sr, ch, ex in attempts:
@@ -186,7 +195,23 @@ class Microphone:
     def __enter__(self):
         idx, info, host = find_device(self.name, "input")
         self.device_label = f"{info['name']} ({host})"
+        self.device_default_sr = int(info["default_samplerate"])
+        self.host_api = host
+        self.capture_risk = capture_quality.assess_input_device(
+            info["name"],
+            self.device_default_sr,
+            self.target_sr,
+            host_api=self.host_api,
+        )
         self._stream, self._open_sr, self._open_ch = self._open(idx, host)
+        if self.capture_risk is None and 0 < self._open_sr < self.target_sr:
+            self.capture_risk = capture_quality.CaptureRisk(
+                "narrowband",
+                f"{self.device_label} opened at {self._open_sr} Hz after the "
+                f"{self.target_sr} Hz attempt failed. The pipeline can resample "
+                "that stream, but it cannot restore the missing speech bandwidth; "
+                "choose an input or profile that opens at the target rate.",
+            )
         self._stream.start()
         return self
 
@@ -280,7 +305,12 @@ def play_wav(path, name=None) -> None:
 
 
 def list_devices() -> None:
-    """Print the audio device table (index, I/O, host API, default rate)."""
+    """Print the audio device table (index, I/O, host API, default rate).
+
+    Tags input devices that cannot carry continuous speech, so the table helps
+    pick a mic rather than only listing what exists (issue #34).
+    """
+    flagged = []
     for i, d in enumerate(sd.query_devices()):
         io = []
         if d["max_input_channels"] > 0:
@@ -288,10 +318,23 @@ def list_devices() -> None:
         if d["max_output_channels"] > 0:
             io.append(f"OUT x{d['max_output_channels']}")
         host = sd.query_hostapis(d["hostapi"])["name"]
+        risk = None
+        if d["max_input_channels"] > 0:
+            risk = capture_quality.assess_input_device(
+                d["name"],
+                d["default_samplerate"],
+                TARGET_SR,
+                host_api=host,
+            )
+        tag = f"  <-- {risk.kind}, not for speech" if risk else ""
+        if risk:
+            flagged.append((i, risk))
         print(
             f"[{i:2d}] {d['name'][:44]:44s} {','.join(io):10s} "
-            f"{host:18s} @{int(d['default_samplerate'])}"
+            f"{host:18s} @{int(d['default_samplerate'])}{tag}"
         )
+    for idx, risk in flagged:
+        print(f"\n[{idx}] {risk.message}")
 
 
 def _test_mic(name: str, seconds: float) -> int:
@@ -302,16 +345,21 @@ def _test_mic(name: str, seconds: float) -> int:
     peak = 0
     sumsq = 0.0
     n_samples = 0
+    captured = []
     target = int(seconds * TARGET_SR / FRAME_SIZE)
     with Microphone(subs) as mic:
         print(
-            f"device: {mic.device_label}  open_sr={mic._open_sr} open_ch={mic._open_ch}"
+            f"device: {mic.device_label}  default_sr={mic.device_default_sr} "
+            f"open_sr={mic._open_sr} open_ch={mic._open_ch}"
         )
+        if mic.capture_risk is not None:
+            print(f"WARNING: {mic.capture_risk.message}")
         for frame in mic.frames():
             assert frame.dtype == np.int16 and frame.shape == (FRAME_SIZE,), (
                 f"bad frame: dtype={frame.dtype} shape={frame.shape}"
             )
             n_frames += 1
+            captured.append(frame)
             peak = max(peak, int(np.max(np.abs(frame))))
             sumsq += float(np.sum(frame.astype(np.float32) ** 2))
             n_samples += frame.size
@@ -325,8 +373,33 @@ def _test_mic(name: str, seconds: float) -> int:
     if peak == 0:
         print("RESULT: dead stream (only zeros) - check the mic's source")
         return 2
-    print("RESULT: live frame stream - shape and dtype correct for the pipeline")
-    return 0
+
+    # The audio is already in hand, so judging it costs nothing extra. The cliff
+    # check sees an 8 kHz source that PipeWire advertises and emits at 16 kHz,
+    # while leaving wideband HFP explicitly inconclusive.
+    spectrum = capture_quality.assess_capture_spectrum(
+        np.concatenate(captured), TARGET_SR
+    )
+    if spectrum.risk is not None:
+        print(f"WARNING: {spectrum.risk.message}")
+
+    risk = mic.capture_risk or spectrum.risk
+    if risk is not None:
+        # The frames are structurally perfect and the content is still suspect,
+        # so a bare "correct for the pipeline" here would read as a pass on a mic
+        # that garbles every sentence. Non-zero exit, and worded as the
+        # classifier's verdict rather than as ground truth, because the three
+        # signals differ in strength: the hands-free name identifies the device
+        # outright, the advertised rate is conclusive only on WASAPI, and the
+        # spectral cliff is measured from the audio but can be masked by a noisy
+        # resampler (see the two assess_* docstrings in capture_quality).
+        print(
+            "RESULT: live frame stream, but this device is flagged as unsuitable "
+            f"for continuous speech ({risk.kind}) - see the warning above"
+        )
+        return 3
+    print(f"RESULT: inconclusive - {spectrum.message}")
+    return 4
 
 
 def _cli() -> int:
@@ -337,7 +410,9 @@ def _cli() -> int:
         metavar="NAME",
         nargs="?",
         const="",
-        help="capture from a mic (name substring; empty = default)",
+        help="capture from a mic (name substring; empty = default). exits 2 if "
+        "nothing arrived, 3 if flagged as unsuitable for continuous speech, or "
+        "4 if suitability remains inconclusive",
     )
     p.add_argument("--play", metavar="WAV", help="play a WAV through an output device")
     p.add_argument(
