@@ -15,16 +15,22 @@ from __future__ import annotations
 
 import math
 import subprocess
+import tempfile
+from pathlib import Path
+from unittest import mock
 
 from tts_voice_eval import (
     LineResult,
     VoiceResult,
+    config_path,
     download_error,
+    download_voice,
     format_table,
     mean_rtf,
     real_time_factor,
     recommend,
     rtf_spread,
+    voice_is_complete,
 )
 
 PASS, FAIL = "PASS", "FAIL"
@@ -191,6 +197,86 @@ def test_download_error_is_actionable() -> None:
     )
 
 
+def test_half_downloaded_voice_is_not_treated_as_ready() -> None:
+    """A model with no config is a download to finish, not a voice to load.
+
+    PiperVoice.load derives the config path from the model path, so a voice that
+    kept its 63 MB .onnx through an interrupted setup and lost its 5 KB .onnx.json
+    loads as a failure. Returning early on the .onnx alone puts that failure on the
+    table as a property of the voice, when one more download call fixes it.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        onnx = Path(tmp) / "en_US-lessac-medium.onnx"
+        onnx.write_bytes(b"model")
+        # The literal name piper writes and PiperVoice.load reads, spelled out
+        # rather than taken from config_path, so a helper that derives the wrong
+        # path cannot move the file and the assertion together and stay green.
+        config = Path(tmp) / "en_US-lessac-medium.onnx.json"
+
+        check(
+            "the helper points at the file piper actually writes",
+            config_path(onnx) == config,
+            f"{config_path(onnx).name}, want {config.name}",
+        )
+
+        missing = voice_is_complete(onnx)
+        config.write_bytes(b"")
+        empty = voice_is_complete(onnx)
+        config.write_bytes(b"{}")
+        both = voice_is_complete(onnx)
+        onnx.unlink()
+        no_model = voice_is_complete(onnx)
+
+    check(
+        "a model without its config is not complete",
+        not missing and not empty,
+        "missing and empty both have to re-download, as piper's own check does",
+    )
+    check(
+        "both files present and non-empty is complete",
+        both and not no_model,
+        "and a missing model is still incomplete however good the config is",
+    )
+
+
+def test_download_repairs_a_half_downloaded_voice_once() -> None:
+    """The check above has to be the one the skip actually consults.
+
+    Testing voice_is_complete alone would leave `if onnx.exists()` at the call site
+    green, which is the whole bug. So this drives download_voice with the
+    downloader stubbed out: it must call the downloader for a model with no config,
+    and must not call it again once the config is there.
+    """
+    voice_name = "en_US-lessac-medium"
+    with tempfile.TemporaryDirectory() as tmp:
+        voices_dir = Path(tmp)
+        onnx = voices_dir / f"{voice_name}.onnx"
+        onnx.write_bytes(b"model")
+        calls: list[list[str]] = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            (voices_dir / f"{voice_name}.onnx.json").write_bytes(b"{}")
+            return subprocess.CompletedProcess(cmd, 0)
+
+        with mock.patch("tts_voice_eval.subprocess.run", fake_run):
+            download_voice(voice_name, voices_dir)
+            repaired = len(calls)
+            download_voice(voice_name, voices_dir)
+            again = len(calls)
+
+    check(
+        "a model with no config sends the voice back to the downloader",
+        repaired == 1,
+        f"{repaired} download calls; 0 means the skip is still checking the .onnx alone",
+    )
+    check(
+        "a complete voice downloads nothing",
+        again == 1,
+        f"{again} total calls; more than one means it re-downloads 63 MB every run",
+    )
+
+
 def test_recommend_says_so_when_nothing_ran() -> None:
     notes = recommend([VoiceResult(voice="broken", error="boom")], rtf_budget=0.5)
     check(
@@ -209,6 +295,8 @@ def main() -> int:
     test_recommend_flags_only_what_is_over_budget()
     test_failed_voice_is_excluded_but_still_shown()
     test_download_error_is_actionable()
+    test_half_downloaded_voice_is_not_treated_as_ready()
+    test_download_repairs_a_half_downloaded_voice_once()
     test_recommend_says_so_when_nothing_ran()
 
     failed = [name for verdict, name in results if verdict == FAIL]

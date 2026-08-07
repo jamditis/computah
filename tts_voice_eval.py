@@ -182,6 +182,26 @@ def rtf_spread(result: VoiceResult) -> str:
     return "  ".join(f"{line.label} {line.rtf:.3f}" for line in result.lines)
 
 
+def config_path(onnx: Path) -> Path:
+    """Where PiperVoice.load looks for the config when it is not told: model + .json."""
+    return Path(f"{onnx}.json")
+
+
+def voice_is_complete(onnx: Path) -> bool:
+    """Both files present and non-empty, which is what piper's own downloader checks.
+
+    Skipping the download on the .onnx alone hands PiperVoice.load a voice with no
+    config, and it reports as a voice that failed to run when one more download
+    call would have finished it: an interrupted setup leaves the 63 MB model
+    written and the 5 KB config missing far more often than the reverse. This
+    condition is the complement of piper's _needs_download, so every case that
+    downloader would repair still reaches it.
+    """
+    return all(
+        path.exists() and path.stat().st_size > 0 for path in (onnx, config_path(onnx))
+    )
+
+
 def format_table(results: list[VoiceResult]) -> str:
     header = "{:<26} {:>8} {:>8} {:>9} {:>9}  {}".format(
         "voice", "size MB", "load s", "mean RTF", "peak MB", "per line"
@@ -209,7 +229,7 @@ def format_table(results: list[VoiceResult]) -> str:
 
 def download_voice(voice: str, voices_dir: Path) -> Path:
     onnx = voices_dir / f"{voice}.onnx"
-    if onnx.exists():
+    if voice_is_complete(onnx):
         return onnx
     voices_dir.mkdir(parents=True, exist_ok=True)
     subprocess.run(
