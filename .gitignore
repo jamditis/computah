@@ -14,6 +14,7 @@ whisper_models/
 *.onnx.json
 
 # Generated audio (tests synthesize their own)
+tts-samples/
 test_audio/*
 !test_audio/.gitkeep
 
