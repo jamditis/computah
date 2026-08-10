@@ -115,6 +115,7 @@ CONFIRM_WORDS = frozenset(
         "right",
         "exactly",
         "affirmative",
+        "alright",
         "confirm",
         "confirmed",
         "approved",
@@ -181,12 +182,21 @@ _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 # The negated form comes first and the order is load-bearing, because these apply in
 # sequence: without it "don't do it" reaches the rule below, folds to "dont confirm",
 # and lands in revise, so the plainest spoken refusal there is fails to cancel.
+#
+# "cancel that" and "stop it" fold for a third reason, and it is the whitelist tail
+# check that creates it. Their object pronoun is not a decision word, so the reply ends
+# on one and never reaches the refusal branch, which turns an unambiguous cancellation
+# into a re-prompt. Absorbing the object is narrower than letting trailing pronouns
+# through generally: "yes that" has to stay a revision, since it is "yes, that... one
+# instead" cut off at the pause.
 _PHRASES = (
     (r"\bnever\s+mind\b", "nevermind"),
     (r"\bcall\s+it\s+off\b", "cancel"),
-    (r"\b(?:dont|do\s+not)\s+do\s+it\b", "no"),
+    (r"\b(?:dont|do\s+not)\s+do\s+(?:it|that)\b", "no"),
     (r"\bdo\s+it\b", "confirm"),
+    (r"\b(cancel|stop|forget|scratch)\s+(?:it|that)\b", r"\1"),
     (r"\bthats\s+(right|correct|it)\b", "confirm"),
+    (r"\ball\s+right\b", "alright"),
     (r"\bgo\s+ahead\b", "go"),
     (r"\bthank\s+you\b", "thanks"),
 )

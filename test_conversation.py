@@ -37,6 +37,12 @@ class TestConfirm(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.CONFIRM)
 
+    def test_all_right_as_two_words_or_one(self):
+        # A standard spoken approval that neither spelling reached: "all" is in no set,
+        # and "alright" was not listed.
+        self.assertEqual(c.classify_confirmation("all right"), c.CONFIRM)
+        self.assertEqual(c.classify_confirmation("alright"), c.CONFIRM)
+
     def test_punctuation_and_case(self):
         self.assertEqual(c.classify_confirmation("Yes!"), c.CONFIRM)
         self.assertEqual(c.classify_confirmation("YES."), c.CONFIRM)
@@ -182,9 +188,34 @@ class TestCancel(unittest.TestCase):
     def test_a_negated_do_it_is_a_refusal(self):
         # "do it" folds to a confirmation, so an unguarded fold turned the plainest
         # spoken refusal there is into "dont confirm" and sent it around for a revision.
-        for answer in ["dont do it", "don't do it", "do not do it", "no dont do it"]:
+        for answer in [
+            "dont do it",
+            "don't do it",
+            "do not do it",
+            "no dont do it",
+            "dont do that",
+            "do not do that",
+        ]:
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.CANCEL)
+
+    def test_a_refusal_keeps_its_object_pronoun(self):
+        # The whitelist tail check created these: "that" and "it" are not decision
+        # words, so an ordinary cancellation ended on one and never reached the refusal
+        # branch. Folding the object in is narrower than letting trailing pronouns
+        # through, which would have made "yes that" confirm.
+        for answer in ["cancel that", "stop it", "forget it", "scratch that"]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.CANCEL)
+        self.assertEqual(c.classify_confirmation("yes that"), c.REVISE)
+
+    def test_every_object_absorbing_verb_already_decides_alone(self):
+        # The fold leaves the verb behind, so a verb that is not itself a refusal would
+        # produce a token no branch recognises and quietly revise. "drop it" was written
+        # that way first and did exactly that.
+        for verb in ["cancel", "stop", "forget", "scratch"]:
+            with self.subTest(verb=verb):
+                self.assertIn(verb, c.CANCEL_WORDS)
 
     def test_a_negated_do_it_carrying_a_correction_still_revises(self):
         # The fold decides the words, not the reply. Two different rules catch these:
