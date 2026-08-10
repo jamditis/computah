@@ -194,7 +194,13 @@ _PHRASES = (
 # Filler that can end a finished sentence, so it is stripped from the tail before the
 # check below looks at what the reply really ended on. "go ahead then" and "never mind
 # then" are finished; "okay and then" is the same truncation as "okay and" wearing one.
-_TERMINAL_FILLER = frozenset({"then", "now", "please", "thanks", "well"})
+#
+# Every word here is an exception to that check, and exceptions run in the unsafe
+# direction: each one lets a reply reach confirm on a word that is not itself a
+# decision. So the bar for adding one is that it ends a spoken turn more often than it
+# opens a hedge. "well" was here and does the opposite ("yeah, well..." is someone
+# winding up to disagree), which confirmed the request they were about to change.
+_TERMINAL_FILLER = frozenset({"then", "now", "please", "thanks"})
 
 # What a finished decision is allowed to end on. Capture endpoints on silence
 # (endpoint_silence_ms), so "yes, and..." said with a pause to think arrives as exactly

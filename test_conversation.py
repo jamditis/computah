@@ -143,6 +143,14 @@ class TestClippedByTheSilenceEndpoint(unittest.TestCase):
         self.assertEqual(c.classify_confirmation("just do it"), c.CONFIRM)
         self.assertEqual(c.classify_confirmation("and yes"), c.CONFIRM)
 
+    def test_a_hedge_that_ends_a_reply_is_not_an_ending(self):
+        # "well" used to be stripped as terminal filler, which let these confirm. It
+        # opens a wind-up to disagree far more often than it closes a turn, so a reply
+        # endpointed on it is the pause before "actually, make it three".
+        for answer in ["yeah well", "okay well", "yes well"]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+
     def test_filler_that_does_end_a_sentence_is_stripped_first(self):
         # "then" finishes a reply, so it must not hide the truncation under it.
         self.assertEqual(c.classify_confirmation("go ahead then"), c.CONFIRM)
@@ -179,8 +187,11 @@ class TestCancel(unittest.TestCase):
                 self.assertEqual(c.classify_confirmation(answer), c.CANCEL)
 
     def test_a_negated_do_it_carrying_a_correction_still_revises(self):
-        # The all-or-nothing refusal rule outranks the fold: this one has more to say.
+        # The fold decides the words, not the reply. Two different rules catch these:
+        # "yet" is not a decision word, so the first stops at the tail check, while the
+        # second ends on one and reaches the all-or-nothing refusal rule instead.
         self.assertEqual(c.classify_confirmation("dont do it yet"), c.REVISE)
+        self.assertEqual(c.classify_confirmation("dont do it go ahead"), c.REVISE)
 
     def test_a_refusal_with_filler_still_ends_the_turn(self):
         for answer in ["no thanks", "um, no", "no please stop", "never mind then"]:
