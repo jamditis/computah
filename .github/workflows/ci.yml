@@ -68,6 +68,7 @@ jobs:
             test_chime.py \
             test_config_validation.py \
             test_confidence_guard.py \
+            test_conversation.py \
             test_cross_platform.py \
             test_endpoint_config.py \
             test_live_driver.py \
