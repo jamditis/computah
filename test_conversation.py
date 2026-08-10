@@ -123,6 +123,21 @@ class TestClippedByTheSilenceEndpoint(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
 
+    def test_a_reply_ending_on_a_word_nobody_listed(self):
+        # Why the tail check is a whitelist. These clip before the correction that was
+        # coming ("yes, the... first one"), and every one of them read as approval when
+        # the check was a list of words that cannot end a sentence, because articles and
+        # pronouns were not on it. Ending on a word that is not a decision is enough.
+        for answer in ["yes the", "yes a", "yes i", "yes i mean", "okay would"]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+
+    def test_the_tail_check_admits_only_decisions(self):
+        # The invariant itself, so a word added to either decision set stays able to end
+        # a reply and one added to FILLER_WORDS does not silently become an ending.
+        self.assertEqual(c._CAN_END_A_DECISION, c.CANCEL_WORDS | c.CONFIRM_WORDS)
+        self.assertEqual(c._CAN_END_A_DECISION & c.FILLER_WORDS, frozenset())
+
     def test_the_check_is_final_position_only(self):
         # Same words, complete sentences. Only a reply that ENDS on one is unfinished.
         self.assertEqual(c.classify_confirmation("just do it"), c.CONFIRM)
@@ -155,6 +170,17 @@ class TestCancel(unittest.TestCase):
 
     def test_never_mind_as_two_words(self):
         self.assertEqual(c.classify_confirmation("never mind"), c.CANCEL)
+
+    def test_a_negated_do_it_is_a_refusal(self):
+        # "do it" folds to a confirmation, so an unguarded fold turned the plainest
+        # spoken refusal there is into "dont confirm" and sent it around for a revision.
+        for answer in ["dont do it", "don't do it", "do not do it", "no dont do it"]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.CANCEL)
+
+    def test_a_negated_do_it_carrying_a_correction_still_revises(self):
+        # The all-or-nothing refusal rule outranks the fold: this one has more to say.
+        self.assertEqual(c.classify_confirmation("dont do it yet"), c.REVISE)
 
     def test_a_refusal_with_filler_still_ends_the_turn(self):
         for answer in ["no thanks", "um, no", "no please stop", "never mind then"]:

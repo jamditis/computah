@@ -177,31 +177,42 @@ _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 # "go ahead", "call it off", and "thank you" fold to absorb their trailing word, which
 # is otherwise unlisted and would leave the reply looking unfinished. Their first word
 # already decides on its own.
+#
+# The negated form comes first and the order is load-bearing, because these apply in
+# sequence: without it "don't do it" reaches the rule below, folds to "dont confirm",
+# and lands in revise, so the plainest spoken refusal there is fails to cancel.
 _PHRASES = (
     (r"\bnever\s+mind\b", "nevermind"),
     (r"\bcall\s+it\s+off\b", "cancel"),
+    (r"\b(?:dont|do\s+not)\s+do\s+it\b", "no"),
     (r"\bdo\s+it\b", "confirm"),
     (r"\bthats\s+(right|correct|it)\b", "confirm"),
     (r"\bgo\s+ahead\b", "go"),
     (r"\bthank\s+you\b", "thanks"),
 )
 
-# Words that cannot end a finished sentence. A reply ending on one is evidence the
-# speaker was still talking, and capture endpoints on silence (endpoint_silence_ms),
-# so "yes, and..." said with a pause to think arrives as exactly the two words "yes
-# and". Approving that runs the request the speaker was in the middle of amending,
-# which is the one outcome this module exists to prevent.
-#
-# Position is the whole signal, so these stay ordinary filler everywhere else: "just
-# do it" is a complete answer and "yeah just" is not, from the same word.
-_TRAILING_INCOMPLETE = frozenset(
-    {"and", "but", "so", "or", "also", "plus", "just", "with", "to"}
-)
-
-# Filler that DOES end a sentence, so it is stripped from the tail before the check
-# above looks at what the reply really ended on. "go ahead then" and "never mind then"
-# are finished; "okay and then" is the same truncation as "okay and" wearing one.
+# Filler that can end a finished sentence, so it is stripped from the tail before the
+# check below looks at what the reply really ended on. "go ahead then" and "never mind
+# then" are finished; "okay and then" is the same truncation as "okay and" wearing one.
 _TERMINAL_FILLER = frozenset({"then", "now", "please", "thanks", "well"})
+
+# What a finished decision is allowed to end on. Capture endpoints on silence
+# (endpoint_silence_ms), so "yes, and..." said with a pause to think arrives as exactly
+# the two words "yes and", and approving that runs the request the speaker was still
+# amending. A reply that does not end on an actual decision word is treated as one of
+# those truncations.
+#
+# This is a whitelist on purpose, and it replaced a list of words that cannot end a
+# sentence. That list had to be complete to be safe, and it was not: "and", "but" and
+# "just" were on it while "the", "a" and "i" were not, so "yes, the..." clipped before
+# "first one" read as approval and executed. A word nobody thought of now falls to
+# revise, which costs a turn, instead of to execute, which costs the wrong action.
+#
+# Position is the whole signal, so these words stay ordinary filler elsewhere: "just do
+# it" is a complete answer and "yeah just" is not, from the same word. The trade is
+# real and worth naming: a hesitant tail like "yes um" or "yeah i guess" now goes back
+# around for one more turn rather than confirming.
+_CAN_END_A_DECISION = CANCEL_WORDS | CONFIRM_WORDS
 
 
 def _tokens(text: str) -> list[str]:
@@ -241,7 +252,7 @@ def classify_confirmation(text: str | None) -> str:
     tail = list(tokens)
     while tail and tail[-1] in _TERMINAL_FILLER:
         tail.pop()
-    if tail and tail[-1] in _TRAILING_INCOMPLETE:
+    if tail and tail[-1] not in _CAN_END_A_DECISION:
         return REVISE
     if any(t in CANCEL_WORDS for t in tokens):
         if all(t in CANCEL_WORDS or t in FILLER_WORDS for t in tokens):
