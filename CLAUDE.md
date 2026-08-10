@@ -140,6 +140,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python test_endpoint_config.py   # endpoint_silence_ms / max_request_ms tune capture endpointing — fast, no models
 .venv/bin/python test_capture_quality.py   # capture-device suitability verdicts + the startup warning — fast, no models, no PortAudio
 .venv/bin/python test_chime.py             # wake-acknowledgment cue generator + both-loop wiring — fast, no models
+.venv/bin/python test_conversation.py      # readback handshake: framing, reply classification, loop floor — fast, no models
 .venv/bin/python test_live_driver.py       # live_driver hardware path honors the guard — fast, no models
 .venv/bin/python test_pipeline_bridge.py   # full chain + bridge brain (loads models)
 .venv/bin/python test_pipeline.py          # full chain + fallback CLI brain
@@ -181,6 +182,7 @@ bug.
 - `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> chime -> STT -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
 - `capture_quality.py` — whether a capture device can carry continuous speech (issue #34): flags a Bluetooth hands-free (HFP) endpoint by name, a low WASAPI shared-mode capture format, and the 4 kHz cliff left by upsampled narrowband audio. Hardware-free (no sounddevice) so it is testable anywhere; `audio.py` stores the advertised-property verdict on `Microphone.capture_risk`, which `run_loop` prints at startup and `--list`/`--test-mic` surface. A spectral result without that cliff stays inconclusive because it cannot rule out wideband HFP codec damage or frame drops.
 - `chime.py` — the wake-acknowledgment cue (issue #41): a pure-DSP generator for the two-tone rising chime played the instant the wake fires, before capture. Backend-free (no sounddevice/aplay) so both live loops can render the cue and play it through their own output. Gated by the `wake_chime` config key (opt-in, default off — it regresses the no-pause case on a half-duplex device); half-duplex handling keeps the cue out of the captured request when it is on.
+- `conversation.py` — the confirm-before-act readback handshake (issue #42): the framing that asks the brain to restate a request without acting on it, the classifier that reads the spoken answer as confirm / revise / cancel, and the floor that stops the revision loop. Stdlib-only and hardware-free, like `brain_bridge.py`, so it is testable anywhere. Confirmation and refusal are both all-or-nothing: a reply confirms only when every word in it is an acknowledgment, and refuses only when every word is a refusal, so "yes but make it three" and "don't send it to Bob, send it to Alice" both come back as revisions. A reply left unfinished by the silence endpoint ("yes and") is a revision too. Not wired into a loop yet; the second listening window, the config keys, and reply correlation (#19, #59) land with the wiring.
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.
 - `test_*.py` — see Dev commands.
