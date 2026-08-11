@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import sys
 import tempfile
 import types
@@ -449,6 +450,73 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
             sys.modules["pipeline"] = saved
 
 
+def test_an_explicit_wav_is_measured_or_refused() -> None:
+    """A named sample is the question being asked, so it is never filled in.
+
+    ensure_clip synthesizes anything missing, which is right for the default clip and
+    wrong for --wav: a typo would otherwise score the canned utterance and print a
+    table that answers a question nobody asked.
+    """
+    print("\nexplicit --wav")
+    stub = types.ModuleType("pipeline")
+    stub.load_config = lambda: {
+        "brain_backend": "cli",
+        "brain_transport": "local",
+        "brain_host": "",
+        "brain_poll_s": 0.5,
+        "wake_word": "hey_jarvis",
+        "wake_threshold": 0.5,
+    }
+    stub.warm_models = lambda cfg=None, wake_word=None: {"whisper": 1.5}
+    stub.run_pipeline = lambda wav, wake_word=None: {
+        "wake_fired": True,
+        "wake_score": 0.9,
+        "timings_s": {"total": 1.0},
+    }
+
+    saved_mod = sys.modules.get("pipeline")
+    saved_cwd = os.getcwd()
+    scratch = tempfile.TemporaryDirectory()
+    os.chdir(scratch.name)
+    sys.modules["pipeline"] = stub
+    try:
+        spoken: list[str] = []
+        stub.speak = lambda text, out: spoken.append(out)
+
+        missing = str(Path(scratch.name) / "not-here.wav")
+        refused = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            try:
+                benchmark.collect(1, missing, None)
+            except SystemExit as e:
+                refused = str(e.code)
+        check(
+            "a missing --wav refuses instead of synthesizing over it",
+            refused is not None and missing in refused and spoken == [],
+            f"refusal: {refused!r}",
+        )
+        check(
+            "the refusal names the way forward, not just the fault",
+            refused is not None and "Drop --wav" in refused,
+            "an operator who typo'd a path needs to know the default is the fallback",
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            benchmark.collect(1, None, None)
+        check(
+            "the default clip is still synthesized on demand",
+            spoken == [benchmark.default_clip_path("hey_jarvis")],
+            f"spoke into {spoken}: only the clip we own is filled in",
+        )
+    finally:
+        os.chdir(saved_cwd)
+        scratch.cleanup()
+        if saved_mod is None:
+            del sys.modules["pipeline"]
+        else:
+            sys.modules["pipeline"] = saved_mod
+
+
 def test_main_decides_the_probe_and_the_refusal() -> None:
     """The decisions, not the rendering: report_lines is given a transport dict by the
     tests above, so nothing there pins main() choosing to build one. These drive main()
@@ -482,6 +550,14 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
 
     saved_mod = sys.modules.get("pipeline")
     saved_probe = benchmark.ssh_hop_samples
+    saved_cwd = os.getcwd()
+    # The default clip path is relative, so this test's "was the clip synthesized
+    # after warming" check depends on whether test_audio/ already holds one. Running
+    # the real benchmark once creates it, and from then on ensure_clip would skip the
+    # stub speak() and fail a correct implementation. A scratch cwd makes the default
+    # path reliably absent instead of asserting against whatever the last run left.
+    scratch = tempfile.TemporaryDirectory()
+    os.chdir(scratch.name)
     sys.modules["pipeline"] = stub
     benchmark.ssh_hop_samples = lambda host, runs, *a, **k: (
         probes.append((host, runs)),
@@ -547,6 +623,8 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
         )
     finally:
         benchmark.ssh_hop_samples = saved_probe
+        os.chdir(saved_cwd)
+        scratch.cleanup()
         if saved_mod is None:
             del sys.modules["pipeline"]
         else:
@@ -624,6 +702,7 @@ def main() -> int:
     test_the_clip_is_fixed_and_self_supplying()
     test_a_cli_backend_pays_no_ssh_hop()
     test_a_bridge_brain_is_not_written_to_by_accident()
+    test_an_explicit_wav_is_measured_or_refused()
     test_main_decides_the_probe_and_the_refusal()
     test_json_mode_emits_only_json()
     test_exit_code_reflects_what_was_measured()

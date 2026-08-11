@@ -275,7 +275,16 @@ The clip is a fixed Piper utterance built from the configured wake word, synthes
 into `test_audio/benchmark_clip_<wake_word>.wav` on first run and reused after that, so
 the input does not drift between runs. The wake word is in the filename because the clip
 speaks it: switching `--wake-word` synthesizes a new clip rather than scoring the old
-phrase against the new model.
+phrase against the new model. Only that default clip is synthesized on demand; an
+explicit `--wav` that does not exist is an error rather than something to fill in, so a
+typo cannot quietly benchmark generated audio in place of your sample.
+
+The table above predates the script and was taken against a simulated brain, so it has
+no Brain reply row. `benchmark.py` has no simulator: it measures whichever backend the
+config names, so its Brain reply and End-to-end turn rows carry real assistant latency
+(the `claude` CLI under the default `brain_backend: "cli"`, or a live session under
+`bridge` with `--live-brain`). Those two rows are not comparable to the numbers above
+and depend on the model and the load at the time. The three stage rows are.
 
 On a working bridge (`brain_backend: "bridge"` with its reply path set, and a host when
 the transport is `ssh`), every run sends the clip's transcript into the persistent

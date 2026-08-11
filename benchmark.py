@@ -262,6 +262,16 @@ def collect(
             "config.local.json to benchmark without touching that session."
         )
     clip = wav_path or default_clip_path(wake)
+    if wav_path is not None and not Path(wav_path).exists():
+        # Only the default clip is ours to synthesize. An explicit --wav names a
+        # sample the operator wants measured, so filling a missing one with the
+        # canned utterance would answer a different question than the one asked
+        # and still print a confident table. Fail before the models load.
+        raise SystemExit(
+            f"--wav {wav_path} does not exist. Only the default clip "
+            f"({default_clip_path(wake)}) is synthesized on demand. Drop --wav to "
+            "benchmark that generated clip, or fix the path to measure your own."
+        )
 
     warm_started = time.perf_counter()
     warm = pipeline.warm_models(cfg, wake_word=wake_word)
