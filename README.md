@@ -283,12 +283,19 @@ The table above predates the script and was taken against a simulated brain, so 
 no Brain reply row. `benchmark.py` has no simulator: it measures whichever backend the
 config names, so its Brain reply and End-to-end turn rows carry real assistant latency
 (the `claude` CLI under the default `brain_backend: "cli"`, or a live session under
-`bridge` with `--live-brain`). Those two rows depend on the model and the load at the
-time; the three stage rows are the reproducible ones.
+`bridge` with `--live-brain`). Those rows depend on the model and the load at the time.
+
+Text-to-speech is the one to watch, because it looks like a stage row and is not
+reproducible either: `run_pipeline` times `speak(reply, ...)`, so it renders the
+assistant's answer, and its duration tracks how long that answer happens to be. Only
+wake detection and speech-to-text are driven by the fixed clip. If you want a
+comparable Text-to-speech number across runs, quote the reply length beside it or hold
+the reply fixed.
 
 So when you paste, replace the "simulated brain" caption too: say which backend and
-model produced the run. Keeping the old caption over a pasted table would claim a
-simulated brain for two rows that measured a real one.
+model produced the run, and note that only the first two rows are input-driven. Keeping
+the old caption over a pasted table would claim a simulated brain for rows that
+measured a real one.
 
 On a working bridge (`brain_backend: "bridge"` with its reply path set, and a host when
 the transport is `ssh`), every run sends the clip's transcript into the persistent

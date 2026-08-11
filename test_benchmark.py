@@ -572,6 +572,7 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
         probes.append((host, runs)),
         [0.1] * runs,
     )[1]
+
     def run_main(argv: list[str], out: io.StringIO | None = None):
         """main() with SystemExit as a return value, so a refusal is a result here.
 
