@@ -262,7 +262,28 @@ Measured on a Raspberry Pi 5 with warm models and a simulated brain:
 | Speech-to-text | 3.3 s |
 | Text-to-speech | 3.9 s |
 
-The largest known cost is `speak()`: it shells out to Piper for each reply, so the voice model reloads every turn. Keeping Piper resident is the likely next latency win.
+Those are one manual measurement. Regenerate them with `benchmark.py`, which runs the
+file pipeline repeatedly on one fixed clip with warm models and prints a median/p95
+table to paste over the one above, along with peak RSS:
+
+```bash
+systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 \
+  .venv/bin/python benchmark.py --runs 20
+```
+
+The clip is a fixed Piper utterance built from the configured wake word, synthesized
+into `test_audio/` on first run and reused after that, so the input does not drift
+between runs.
+
+It times the ssh hop to the brain host as its own row. The brain stage is transport plus
+however long the assistant took to answer, and the transport half is not one hop per
+turn: `ssh_reply_reader` opens a connection for every reply poll and nothing multiplexes
+them, so it grows with the answer. Warming Piper or whisper cannot reduce it.
+
+The 3.9 s text-to-speech figure predates the resident voice: `speak()` now synthesizes
+in process from a cached Piper voice, with the CLI only as a warned fallback, and
+`warm_models` loads it before the first turn. Re-running the benchmark is what settles
+whether text-to-speech is still the largest cost.
 
 ## Roadmap
 

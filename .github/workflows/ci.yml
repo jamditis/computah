@@ -61,6 +61,7 @@ jobs:
           set +e
           fail=0
           for t in \
+            test_benchmark.py \
             test_brain_bridge.py \
             test_brain_dispatch.py \
             test_sanitize_reply.py \
