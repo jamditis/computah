@@ -22,6 +22,7 @@ import io
 import json
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 import benchmark
@@ -39,7 +40,13 @@ def check(name: str, ok: bool, detail: str) -> bool:
 def _collected(per_stage: dict, *, requested: int, misses: int) -> dict:
     """A collect() result with the fields report_lines reads."""
     return {
-        "config": {"brain_transport": "local", "brain_host": "", "brain_poll_s": 0.5},
+        "config": {
+            "brain_backend": "cli",
+            "brain_transport": "local",
+            "brain_host": "",
+            "brain_poll_s": 0.5,
+        },
+        "wav_path": "test_audio/benchmark_clip_hey_jarvis.wav",
         "warm_per_model_s": {"whisper": 1.5},
         "warm_total_s": 1.5,
         "per_stage": per_stage,
@@ -318,12 +325,239 @@ def test_the_clip_is_fixed_and_self_supplying() -> None:
             "re-synthesizing every run would defeat the point of a fixed clip",
         )
 
+    check(
+        "each wake word caches its own clip",
+        benchmark.default_clip_path("hey_jarvis")
+        != benchmark.default_clip_path("alexa"),
+        "one shared filename would score the previous phrase against the new model, "
+        "and the run would report no timings at all",
+    )
+    check(
+        "the cached clip says which phrase it speaks",
+        "alexa" in benchmark.default_clip_path("alexa"),
+        benchmark.default_clip_path("alexa"),
+    )
+
+
+def test_a_cli_backend_pays_no_ssh_hop() -> None:
+    print("\nbackend gates the probe")
+    collected = _collected({"total": [1.0]}, requested=1, misses=0)
+    text = "\n".join(
+        benchmark.report_lines(collected, {"transport": "not-bridge", "backend": "cli"})
+    )
+    check(
+        "a cli backend reports no hop even with an ssh transport configured",
+        "brain_backend is cli" in text and "no ssh hop" in text,
+        "brain() dispatches on the backend, so brain_transport alone measured nothing",
+    )
+    check(
+        "no hop row is invented for a turn that never used the bridge",
+        "round trip" not in text,
+        "an ssh row here would price a hop the measured turn did not pay",
+    )
+
+
+def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
+    print("\nlive brain guard")
+    # A stub module, not the real pipeline: pipeline imports numpy at module scope, and
+    # these tests run with no models and no audio stack. collect() resolves `pipeline`
+    # through sys.modules at call time, so the stub is what it gets. Every model entry
+    # point records instead of running, so the check below can say the guard fired
+    # BEFORE any of them rather than only that it fired.
+    touched: list[str] = []
+
+    stub = types.ModuleType("pipeline")
+    stub.load_config = lambda: {
+        "brain_backend": "bridge",
+        "brain_reply_path": "/tmp/replies",
+        "brain_transport": "local",
+        "wake_word": "hey_jarvis",
+        "wake_threshold": 0.5,
+    }
+    stub.warm_models = lambda *a, **k: (touched.append("warm_models"), {})[1]
+    # A real-shaped result, not None: with the guard removed this has to run to
+    # completion so the check below reports a FAIL, rather than crashing the suite on
+    # the way and reporting nothing at all.
+    stub.run_pipeline = lambda *a, **k: (
+        touched.append("run_pipeline"),
+        {"wake_fired": True, "wake_score": 0.9, "timings_s": {"total": 1.0}},
+    )[1]
+    stub.speak = lambda *a, **k: touched.append("speak")
+
+    saved = sys.modules.get("pipeline")
+    sys.modules["pipeline"] = stub
+    try:
+        raised = ""
+        try:
+            benchmark.collect(20, None, None)
+        except SystemExit as e:
+            raised = str(e)
+        check(
+            "a bridge backend refuses to run without --live-brain",
+            "live assistant session" in raised and "20 run(s)" in raised,
+            "each run sends the transcript into somebody's live conversation",
+        )
+        check(
+            "it refuses before it touches a model, not after",
+            touched == [],
+            f"reached {touched or 'nothing'}: a refusal after run_pipeline would "
+            "already have written to the session it is protecting",
+        )
+        check(
+            "the refusal says what to pass instead",
+            "--live-brain" in raised and "brain_backend to cli" in raised,
+            "an operator should not have to read the source to get past a refusal",
+        )
+
+        # A bridge that cannot send has no session to protect: _brain_bridge answers
+        # 'the brain reply path is not configured' locally and writes nothing, and
+        # main() has a report line for exactly that state. Refusing here would take
+        # away a measurement without protecting anybody.
+        check(
+            "a working bridge is what needs consent",
+            benchmark.bridge_reaches_a_session(
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "local",
+                }
+            ),
+            "a fully configured bridge writes to the session",
+        )
+        for name, half in (
+            ("no reply path", {"brain_backend": "bridge", "brain_reply_path": ""}),
+            (
+                "ssh with no host",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "ssh",
+                    "brain_host": "",
+                },
+            ),
+            ("cli backend", {"brain_backend": "cli", "brain_reply_path": "/tmp/r"}),
+        ):
+            check(
+                f"a half-configured bridge stays measurable: {name}",
+                not benchmark.bridge_reaches_a_session(half),
+                "the turn never leaves this host, so there is nothing to consent to",
+            )
+    finally:
+        if saved is None:
+            del sys.modules["pipeline"]
+        else:
+            sys.modules["pipeline"] = saved
+
+
+def test_main_decides_the_probe_and_the_refusal() -> None:
+    """The decisions, not the rendering: report_lines is given a transport dict by the
+    tests above, so nothing there pins main() choosing to build one. These drive main()
+    from argv against a deployment-shaped config (bridge over ssh, host set), which is
+    the shape both new gates were written for.
+    """
+    print("\nmain gates the probe")
+    probes: list[tuple[str, int]] = []
+    order: list[str] = []
+
+    stub = types.ModuleType("pipeline")
+    stub.load_config = lambda: {
+        "brain_backend": "bridge",
+        "brain_reply_path": "/tmp/replies",
+        "brain_transport": "ssh",
+        "brain_host": "pi-secret",
+        "brain_poll_s": 0.5,
+        "wake_word": "hey_jarvis",
+        "wake_threshold": 0.5,
+    }
+    stub.warm_models = lambda cfg=None, wake_word=None: (
+        order.append("warm"),
+        {"whisper": 1.5},
+    )[1]
+    stub.speak = lambda text, out: order.append("speak")
+    stub.run_pipeline = lambda wav, wake_word=None: {
+        "wake_fired": True,
+        "wake_score": 0.9,
+        "timings_s": {"total": 1.0},
+    }
+
+    saved_mod = sys.modules.get("pipeline")
+    saved_probe = benchmark.ssh_hop_samples
+    sys.modules["pipeline"] = stub
+    benchmark.ssh_hop_samples = lambda host, runs, *a, **k: (
+        probes.append((host, runs)),
+        [0.1] * runs,
+    )[1]
+    def run_main(argv: list[str], out: io.StringIO | None = None):
+        """main() with SystemExit as a return value, so a refusal is a result here.
+
+        The guard refuses by raising, and a raise that escapes an assertion aborts the
+        whole suite instead of failing one check. Catching it is what lets the checks
+        below say which call refused and which ran.
+        """
+        with (
+            contextlib.redirect_stdout(out or io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            try:
+                return benchmark.main(argv)
+            except SystemExit as e:
+                return e.code
+
+    try:
+        code = run_main(["--runs", "3"])
+        check(
+            "a bridge config refuses before it probes anything",
+            isinstance(code, str) and "--live-brain" in code and probes == [],
+            "the refusal has to come first: the probe would follow 3 live turns",
+        )
+
+        code = run_main(["--runs", "3", "--live-brain"])
+        check(
+            "--live-brain lets the run through to the hop probe",
+            code == 0 and probes == [("pi-secret", 3)],
+            f"probed {probes} once consent was explicit",
+        )
+        check(
+            "the clip is synthesized after the models are warm",
+            order[:2] == ["warm", "speak"],
+            f"order was {order[:2]}: synthesizing first would pre-load Piper and "
+            "report a warm-up it did not measure",
+        )
+
+        probes.clear()
+        stub.load_config = lambda: {
+            "brain_backend": "cli",
+            "brain_transport": "ssh",
+            "brain_host": "pi-secret",
+            "brain_poll_s": 0.5,
+            "wake_word": "hey_jarvis",
+            "wake_threshold": 0.5,
+        }
+        out = io.StringIO()
+        code = run_main(["--runs", "3"], out)
+        check(
+            "a cli backend runs freely and probes no host",
+            code == 0 and probes == [],
+            "brain_transport is stale config here, not a hop this turn paid",
+        )
+        check(
+            "and the report says why there is no hop row",
+            "brain_backend is cli" in out.getvalue(),
+            "a silently missing row reads as a failed probe",
+        )
+    finally:
+        benchmark.ssh_hop_samples = saved_probe
+        if saved_mod is None:
+            del sys.modules["pipeline"]
+        else:
+            sys.modules["pipeline"] = saved_mod
+
 
 def test_json_mode_emits_only_json() -> None:
     print("\njson output")
     saved = benchmark.collect
 
-    def noisy_collect(runs, wav, wake):
+    def noisy_collect(runs, wav, wake, live_brain=False):
         print("  warm whisper: 1.50s")  # what warm_models writes to stdout
         return _collected({"total": [1.0]}, requested=runs, misses=0)
 
@@ -351,7 +585,7 @@ def test_exit_code_reflects_what_was_measured() -> None:
     print("\nexit code")
     saved = benchmark.collect
     try:
-        benchmark.collect = lambda runs, wav, wake: _collected(
+        benchmark.collect = lambda runs, wav, wake, live_brain=False: _collected(
             {}, requested=runs, misses=runs
         )
         check(
@@ -359,7 +593,7 @@ def test_exit_code_reflects_what_was_measured() -> None:
             benchmark.main(["--runs", "3", "--no-ssh"]) == 1,
             "a benchmark that measured nothing must not look like a pass",
         )
-        benchmark.collect = lambda runs, wav, wake: _collected(
+        benchmark.collect = lambda runs, wav, wake, live_brain=False: _collected(
             {"total": [1.0, 1.0]}, requested=runs, misses=1
         )
         check(
@@ -367,7 +601,7 @@ def test_exit_code_reflects_what_was_measured() -> None:
             benchmark.main(["--runs", "3", "--no-ssh"]) == 1,
             "a clip that fires intermittently is a broken benchmark, not a result",
         )
-        benchmark.collect = lambda runs, wav, wake: _collected(
+        benchmark.collect = lambda runs, wav, wake, live_brain=False: _collected(
             {"total": [1.0, 1.0, 1.0]}, requested=runs, misses=0
         )
         check(
@@ -388,6 +622,9 @@ def main() -> int:
     test_a_failed_ssh_hop_is_not_a_timing()
     test_a_dead_clip_says_how_close_it_got()
     test_the_clip_is_fixed_and_self_supplying()
+    test_a_cli_backend_pays_no_ssh_hop()
+    test_a_bridge_brain_is_not_written_to_by_accident()
+    test_main_decides_the_probe_and_the_refusal()
     test_json_mode_emits_only_json()
     test_exit_code_reflects_what_was_measured()
 

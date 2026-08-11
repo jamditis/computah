@@ -15,6 +15,12 @@ multiplexes the connections, so the transport grows with the answer. Measuring
 `ssh <host> true` gives the cost of one hop without sending anything into the assistant
 session, and the report turns that into the cadence a waiting turn actually pays.
 
+The probe writes nothing to the session, but reaching it does: the hop only belongs in
+the report when the measured turns went over the bridge, and those turns are real turns
+in a live session. So the hop row comes with `--live-brain` and not without it. Run the
+benchmark against `brain_backend: "cli"` for stage timings that touch nobody's
+conversation, and add `--live-brain` when the ssh cost is what you came for.
+
 Run it under the documented memory cap:
 
     systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 \\
@@ -121,29 +127,52 @@ def peak_child_rss_mb() -> float:
     return _rss_mb(resource.RUSAGE_CHILDREN)
 
 
-def ssh_hop_samples(host: str, runs: int, connect_timeout_s: int = 5) -> list[float]:
+def ssh_hop_samples(
+    host: str,
+    runs: int,
+    connect_timeout_s: int = 15,
+    command_timeout_s: int = 40,
+) -> list[float]:
     """Time `ssh <host> true` `runs` times: the transport floor of a brain turn.
 
     Deliberately a no-op command. Sending a real prompt would inject a turn into the
     persistent assistant session, and the session is somebody's live conversation.
     Returns the successful samples; a failed ssh contributes nothing rather than a
     fabricated number.
+
+    Both timeouts are load-bearing and cover different stalls. ConnectTimeout is an
+    OpenSSH option that applies while connecting and through the initial handshake;
+    it does nothing once the command is running, so a host that authenticates and
+    then wedges would hang the benchmark forever without a Python-level timeout.
+
+    Both values match the ssh wrappers in brain_bridge, which is the point: this
+    probe prices what a live turn pays, so it has to be willing to wait as long as
+    one does. A shorter connect timeout here would drop the slow connects a live
+    turn completes, and it would drop them from the tail, which is the half of the
+    distribution the p95 column exists to report.
     """
     samples: list[float] = []
     for _ in range(runs):
         started = time.perf_counter()
-        completed = subprocess.run(
-            [
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                f"ConnectTimeout={connect_timeout_s}",
-                host,
-                "true",
-            ],
-            capture_output=True,
-        )
+        try:
+            completed = subprocess.run(
+                [
+                    "ssh",
+                    "-o",
+                    "BatchMode=yes",
+                    "-o",
+                    f"ConnectTimeout={connect_timeout_s}",
+                    host,
+                    "true",
+                ],
+                capture_output=True,
+                timeout=command_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            # A probe that connected and then stalled is a dropped sample, same as a
+            # non-zero exit: it still counts against attempts, so the reported n
+            # shows it happened rather than the run silently taking longer.
+            continue
         elapsed = time.perf_counter() - started
         if completed.returncode == 0:
             samples.append(elapsed)
@@ -161,6 +190,18 @@ def clip_text(wake_word: str) -> str:
     return f"{wake_word.replace('_', ' ')}, what is two plus two?"
 
 
+def default_clip_path(wake_word: str) -> str:
+    """Where the synthesized clip for `wake_word` lives.
+
+    The wake word is in the filename because the clip speaks it. A clip synthesized
+    for hey_jarvis scores near zero against an alexa model, so a cache keyed on one
+    fixed filename would hand the old audio to the new model and report a benchmark
+    that never fired. One file per wake word keeps switching --wake-word cheap and
+    leaves the previous clip usable.
+    """
+    return f"test_audio/benchmark_clip_{wake_word}.wav"
+
+
 def ensure_clip(wav_path: str, wake_word: str, synth) -> bool:
     """Make sure `wav_path` exists, synthesizing it with Piper if it does not.
 
@@ -175,28 +216,69 @@ def ensure_clip(wav_path: str, wake_word: str, synth) -> bool:
     return True
 
 
-def collect(runs: int, wav_path: str, wake_word: str | None) -> dict:
+def bridge_reaches_a_session(cfg: dict) -> bool:
+    """Whether a turn on this config would actually write to a live assistant session.
+
+    Only a bridge backend writes at all, and only when it is fully configured:
+    _brain_bridge answers with a local spoken error and sends nothing when
+    brain_reply_path is empty, or when the transport is ssh with no brain_host. A
+    half-configured bridge has no session at the other end, so it is measurable
+    without asking anyone, and main() already has a report line for it.
+    """
+    if cfg.get("brain_backend") != "bridge":
+        return False
+    if not cfg.get("brain_reply_path"):
+        return False
+    return not (cfg.get("brain_transport") == "ssh" and not cfg.get("brain_host"))
+
+
+def collect(
+    runs: int,
+    wav_path: str | None,
+    wake_word: str | None,
+    live_brain: bool = False,
+) -> dict:
     """Run the pipeline `runs` times on one clip and gather per-stage timings.
 
     pipeline is imported here, not at module scope, so the pure reporting layer above
     stays importable (and testable) on a machine with no models and no audio stack.
+
+    A None wav_path means "use the clip for this wake word"; an explicit path is the
+    caller's file and is used as given.
     """
     import pipeline  # noqa: PLC0415 -- deferred on purpose, see docstring
 
     cfg = pipeline.load_config()
     wake = wake_word or cfg["wake_word"]
-    if ensure_clip(wav_path, wake, pipeline.speak):
-        print(f'synthesized {wav_path}: "{clip_text(wake)}"')
+    if bridge_reaches_a_session(cfg) and not live_brain:
+        # run_pipeline takes the configured brain path, so on a working bridge every
+        # run sends this transcript into the persistent assistant session. That is
+        # somebody's live conversation, and ssh_hop_samples already refuses to write
+        # to it, so the loop that would write to it 20 times asks first.
+        raise SystemExit(
+            f"brain_backend is bridge, so each of the {runs} run(s) would send the "
+            "benchmark transcript into the live assistant session. Pass --live-brain "
+            "to measure the bridge on purpose, or set brain_backend to cli in "
+            "config.local.json to benchmark without touching that session."
+        )
+    clip = wav_path or default_clip_path(wake)
 
     warm_started = time.perf_counter()
     warm = pipeline.warm_models(cfg, wake_word=wake_word)
     warm_elapsed = time.perf_counter() - warm_started
 
+    # Synthesized after warming, not before: ensure_clip speaks through Piper and
+    # _get_piper caches the voice for the process, so building the clip first would
+    # pay the Piper load here and leave warm_models reporting a near-zero one. That
+    # made the published warm-up numbers depend on whether the clip already existed.
+    if ensure_clip(clip, wake, pipeline.speak):
+        print(f'synthesized {clip}: "{clip_text(wake)}"')
+
     per_stage: dict[str, list[float]] = {}
     misses = 0
     best_miss_score: float | None = None
     for _ in range(runs):
-        result = pipeline.run_pipeline(wav_path, wake_word=wake_word)
+        result = pipeline.run_pipeline(clip, wake_word=wake_word)
         if not result["wake_fired"]:
             # Without a wake hit the pipeline returns after one stage, so averaging
             # this run in would report a fast turn that never happened. Keep the
@@ -213,6 +295,7 @@ def collect(runs: int, wav_path: str, wake_word: str | None) -> dict:
 
     return {
         "config": cfg,
+        "wav_path": clip,
         "warm_per_model_s": warm,
         "warm_total_s": warm_elapsed,
         "per_stage": per_stage,
@@ -241,6 +324,14 @@ def _transport_lines(transport: dict | None) -> list[str]:
     """The brain-transport section, or a line saying why there isn't one."""
     if transport is None:
         return []
+    if transport["transport"] == "not-bridge":
+        return [
+            "",
+            f"Brain transport: brain_backend is {transport['backend']}, so the brain "
+            "row above is the local CLI path and pays no ssh hop. brain_transport is "
+            "read only when the backend is bridge, so a leftover ssh setting in "
+            "config.local.json does not put a hop in this turn.",
+        ]
     if transport["transport"] == "misconfigured":
         return [
             "",
@@ -286,13 +377,15 @@ def _transport_lines(transport: dict | None) -> list[str]:
     lines += [
         "",
         "That is one hop, not a turn's transport, and it excludes whatever the "
-        "assistant session spends thinking: the probe is a no-op command. A turn pays "
-        "two hops up front (the pre-send read and the send), then one more for every "
-        "reply poll, because brain_bridge.ssh_reply_reader runs `ssh <host> cat` per "
-        "read and nothing multiplexes the connections. With brain_poll_s at "
-        f"{poll_s} s that is a hop every {poll_s + hop:.2f} s for as long as the "
-        "assistant takes to answer, so the transport inside the brain row grows with "
-        "the answer rather than being fixed per turn.",
+        "assistant session spends thinking: the probe is a no-op command. The floor "
+        f"is three hops, {3 * hop:.2f} s here, because brain_via_bridge reads the "
+        "reply file before sending, sends, and then polls once immediately, before "
+        "its first sleep. Every later poll adds another, since "
+        "brain_bridge.ssh_reply_reader runs `ssh <host> cat` per read and nothing "
+        f"multiplexes the connections. With brain_poll_s at {poll_s} s that is a hop "
+        f"every {poll_s + hop:.2f} s for as long as the assistant takes to answer, so "
+        "the transport inside the brain row grows with the answer rather than being "
+        "fixed per turn.",
     ]
     if hop_n < P95_MIN_RUNS:
         lines.append(
@@ -369,14 +462,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--wav",
-        default="test_audio/benchmark_clip.wav",
-        help="fixed input clip to run each time, synthesized with Piper if absent",
+        default=None,
+        help="fixed input clip to run each time; defaults to the clip for the wake "
+        "word, synthesized with Piper if absent",
     )
     parser.add_argument(
         "--wake-word", default=None, help="override the config wake word"
     )
     parser.add_argument(
         "--no-ssh", action="store_true", help="skip the ssh transport measurement"
+    )
+    parser.add_argument(
+        "--live-brain",
+        action="store_true",
+        help="allow the runs to reach a bridge brain, sending each transcript into "
+        "the live assistant session",
     )
     parser.add_argument("--json", action="store_true", help="emit raw samples as JSON")
     args = parser.parse_args(argv)
@@ -391,14 +491,24 @@ def main(argv: list[str] | None = None) -> int:
         if args.json
         else contextlib.nullcontext()
     ):
-        collected = collect(args.runs, args.wav, args.wake_word)
+        collected = collect(
+            args.runs, args.wav, args.wake_word, live_brain=args.live_brain
+        )
 
     transport = None
     cfg = collected["config"]
     host = cfg.get("brain_host") or ""
     configured = cfg.get("brain_transport")
+    backend = cfg.get("brain_backend") or "cli"
     if args.no_ssh:
         pass
+    elif backend != "bridge":
+        # brain() dispatches on brain_backend, so a cli backend never opens the
+        # bridge and the measured brain stage was local whatever brain_transport
+        # says. Probing on the transport setting alone would add an ssh row to a
+        # turn that paid no ssh, and spend the probe time hitting a host the
+        # benchmark did not use.
+        transport = {"transport": "not-bridge", "backend": backend}
     elif configured != "ssh":
         transport = {"transport": configured or "local"}
     elif not host:
@@ -423,6 +533,10 @@ def main(argv: list[str] | None = None) -> int:
         print(
             json.dumps(
                 {
+                    # The clip path varies with the wake word now, so an archived run
+                    # has to say which clip produced these numbers to be comparable
+                    # against another one.
+                    "wav_path": collected["wav_path"],
                     "runs_requested": collected["runs_requested"],
                     "runs_measured": collected["runs_measured"],
                     "wake_misses": collected["wake_misses"],
@@ -443,7 +557,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if collected["runs_measured"] == 0:
         print(
-            f"\nNo run produced timings: {args.wav} never fired the wake word.",
+            f"\nNo run produced timings: {collected['wav_path']} never fired the "
+            "wake word.",
             file=sys.stderr,
         )
         return 1

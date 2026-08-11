@@ -272,13 +272,25 @@ systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 \
 ```
 
 The clip is a fixed Piper utterance built from the configured wake word, synthesized
-into `test_audio/` on first run and reused after that, so the input does not drift
-between runs.
+into `test_audio/benchmark_clip_<wake_word>.wav` on first run and reused after that, so
+the input does not drift between runs. The wake word is in the filename because the clip
+speaks it: switching `--wake-word` synthesizes a new clip rather than scoring the old
+phrase against the new model.
 
-It times the ssh hop to the brain host as its own row. The brain stage is transport plus
-however long the assistant took to answer, and the transport half is not one hop per
-turn: `ssh_reply_reader` opens a connection for every reply poll and nothing multiplexes
-them, so it grows with the answer. Warming Piper or whisper cannot reduce it.
+On a working bridge (`brain_backend: "bridge"` with its reply path set, and a host when
+the transport is `ssh`), every run sends the clip's transcript into the persistent
+assistant session, so the benchmark refuses to start and says so. Pass `--live-brain` to
+measure the bridge on purpose, or set `brain_backend` to `cli` to leave that session
+alone. A half-configured bridge answers locally and sends nothing, so it still runs
+without the flag.
+
+It times the ssh hop to the brain host as its own row, and only when `brain_backend` is
+`bridge`: a `cli` backend answers locally, so a leftover `brain_transport: "ssh"` buys no
+hop. The brain stage is transport plus however long the assistant took to answer, and the
+transport half is not one hop per turn: the floor is three (the pre-send read, the send,
+and an immediate first poll), then `ssh_reply_reader` opens another connection for every
+later poll with nothing multiplexing them, so it grows with the answer. Warming Piper or
+whisper cannot reduce it.
 
 The 3.9 s text-to-speech figure predates the resident voice: `speak()` now synthesizes
 in process from a cached Piper voice, with the CLI only as a warned fallback, and
