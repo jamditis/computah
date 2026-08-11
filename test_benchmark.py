@@ -467,12 +467,15 @@ def test_an_explicit_wav_is_measured_or_refused() -> None:
         "wake_word": "hey_jarvis",
         "wake_threshold": 0.5,
     }
-    stub.warm_models = lambda cfg=None, wake_word=None: {"whisper": 1.5}
-    stub.run_pipeline = lambda wav, wake_word=None: {
-        "wake_fired": True,
-        "wake_score": 0.9,
-        "timings_s": {"total": 1.0},
-    }
+    touched: list[str] = []
+    stub.warm_models = lambda cfg=None, wake_word=None: (
+        touched.append("warm"),
+        {"whisper": 1.5},
+    )[1]
+    stub.run_pipeline = lambda wav, wake_word=None: (
+        touched.append("run"),
+        {"wake_fired": True, "wake_score": 0.9, "timings_s": {"total": 1.0}},
+    )[1]
 
     saved_mod = sys.modules.get("pipeline")
     saved_cwd = os.getcwd()
@@ -481,7 +484,7 @@ def test_an_explicit_wav_is_measured_or_refused() -> None:
     sys.modules["pipeline"] = stub
     try:
         spoken: list[str] = []
-        stub.speak = lambda text, out: spoken.append(out)
+        stub.speak = lambda text, out: (touched.append("speak"), spoken.append(out))[0]
 
         missing = str(Path(scratch.name) / "not-here.wav")
         refused = None
@@ -499,6 +502,12 @@ def test_an_explicit_wav_is_measured_or_refused() -> None:
             "the refusal names the way forward, not just the fault",
             refused is not None and "Drop --wav" in refused,
             "an operator who typo'd a path needs to know the default is the fallback",
+        )
+        check(
+            "it refuses before it loads a model, not after",
+            touched == [],
+            f"reached {touched}: on the Pi a typo would otherwise cost a whisper "
+            "and Piper load before the operator hears about it",
         )
 
         with contextlib.redirect_stdout(io.StringIO()):

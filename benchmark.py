@@ -473,8 +473,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--wav",
         default=None,
-        help="fixed input clip to run each time; defaults to the clip for the wake "
-        "word, synthesized with Piper if absent",
+        help="fixed input clip to run each time; measured as given, so a path that "
+        "does not exist is an error. Omit it to use the clip for the wake word, "
+        "which is synthesized with Piper if absent",
     )
     parser.add_argument(
         "--wake-word", default=None, help="override the config wake word"

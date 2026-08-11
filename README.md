@@ -283,8 +283,12 @@ The table above predates the script and was taken against a simulated brain, so 
 no Brain reply row. `benchmark.py` has no simulator: it measures whichever backend the
 config names, so its Brain reply and End-to-end turn rows carry real assistant latency
 (the `claude` CLI under the default `brain_backend: "cli"`, or a live session under
-`bridge` with `--live-brain`). Those two rows are not comparable to the numbers above
-and depend on the model and the load at the time. The three stage rows are.
+`bridge` with `--live-brain`). Those two rows depend on the model and the load at the
+time; the three stage rows are the reproducible ones.
+
+So when you paste, replace the "simulated brain" caption too: say which backend and
+model produced the run. Keeping the old caption over a pasted table would claim a
+simulated brain for two rows that measured a real one.
 
 On a working bridge (`brain_backend: "bridge"` with its reply path set, and a host when
 the transport is `ssh`), every run sends the clip's transcript into the persistent
