@@ -147,6 +147,9 @@ DEFAULTS = {
     "brain_bot_spren_workdir": "",  # bot-spren --working-dir; set so the send lands
     # in the session's inbox, not a dead-letter one
     "brain_reply_path": "",  # path to the persona's FileOutbound reply file
+    "brain_inbox_path": "",  # inbox the session consumes; blank derives it from the
+    # workdir. Set only if the layout differs. Observing it lets the bridge confirm a
+    # send landed instead of dead-lettering (#44).
     "brain_timeout_s": 120,
     "brain_poll_s": 0.5,
 }
@@ -1210,15 +1213,30 @@ def _brain_bridge(text: str, cfg: dict) -> str:
     persona = cfg["brain_persona"]
     bot_spren_bin = cfg["brain_bot_spren_bin"]
     workdir = cfg.get("brain_bot_spren_workdir") or None
+    # bot-spren resolves the persona's inbox from its config.toml runtime.state_dir,
+    # which the cli_init scaffold sets to <workdir>/state. Deriving that common case
+    # lets the landing check (#44) work with no extra config. Set brain_inbox_path
+    # explicitly whenever state_dir is pinned elsewhere, or the probe would watch a
+    # file the session never writes and every turn would false-alarm. With neither a
+    # path nor a workdir, the check is off.
+    inbox_path = cfg.get("brain_inbox_path") or (
+        str(Path(workdir) / "state" / "manual-inbox.jsonl") if workdir else ""
+    )
     if cfg["brain_transport"] == "ssh":
         host = cfg["brain_host"]
         if not host:
             return "Sorry, the brain host is not configured."
         send = brain_bridge.ssh_cli_send(host, bot_spren_bin, working_dir=workdir)
         read_reply = brain_bridge.ssh_reply_reader(host, reply_path)
+        confirm_landing = (
+            brain_bridge.ssh_inbox_probe(host, inbox_path) if inbox_path else None
+        )
     else:
         send = brain_bridge.cli_send(bot_spren_bin, working_dir=workdir)
         read_reply = brain_bridge.file_reply_reader(reply_path)
+        confirm_landing = (
+            brain_bridge.file_inbox_probe(inbox_path) if inbox_path else None
+        )
 
     return brain_bridge.brain_via_bridge(
         text,
@@ -1226,6 +1244,7 @@ def _brain_bridge(text: str, cfg: dict) -> str:
         send=send,
         read_reply=read_reply,
         cursor=cursor,
+        confirm_landing=confirm_landing,
         system_prompt=VOICE_SYSTEM_PROMPT,
         timeout_s=cfg["brain_timeout_s"],
         poll_s=cfg["brain_poll_s"],
