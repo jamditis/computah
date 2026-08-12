@@ -42,6 +42,10 @@ import sys
 import time
 from pathlib import Path
 
+# Keep generated benchmark artifacts with the checkout even when the command is
+# launched from another directory. Tests may redirect this root to a scratch tree.
+PROJECT_DIR = Path(__file__).resolve().parent
+
 # Report order and display names. run_pipeline emits these keys; anything it adds
 # later is still reported, under its raw key, so a new stage cannot vanish from the
 # table by being absent from this map.
@@ -199,6 +203,11 @@ def default_clip_path(wake_word: str) -> str:
     that never fired. One file per wake word keeps switching --wake-word cheap and
     leaves the previous clip usable.
     """
+    return str(PROJECT_DIR / "test_audio" / f"benchmark_clip_{wake_word}.wav")
+
+
+def default_clip_display_path(wake_word: str) -> str:
+    """Stable user-facing name for the repository-owned default clip."""
     return f"test_audio/benchmark_clip_{wake_word}.wav"
 
 
@@ -269,8 +278,9 @@ def collect(
         # and still print a confident table. Fail before the models load.
         raise SystemExit(
             f"--wav {wav_path} does not exist. Only the default clip "
-            f"({default_clip_path(wake)}) is synthesized on demand. Drop --wav to "
-            "benchmark that generated clip, or fix the path to measure your own."
+            f"({default_clip_display_path(wake)}) is synthesized on demand. Drop "
+            "--wav to benchmark that generated clip, or fix the path to measure "
+            "your own."
         )
 
     warm_started = time.perf_counter()
@@ -282,7 +292,8 @@ def collect(
     # pay the Piper load here and leave warm_models reporting a near-zero one. That
     # made the published warm-up numbers depend on whether the clip already existed.
     if ensure_clip(clip, wake, pipeline.speak):
-        print(f'synthesized {clip}: "{clip_text(wake)}"')
+        shown_clip = wav_path or default_clip_display_path(wake)
+        print(f'synthesized {shown_clip}: "{clip_text(wake)}"')
 
     per_stage: dict[str, list[float]] = {}
     misses = 0
@@ -305,7 +316,9 @@ def collect(
 
     return {
         "config": cfg,
-        "wav_path": clip,
+        # Keep local checkout paths out of JSON and error output. The absolute path
+        # is an implementation detail used only while running the pipeline.
+        "wav_path": wav_path or default_clip_display_path(wake),
         "warm_per_model_s": warm,
         "warm_total_s": warm_elapsed,
         "per_stage": per_stage,
@@ -349,6 +362,14 @@ def _transport_lines(transport: dict | None) -> list[str]:
             "is no host to probe. A live turn does not reach the brain either: "
             "_brain_bridge answers 'the brain host is not configured' and speaks that "
             "instead, so the brain row above is that refusal, not a reply.",
+        ]
+    if transport["transport"] == "missing-reply-path":
+        return [
+            "",
+            "Brain transport: brain_reply_path is empty, so there is no reply file "
+            "to read and no host to probe. A live turn does not reach the brain: "
+            "_brain_bridge answers 'the brain reply path is not configured' locally, "
+            "so the brain row above is that refusal, not a reply.",
         ]
     if transport["transport"] != "ssh":
         return [
@@ -520,6 +541,10 @@ def main(argv: list[str] | None = None) -> int:
         # turn that paid no ssh, and spend the probe time hitting a host the
         # benchmark did not use.
         transport = {"transport": "not-bridge", "backend": backend}
+    elif not cfg.get("brain_reply_path"):
+        # _brain_bridge refuses locally before selecting a transport. Probing the
+        # configured ssh host here would price a hop the measured turn never paid.
+        transport = {"transport": "missing-reply-path"}
     elif configured != "ssh":
         transport = {"transport": configured or "local"}
     elif not host:
