@@ -262,7 +262,60 @@ Measured on a Raspberry Pi 5 with warm models and a simulated brain:
 | Speech-to-text | 3.3 s |
 | Text-to-speech | 3.9 s |
 
-The largest known cost is `speak()`: it shells out to Piper for each reply, so the voice model reloads every turn. Keeping Piper resident is the likely next latency win.
+Those are one manual measurement. Regenerate them with `benchmark.py`, which runs the
+file pipeline repeatedly on one fixed clip with warm models and prints a median/p95
+table to paste over the one above, along with peak RSS:
+
+```bash
+systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 \
+  .venv/bin/python benchmark.py --runs 20
+```
+
+The clip is a fixed Piper utterance built from the configured wake word, synthesized
+into `test_audio/benchmark_clip_<wake_word>.wav` on first run and reused after that, so
+the input does not drift between runs. The wake word is in the filename because the clip
+speaks it: switching `--wake-word` synthesizes a new clip rather than scoring the old
+phrase against the new model. Only that default clip is synthesized on demand; an
+explicit `--wav` that does not exist is an error rather than something to fill in, so a
+typo cannot quietly benchmark generated audio in place of your sample.
+
+The table above predates the script and was taken against a simulated brain, so it has
+no Brain reply row. `benchmark.py` has no simulator: it measures whichever backend the
+config names, so its Brain reply and End-to-end turn rows carry real assistant latency
+(the `claude` CLI under the default `brain_backend: "cli"`, or a live session under
+`bridge` with `--live-brain`). Those rows depend on the model and the load at the time.
+
+Text-to-speech is the one to watch, because it looks like a stage row and is not
+reproducible either: `run_pipeline` times `speak(reply, ...)`, so it renders the
+assistant's answer, and its duration tracks how long that answer happens to be. Only
+wake detection and speech-to-text are driven by the fixed clip. If you want a
+comparable Text-to-speech number across runs, quote the reply length beside it or hold
+the reply fixed.
+
+So when you paste, replace the "simulated brain" caption too: say which backend and
+model produced the run, and note that only the first two rows are input-driven. Keeping
+the old caption over a pasted table would claim a simulated brain for rows that
+measured a real one.
+
+On a working bridge (`brain_backend: "bridge"` with its reply path set, and a host when
+the transport is `ssh`), every run sends the clip's transcript into the persistent
+assistant session, so the benchmark refuses to start and says so. Pass `--live-brain` to
+measure the bridge on purpose, or set `brain_backend` to `cli` to leave that session
+alone. A half-configured bridge answers locally and sends nothing, so it still runs
+without the flag.
+
+It times the ssh hop to the brain host as its own row, and only when `brain_backend` is
+`bridge`: a `cli` backend answers locally, so a leftover `brain_transport: "ssh"` buys no
+hop. The brain stage is transport plus however long the assistant took to answer, and the
+transport half is not one hop per turn: the floor is three (the pre-send read, the send,
+and an immediate first poll), then `ssh_reply_reader` opens another connection for every
+later poll with nothing multiplexing them, so it grows with the answer. Warming Piper or
+whisper cannot reduce it.
+
+The 3.9 s text-to-speech figure predates the resident voice: `speak()` now synthesizes
+in process from a cached Piper voice, with the CLI only as a warned fallback, and
+`warm_models` loads it before the first turn. Re-running the benchmark is what settles
+whether text-to-speech is still the largest cost.
 
 ## Roadmap
 
