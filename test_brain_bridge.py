@@ -432,6 +432,13 @@ def main() -> int:
     # With a confirm_landing probe on the inbox the session consumes, a send that does
     # not land there is caught fast and reported distinctly, while a landed-but-slow
     # turn still falls through to the ordinary timeout.
+    corrupt_inbox = d / "land-corrupt-inbox.jsonl"
+    corrupt_inbox.write_bytes(b"\xff\n")
+    check(
+        brain_bridge.file_inbox_probe(corrupt_inbox)() is None,
+        "a non-UTF-8 inbox makes the local landing probe unobservable, not fatal",
+    )
+
     log_records: list[logging.LogRecord] = []
 
     class _ListHandler(logging.Handler):

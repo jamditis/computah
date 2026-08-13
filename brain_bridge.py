@@ -385,7 +385,7 @@ def file_inbox_probe(inbox_path: str | Path) -> LandingProbe:
                 return sum(1 for line in f if line.strip())
         except FileNotFoundError:
             return 0
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return None
 
     return _count
