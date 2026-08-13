@@ -36,6 +36,7 @@ Transport is injected so the same logic works in three settings:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shlex
 import subprocess
@@ -44,6 +45,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 # A FileOutbound block header line: "--- <ts> delivery_id=<id> ---", optionally
 # carrying the originating request's "event_id=<id>" so a reply can be matched to its
@@ -60,6 +63,14 @@ _DELIVERY_RE = re.compile(
 # event so the reply can echo it, others accept and ignore it (positional fallback).
 SendFn = Callable[..., None]
 ReplyReader = Callable[[], str]  # () -> full reply-file text ("" if absent)
+
+# () -> current event count in the inbox the SESSION consumes, or None when the
+# inbox cannot be observed (a transport blip) so the caller skips the check rather
+# than false-alarming. It lets the bridge confirm a send landed before it waits on a
+# reply (#44): `bot-spren send` can exit 0 yet append to an inbox the session never
+# reads (a working-dir/inbox mismatch), which otherwise looks identical to a slow
+# brain, a full timeout with no diagnostic.
+LandingProbe = Callable[[], "int | None"]
 
 
 def _delivery_blocks(reply_text: str) -> list[tuple[str, str | None, str]]:
@@ -118,8 +129,10 @@ def brain_via_bridge(
     send: SendFn,
     read_reply: ReplyReader,
     cursor: ReplyCursor | None = None,
+    confirm_landing: LandingProbe | None = None,
     system_prompt: str | None = None,
     timeout_s: int = 120,
+    landing_timeout_s: float = 10.0,
     poll_s: float = 0.5,
 ) -> str:
     """Send `text` to the persona and return its reply, or a spoken error string.
@@ -130,8 +143,14 @@ def brain_via_bridge(
     aligned; with no cursor a fresh one is used, which is correct only for a
     single isolated, backlog-free turn.
 
-    Never raises for an expected failure (timeout, send error): the caller is a
-    voice loop, so a short spoken sentence is more useful than a traceback.
+    When `confirm_landing` is given, the turn checks that the session's inbox grew
+    after the send before waiting the full `landing_timeout_s`; a send that exits 0
+    but never reached the inbox (a dead-letter working-dir mismatch, #44) returns a
+    distinct, logged error instead of masquerading as a slow brain. With no probe, or
+    one that reports the inbox as unobservable, the check is skipped.
+
+    Never raises for an expected failure (timeout, send error, non-landing send): the
+    caller is a voice loop, so a short spoken sentence is more useful than a traceback.
     """
     if cursor is None:
         cursor = ReplyCursor()
@@ -150,12 +169,50 @@ def brain_via_bridge(
 
     prompt = text if system_prompt is None else f"{system_prompt}\n\nUser: {text}"
     event_id = str(uuid.uuid4())  # this turn's correlation id (#19)
+    # Baseline the session's inbox BEFORE sending, so the landing check below can tell
+    # whether this send actually reached it (#44). None means the inbox cannot be
+    # observed, so the check is skipped rather than guessed.
+    inbox_before = confirm_landing() if confirm_landing is not None else None
     try:
         send(persona, prompt, event_id=event_id)
     except Exception as e:  # transport failure (ssh down, CLI missing, ...)
         return f"Sorry, I couldn't reach the brain ({type(e).__name__})."
-    # Reserve this turn's slot even if it times out below, so a late reply fills
-    # the reserved slot and is skipped next turn instead of shifting it by one.
+
+    # A send can exit 0 yet dead-letter to an inbox the session never reads (#44):
+    # bot-spren resolves the inbox from its working dir, so a missing -d writes to a
+    # file nobody tails. That looks identical to a slow brain, a full timeout with no
+    # diagnostic. When the inbox is observable, confirm it grew before waiting the whole
+    # reply timeout, and fail loudly and distinctly if it did not. A slow brain (the
+    # message landed, the reply is just late) still falls through to the timeout below.
+    # The signal is a count delta, so another producer writing the same inbox between
+    # the baseline and the poll can mask a real non-landing; that only degrades this
+    # turn to the ordinary timeout, never a false non-landing.
+    if inbox_before is not None:
+        landing_deadline = time.monotonic() + landing_timeout_s
+        while True:
+            inbox_now = confirm_landing()
+            if inbox_now is None or inbox_now > inbox_before:
+                break  # landed, or the inbox went unobservable, so do not false-alarm
+            if time.monotonic() >= landing_deadline:
+                logger.error(
+                    "brain bridge: send to persona %r did not land; the session's "
+                    "inbox stayed at %d event(s) after %.1fs. Likely a working-dir "
+                    "mismatch. The send wrote to a dead-letter inbox the session does "
+                    "not read (bot-spren -d). See computah #44.",
+                    persona,
+                    inbox_before,
+                    landing_timeout_s,
+                )
+                return (
+                    "Sorry, I sent that but it never reached the brain's inbox. "
+                    "The message may be going to the wrong place."
+                )
+            time.sleep(poll_s)
+
+    # Reserve this turn's slot even if it times out below, so a late reply fills the
+    # reserved slot and is skipped next turn instead of shifting it by one. A
+    # non-landing send returned above without reaching here, so it never reserves a
+    # slot no reply can fill, so the cursor stays aligned for the next turn.
     cursor.consumed = target + 1
 
     deadline = time.monotonic() + timeout_s
@@ -310,6 +367,64 @@ def ssh_reply_reader(host: str, reply_path: str) -> ReplyReader:
         return proc.stdout if proc.returncode == 0 else ""
 
     return _read
+
+
+def file_inbox_probe(inbox_path: str | Path) -> LandingProbe:
+    """Count events in a local inbox file (persona on this host), for #44's landing check.
+
+    Returns the number of non-empty lines, since `bot-spren send` appends one JSON
+    event per line. A missing file is 0 (the session's inbox has received nothing
+    here yet, which is exactly the non-landing signal), while any other read error is
+    None so a transient failure skips the check instead of raising a false alarm.
+    """
+    inbox_path = Path(inbox_path)
+
+    def _count() -> int | None:
+        try:
+            with inbox_path.open("r", encoding="utf-8") as f:
+                return sum(1 for line in f if line.strip())
+        except FileNotFoundError:
+            return 0
+        except (OSError, UnicodeDecodeError):
+            return None
+
+    return _count
+
+
+def ssh_inbox_probe(host: str, inbox_path: str) -> LandingProbe:
+    """Count events in a remote inbox over ssh (persona on another host), for #44.
+
+    Mirrors file_inbox_probe over ssh: a missing file counts as 0, and any ssh
+    failure (timeout, non-zero exit, transport error, unparseable output) returns
+    None so a flaky host skips the landing check rather than reporting a false
+    non-landing. `wc -l` matches the one-JSON-event-per-line `send` format.
+    """
+    remote = (
+        f"if [ -f {shlex.quote(inbox_path)} ]; "
+        f"then wc -l < {shlex.quote(inbox_path)}; else echo MISSING; fi"
+    )
+
+    def _count() -> int | None:
+        try:
+            proc = subprocess.run(
+                ["ssh", "-o", "ConnectTimeout=15", host, remote],
+                capture_output=True,
+                text=True,
+                timeout=40,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if proc.returncode != 0:
+            return None
+        out = proc.stdout.strip()
+        if out == "MISSING":
+            return 0
+        try:
+            return int(out.split()[0])
+        except (ValueError, IndexError):
+            return None
+
+    return _count
 
 
 # --------------------------------------------------------------------------- #

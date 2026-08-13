@@ -9,6 +9,7 @@ and that a second turn does not return the first turn's stale reply.
 
 from __future__ import annotations
 
+import logging
 import sys
 import tempfile
 from pathlib import Path
@@ -424,6 +425,132 @@ def main() -> int:
         check(e2 == "The capital of France is Paris.", f"e2e identity turn 2: {e2!r}")
     finally:
         e2e_sim.stop()
+
+    # --- #44 landing check: a non-landing send fails loudly, not as a slow brain ---
+    # bot-spren send can exit 0 yet write to an inbox the session never reads, so the
+    # turn used to look identical to a slow brain: a full timeout with no diagnostic.
+    # With a confirm_landing probe on the inbox the session consumes, a send that does
+    # not land there is caught fast and reported distinctly, while a landed-but-slow
+    # turn still falls through to the ordinary timeout.
+    corrupt_inbox = d / "land-corrupt-inbox.jsonl"
+    corrupt_inbox.write_bytes(b"\xff\n")
+    check(
+        brain_bridge.file_inbox_probe(corrupt_inbox)() is None,
+        "a non-UTF-8 inbox makes the local landing probe unobservable, not fatal",
+    )
+
+    log_records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            log_records.append(record)
+
+    handler = _ListHandler()
+    brain_bridge.logger.addHandler(handler)
+    brain_bridge.logger.setLevel(logging.ERROR)
+    try:
+        # Non-landing: the send writes to inbox A, but the probe watches inbox B (the
+        # inbox the session actually reads), which never grows.
+        sent_inbox = d / "land-sent.jsonl"
+        watched_inbox = d / "land-watched.jsonl"  # never written -> never grows
+        no_land_cursor = brain_bridge.ReplyCursor()
+        out_noland = brain_bridge.brain_via_bridge(
+            "did this land?",
+            persona="syl",
+            send=brain_bridge.local_sim_send(sent_inbox),
+            read_reply=brain_bridge.file_reply_reader(d / "land-missing-reply.txt"),
+            cursor=no_land_cursor,
+            confirm_landing=brain_bridge.file_inbox_probe(watched_inbox),
+            timeout_s=30,  # would dominate if the landing check did not short-circuit
+            landing_timeout_s=0.2,
+            poll_s=0.02,
+        )
+        check(
+            out_noland.startswith("Sorry, I sent that but it never reached"),
+            f"non-landing send returns the distinct inbox error: {out_noland!r}",
+        )
+        check(
+            not out_noland.startswith("Sorry, the brain took too long"),
+            "non-landing error is distinct from the slow-brain timeout",
+        )
+        check(
+            no_land_cursor.consumed == 0,
+            f"a non-landing send reserves no reply slot: consumed={no_land_cursor.consumed}",
+        )
+        landed_logs = [r for r in log_records if "did not land" in r.getMessage()]
+        check(
+            len(landed_logs) == 1 and landed_logs[0].levelno == logging.ERROR,
+            f"non-landing send logs one distinct ERROR: {len(landed_logs)} record(s)",
+        )
+    finally:
+        brain_bridge.logger.removeHandler(handler)
+
+    # Landed-but-slow: the send reaches the watched inbox, so the landing check passes;
+    # with no reply ever written the turn still returns the ordinary slow-brain timeout,
+    # proving the check does not false-alarm on a genuinely slow brain.
+    slow_inbox = d / "slow-inbox.jsonl"
+    out_slow = brain_bridge.brain_via_bridge(
+        "landed but slow",
+        persona="syl",
+        send=brain_bridge.local_sim_send(slow_inbox),
+        read_reply=brain_bridge.file_reply_reader(d / "slow-missing-reply.txt"),
+        confirm_landing=brain_bridge.file_inbox_probe(slow_inbox),
+        timeout_s=1,
+        landing_timeout_s=1,
+        poll_s=0.02,
+    )
+    check(
+        out_slow.startswith("Sorry, the brain took too long"),
+        f"landed-but-slow send still times out normally: {out_slow!r}",
+    )
+
+    # An unobservable inbox (probe returns None) skips the check rather than
+    # false-alarming: a live sim answers and the reply comes back as usual.
+    unobs_inbox = d / "unobs-inbox.jsonl"
+    unobs_reply = d / "unobs-reply.txt"
+    unobs_sim = SimPersona(unobs_inbox, unobs_reply, poll_s=0.05)
+    unobs_sim.start()
+    try:
+        out_unobs = brain_bridge.brain_via_bridge(
+            "what is two plus two?",
+            persona="syl",
+            send=brain_bridge.local_sim_send(unobs_inbox),
+            read_reply=brain_bridge.file_reply_reader(unobs_reply),
+            cursor=brain_bridge.ReplyCursor(),
+            confirm_landing=lambda: None,  # inbox cannot be observed this turn
+            timeout_s=10,
+            poll_s=0.05,
+        )
+        check(
+            out_unobs == "Two plus two is four.",
+            f"an unobservable inbox skips the check, reply still returns: {out_unobs!r}",
+        )
+    finally:
+        unobs_sim.stop()
+
+    # Happy path with a real probe: the send lands in the watched inbox and the sim
+    # answers, so the landing check passes through to the normal reply.
+    land_inbox = d / "land-ok-inbox.jsonl"
+    land_reply = d / "land-ok-reply.txt"
+    land_sim = SimPersona(land_inbox, land_reply, poll_s=0.05)
+    land_sim.start()
+    try:
+        out_land = brain_bridge.brain_via_bridge(
+            "what is the capital of france?",
+            persona="syl",
+            send=brain_bridge.local_sim_send(land_inbox),
+            read_reply=brain_bridge.file_reply_reader(land_reply),
+            cursor=brain_bridge.ReplyCursor(),
+            confirm_landing=brain_bridge.file_inbox_probe(land_inbox),
+            timeout_s=10,
+            poll_s=0.05,
+        )
+        check(
+            out_land == "The capital of France is Paris.",
+            f"landed send with a real probe returns the reply: {out_land!r}",
+        )
+    finally:
+        land_sim.stop()
 
     n_pass = sum(1 for ok, _ in results if ok)
     print(f"\n=== {n_pass}/{len(results)} checks passed ===")
