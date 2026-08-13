@@ -71,6 +71,10 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
             "brain_transport": "local",
             "brain_persona": "sim",
             "brain_reply_path": str(reply),
+            # A workdir controls where bot-spren sends. It must not also guess which
+            # inbox the running session consumes; an explicit inbox enables that
+            # independent landing check.
+            "brain_bot_spren_workdir": str(d / "persona"),
             "brain_timeout_s": 5,
             "brain_poll_s": 0.05,
         },
@@ -80,6 +84,9 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
     # sender for the sim writer; the reply reader is the real file reader.
     real_brain_bridge.cli_send = lambda _bin, working_dir=None: (
         real_brain_bridge.local_sim_send(inbox)
+    )
+    real_brain_bridge.file_inbox_probe = lambda _path: (_ for _ in ()).throw(
+        AssertionError("a blank brain_inbox_path must not create a guessed probe")
     )
 
     sim = SimPersona(inbox, reply, poll_s=0.02)
@@ -91,7 +98,7 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
 
     check(
         out == "Two plus two is four.",
-        f"config-driven local bridge answered correctly: {out!r}",
+        f"config-driven bridge with no explicit landing probe answered: {out!r}",
     )
 
 
@@ -202,6 +209,7 @@ def main() -> int:
         pipeline._brain_cli,
         pipeline._brain_bridge,
         brain_bridge.cli_send,
+        brain_bridge.file_inbox_probe,
     )
     try:
         with tempfile.TemporaryDirectory(prefix="brain-dispatch-") as tmp:
@@ -221,6 +229,7 @@ def main() -> int:
             pipeline._brain_cli,
             pipeline._brain_bridge,
             brain_bridge.cli_send,
+            brain_bridge.file_inbox_probe,
         ) = saved
 
     n_pass = sum(1 for ok, _ in results if ok)

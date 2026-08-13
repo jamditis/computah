@@ -147,9 +147,8 @@ DEFAULTS = {
     "brain_bot_spren_workdir": "",  # bot-spren --working-dir; set so the send lands
     # in the session's inbox, not a dead-letter one
     "brain_reply_path": "",  # path to the persona's FileOutbound reply file
-    "brain_inbox_path": "",  # inbox the session consumes; blank derives it from the
-    # workdir. Set only if the layout differs. Observing it lets the bridge confirm a
-    # send landed instead of dead-lettering (#44).
+    "brain_inbox_path": "",  # inbox the session consumes; blank disables the landing
+    # check. Set an independently verified path to detect a dead-lettered send (#44).
     "brain_timeout_s": 120,
     "brain_poll_s": 0.5,
 }
@@ -1213,15 +1212,11 @@ def _brain_bridge(text: str, cfg: dict) -> str:
     persona = cfg["brain_persona"]
     bot_spren_bin = cfg["brain_bot_spren_bin"]
     workdir = cfg.get("brain_bot_spren_workdir") or None
-    # bot-spren resolves the persona's inbox from its config.toml runtime.state_dir,
-    # which the cli_init scaffold sets to <workdir>/state. Deriving that common case
-    # lets the landing check (#44) work with no extra config. Set brain_inbox_path
-    # explicitly whenever state_dir is pinned elsewhere, or the probe would watch a
-    # file the session never writes and every turn would false-alarm. With neither a
-    # path nor a workdir, the check is off.
-    inbox_path = cfg.get("brain_inbox_path") or (
-        str(Path(workdir) / "state" / "manual-inbox.jsonl") if workdir else ""
-    )
+    # The send workdir and the running session's runtime.state_dir are independent
+    # configuration inputs. Guessing the inbox from the workdir can reject every
+    # valid send after an upgrade when state_dir is pinned elsewhere. Enable the
+    # landing check only with a separately verified inbox path.
+    inbox_path = cfg.get("brain_inbox_path") or ""
     if cfg["brain_transport"] == "ssh":
         host = cfg["brain_host"]
         if not host:

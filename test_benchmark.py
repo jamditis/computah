@@ -338,6 +338,19 @@ def test_the_clip_is_fixed_and_self_supplying() -> None:
         "alexa" in benchmark.default_clip_path("alexa"),
         benchmark.default_clip_path("alexa"),
     )
+    with tempfile.TemporaryDirectory() as elsewhere:
+        saved_cwd = os.getcwd()
+        try:
+            os.chdir(elsewhere)
+            anchored = Path(benchmark.default_clip_path("hey_jarvis"))
+        finally:
+            os.chdir(saved_cwd)
+    check(
+        "the default clip cache is anchored to the repository",
+        anchored.is_absolute()
+        and anchored.parent == Path(benchmark.__file__).resolve().parent / "test_audio",
+        f"running elsewhere must not create a stray cache at {anchored}",
+    )
 
 
 def test_a_cli_backend_pays_no_ssh_hop() -> None:
@@ -479,8 +492,10 @@ def test_an_explicit_wav_is_measured_or_refused() -> None:
 
     saved_mod = sys.modules.get("pipeline")
     saved_cwd = os.getcwd()
+    saved_project_dir = benchmark.PROJECT_DIR
     scratch = tempfile.TemporaryDirectory()
     os.chdir(scratch.name)
+    benchmark.PROJECT_DIR = Path(scratch.name)
     sys.modules["pipeline"] = stub
     try:
         spoken: list[str] = []
@@ -511,13 +526,19 @@ def test_an_explicit_wav_is_measured_or_refused() -> None:
         )
 
         with contextlib.redirect_stdout(io.StringIO()):
-            benchmark.collect(1, None, None)
+            collected = benchmark.collect(1, None, None)
         check(
             "the default clip is still synthesized on demand",
             spoken == [benchmark.default_clip_path("hey_jarvis")],
             f"spoke into {spoken}: only the clip we own is filled in",
         )
+        check(
+            "the result keeps the local checkout path private",
+            collected["wav_path"] == "test_audio/benchmark_clip_hey_jarvis.wav",
+            f"reported {collected['wav_path']}",
+        )
     finally:
+        benchmark.PROJECT_DIR = saved_project_dir
         os.chdir(saved_cwd)
         scratch.cleanup()
         if saved_mod is None:
@@ -559,15 +580,18 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
 
     saved_mod = sys.modules.get("pipeline")
     saved_probe = benchmark.ssh_hop_samples
+    saved_which = benchmark.shutil.which
     saved_cwd = os.getcwd()
-    # The default clip path is relative, so this test's "was the clip synthesized
-    # after warming" check depends on whether test_audio/ already holds one. Running
-    # the real benchmark once creates it, and from then on ensure_clip would skip the
-    # stub speak() and fail a correct implementation. A scratch cwd makes the default
-    # path reliably absent instead of asserting against whatever the last run left.
+    saved_project_dir = benchmark.PROJECT_DIR
+    # This test's "was the clip synthesized after warming" check needs a reliably
+    # absent cache without writing a generated clip into the real checkout.
     scratch = tempfile.TemporaryDirectory()
     os.chdir(scratch.name)
+    benchmark.PROJECT_DIR = Path(scratch.name)
     sys.modules["pipeline"] = stub
+    # The transport decision, not whether this test host happens to ship OpenSSH,
+    # is under test. Keep the check portable to a minimal Python environment.
+    benchmark.shutil.which = lambda name: "/usr/bin/ssh" if name == "ssh" else None
     benchmark.ssh_hop_samples = lambda host, runs, *a, **k: (
         probes.append((host, runs)),
         [0.1] * runs,
@@ -631,8 +655,30 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
             "brain_backend is cli" in out.getvalue(),
             "a silently missing row reads as a failed probe",
         )
+
+        probes.clear()
+        stub.load_config = lambda: {
+            "brain_backend": "bridge",
+            "brain_reply_path": "",
+            "brain_transport": "ssh",
+            "brain_host": "pi-secret",
+            "brain_poll_s": 0.5,
+            "wake_word": "hey_jarvis",
+            "wake_threshold": 0.5,
+        }
+        out = io.StringIO()
+        code = run_main(["--runs", "3"], out)
+        check(
+            "a missing reply path probes no host",
+            code == 0
+            and probes == []
+            and "brain reply path is not configured" in out.getvalue(),
+            "the measured brain row is a local refusal and paid no ssh transport",
+        )
     finally:
         benchmark.ssh_hop_samples = saved_probe
+        benchmark.shutil.which = saved_which
+        benchmark.PROJECT_DIR = saved_project_dir
         os.chdir(saved_cwd)
         scratch.cleanup()
         if saved_mod is None:
