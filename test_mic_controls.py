@@ -17,6 +17,7 @@ import sys
 
 from mic_controls import (
     capture_gain_control,
+    format_survey,
     parse_amixer_scontents,
     survey_card,
 )
@@ -264,6 +265,86 @@ def test_playback_volume_is_not_a_capture_lever():
     )
 
 
+def test_undirected_common_volume_is_a_gain_lever():
+    # The genuine common-volume shape: an undirected "volume" capability, a bare
+    # Limits line, and a state line with NO Playback/Capture word. The direction
+    # comes only from the "Capture channels:" header. This is the shape the bare
+    # limits and the "volume" branch were built for; it must reach the gain lever.
+    text = """Simple mixer control 'Mic',0
+  Capabilities: volume
+  Playback channels: Mono
+  Capture channels: Mono
+  Limits: 0 - 4096
+  Mono: 2048 [50%] [on]
+"""
+    ctl = parse_amixer_scontents(text)[0]
+    check(
+        "common: undirected state read as capture",
+        ctl.is_capture and ctl.has_capture_volume and ctl.limits == (0, 4096),
+        f"is_capture={ctl.is_capture} has_cv={ctl.has_capture_volume} limits={ctl.limits}",
+    )
+    check(
+        "common: undirected channel percent read",
+        ctl.channels
+        and ctl.channels[0].direction == "Capture"
+        and ctl.channels[0].percent == 50,
+        f"{ctl.channels}",
+    )
+    survey = survey_card("PowerConf", run=_fake_run(stdout=text))
+    check(
+        "common: selected as the gain lever",
+        survey.capture_control is not None and survey.capture_control.name == "Mic",
+        f"{survey.capture_control and survey.capture_control.name}",
+    )
+
+
+def test_undirected_enum_line_is_not_a_channel():
+    # An enum item line has no numeric state; it must not be misread as a channel
+    # (which would otherwise inflate the channel list or fake a direction).
+    text = """Simple mixer control 'Input Source',0
+  Capabilities: enum
+  Items: 'Mic' 'Line'
+  Item0: 'Mic'
+"""
+    ctl = parse_amixer_scontents(text)[0]
+    check("enum: no channels parsed", ctl.channels == (), f"{ctl.channels}")
+
+
+def test_survey_amixer_not_executable():
+    # amixer is present but cannot launch (no execute permission -> PermissionError,
+    # an OSError). The probe must report it, not raise: its contract says so.
+    survey = survey_card(
+        "PowerConf", run=_fake_run(raises=PermissionError(13, "denied"))
+    )
+    check("survey: launch failure does not crash", not survey.ok, f"ok={survey.ok}")
+    check(
+        "survey: reports amixer could not run",
+        "could not run" in (survey.error or ""),
+        f"{survey.error}",
+    )
+
+
+def test_capture_percent_reported_over_playback():
+    # Playback is stereo, capture is mono, so the two directions land on separate
+    # channel lines and the capture line is not first. The reported gain baseline
+    # must be the capture percentage (77%), not the leading playback one (65%).
+    text = """Simple mixer control 'Mic',0
+  Capabilities: pvolume cvolume pswitch cswitch
+  Playback channels: Front Left - Front Right
+  Capture channels: Mono
+  Limits: Playback 0 - 31 Capture 0 - 39
+  Front Left: Playback 20 [65%] [on]
+  Front Right: Playback 20 [65%] [on]
+  Mono: Capture 30 [77%] [on]
+"""
+    out = format_survey(survey_card("PowerConf", run=_fake_run(stdout=text)))
+    check(
+        "percent: reports the capture side, not playback",
+        "at 77%" in out and "at 65%" not in out,
+        out.splitlines()[-1],
+    )
+
+
 def main() -> int:
     test_parse()
     test_db_and_no_switch()
@@ -272,9 +353,13 @@ def main() -> int:
     test_no_gain_lever_when_only_switch_and_playback()
     test_dual_control_capture_range()
     test_bare_common_volume_limits()
+    test_undirected_common_volume_is_a_gain_lever()
+    test_undirected_enum_line_is_not_a_channel()
+    test_capture_percent_reported_over_playback()
     test_playback_volume_is_not_a_capture_lever()
     test_survey_ok()
     test_survey_amixer_missing()
+    test_survey_amixer_not_executable()
     test_survey_bad_card()
     test_survey_empty_output()
     n_pass = sum(1 for r in results if r[0] == PASS)

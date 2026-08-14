@@ -34,15 +34,27 @@ _HEADER = re.compile(r"^Simple mixer control '(?P<name>.*)',(?P<index>\d+)\s*$")
 # or the switch-only "Mono: Playback [on]". A dual playback/capture control
 # prints both states on one line ("Front Left: Playback 20 [65%] [-10.00dB] [on]
 # Capture 30 [77%] [on]"), so the name is matched once and each direction's
-# state is read on its own. The value, percent, dB, and switch are each optional
-# so one pattern covers volume, volume+dB, and switch-only.
-_CHAN_NAME = re.compile(r"^(?P<chan>.+?): (?P<rest>(?:Playback|Capture).*)$")
+# state is read on its own. A common (undirected) volume prints no direction word
+# at all ("Mono: 2048 [50%] [on]"); its direction comes from the block's
+# "Capture channels:" / "Playback channels:" header instead. So the name match
+# takes any state, and the direction is read from the state or, failing that, the
+# header.
+_CHAN_NAME = re.compile(r"^(?P<chan>[^:]+): (?P<rest>.+)$")
 _CHAN_STATE = re.compile(
     r"(?P<dir>Playback|Capture)"
     r"(?: (?P<value>-?\d+))?"
     r"(?: \[(?P<pct>-?\d+)%\])?"
     r"(?: \[(?P<db>-?\d+(?:\.\d+)?)dB\])?"
     r"(?: \[(?P<switch>on|off)\])?"
+)
+# A common-volume state carries no direction word, e.g. "Mono: 2048 [50%] [on]".
+# It must consume a value, percent, or switch to count as a real state, so an
+# enum line such as "Item0: 'Mic'" is not misread as a channel.
+_CHAN_UNDIR = re.compile(
+    r"^(?P<value>-?\d+)?"
+    r"(?: ?\[(?P<pct>-?\d+)%\])?"
+    r"(?: ?\[(?P<db>-?\d+(?:\.\d+)?)dB\])?"
+    r"(?: ?\[(?P<switch>on|off)\])?\s*$"
 )
 # amixer prints a control's range as a "Limits:" line in one of three shapes: a
 # single direction ("Limits: Capture 0 - 65536"), both directions on one line
@@ -100,20 +112,29 @@ class CardSurvey(NamedTuple):
     capture_control: MixerControl | None
 
 
-def _parse_channel(line: str) -> Channel | None:
+def _parse_channel(line: str, default_dir: str = "Playback") -> Channel | None:
     head = _CHAN_NAME.match(line.strip())
     if not head:
         return None
+    rest = head["rest"]
     # Prefer the capture state on a dual line: a capture survey reads that side.
-    states = {m["dir"]: m for m in _CHAN_STATE.finditer(head["rest"])}
+    states = {m["dir"]: m for m in _CHAN_STATE.finditer(rest)}
     m = states.get("Capture") or states.get("Playback")
-    if m is None:
-        return None
-    value = int(m["value"]) if m["value"] is not None else None
-    percent = int(m["pct"]) if m["pct"] is not None else None
-    db = float(m["db"]) if m["db"] is not None else None
-    switch = None if m["switch"] is None else (m["switch"] == "on")
-    return Channel(head["chan"].strip(), m["dir"], value, percent, db, switch)
+    if m is not None:
+        value = int(m["value"]) if m["value"] is not None else None
+        percent = int(m["pct"]) if m["pct"] is not None else None
+        db = float(m["db"]) if m["db"] is not None else None
+        switch = None if m["switch"] is None else (m["switch"] == "on")
+        return Channel(head["chan"].strip(), m["dir"], value, percent, db, switch)
+    # A common (undirected) state takes its direction from the block header.
+    um = _CHAN_UNDIR.match(rest)
+    if um and (um["value"] or um["pct"] or um["switch"]):
+        value = int(um["value"]) if um["value"] is not None else None
+        percent = int(um["pct"]) if um["pct"] is not None else None
+        db = float(um["db"]) if um["db"] is not None else None
+        switch = None if um["switch"] is None else (um["switch"] == "on")
+        return Channel(head["chan"].strip(), default_dir, value, percent, db, switch)
+    return None
 
 
 def _parse_limits(line: str) -> tuple[int, int] | None:
@@ -139,8 +160,9 @@ def _parse_limits(line: str) -> tuple[int, int] | None:
 def parse_amixer_scontents(text: str) -> list[MixerControl]:
     """Parse `amixer -c <card> scontents` into structured controls.
 
-    Unknown lines inside a block (Capture channels, Playback channels, and the
-    like) are ignored, so a firmware that adds a field does not break the parse.
+    A "Capture channels:" header marks the block as capturing, so a common
+    (undirected) volume is read as the capture gain. Other unknown lines inside a
+    block are ignored, so a firmware that adds a field does not break the parse.
     """
     controls: list[MixerControl] = []
     name: str | None = None
@@ -148,12 +170,13 @@ def parse_amixer_scontents(text: str) -> list[MixerControl]:
     caps: tuple[str, ...] = ()
     limits: tuple[int, int] | None = None
     channels: list[Channel] = []
+    capture_dir = False
 
     def flush() -> None:
-        nonlocal name, caps, limits, channels
+        nonlocal name, caps, limits, channels, capture_dir
         if name is not None:
             controls.append(MixerControl(name, index, caps, limits, tuple(channels)))
-        name, caps, limits, channels = None, (), None, []
+        name, caps, limits, channels, capture_dir = None, (), None, [], False
 
     for raw in text.splitlines():
         header = _HEADER.match(raw)
@@ -168,12 +191,17 @@ def parse_amixer_scontents(text: str) -> list[MixerControl]:
         if stripped.startswith("Capabilities:"):
             caps = tuple(stripped[len("Capabilities:") :].split())
             continue
+        if stripped.startswith("Capture channels:"):
+            capture_dir = True
+            continue
+        if stripped.startswith("Playback channels:"):
+            continue
         if stripped.startswith("Limits:"):
             parsed = _parse_limits(stripped)
             if parsed is not None:
                 limits = parsed
             continue
-        channel = _parse_channel(stripped)
+        channel = _parse_channel(stripped, "Capture" if capture_dir else "Playback")
         if channel:
             channels.append(channel)
     flush()
@@ -212,7 +240,19 @@ def format_survey(survey: CardSurvey) -> str:
     if gain is None:
         lines.append("  no capture-gain lever found")
     else:
-        cur = next((c for c in gain.channels if c.percent is not None), None)
+        # Report the capture side's level. On a control that lists playback and
+        # capture on separate channel lines, the capture channel is not first, so
+        # prefer it before falling back to any channel that carries a percent.
+        cur = next(
+            (
+                c
+                for c in gain.channels
+                if c.direction == "Capture" and c.percent is not None
+            ),
+            None,
+        )
+        if cur is None:
+            cur = next((c for c in gain.channels if c.percent is not None), None)
         at = f" at {cur.percent}%" if cur else ""
         lines.append(
             f"  gain lever: {gain.name!r} range {gain.limits[0]}-{gain.limits[1]}{at}"
@@ -243,6 +283,11 @@ def survey_card(
         )
     except subprocess.TimeoutExpired:
         return CardSurvey(card, False, "amixer timed out", (), None)
+    except OSError as exc:
+        # amixer is present but could not launch (no execute permission, bad
+        # binary, resource limit). Report it rather than raising: the docstring
+        # promises this probe never does.
+        return CardSurvey(card, False, f"amixer could not run: {exc}", (), None)
     if proc.returncode != 0:
         reason = (proc.stderr or "").strip() or f"amixer exit {proc.returncode}"
         return CardSurvey(card, False, reason, (), None)
