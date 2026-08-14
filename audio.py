@@ -37,6 +37,7 @@ import soundfile as sf
 from scipy.signal import resample_poly
 
 import capture_quality
+from playback_abort import wait_or_abort
 
 # Must match pipeline.py: openWakeWord's frame is 80 ms at 16 kHz = 1280 samples.
 TARGET_SR = 16000
@@ -287,11 +288,17 @@ class Microphone:
                 self._buf = self._buf[self.frame_size :]
 
 
-def play_wav(path, name=None) -> None:
+def play_wav(path, name=None, should_stop=None, poll_ms=50) -> bool:
     """Play a WAV through the named output device (default device if name is None).
 
     The clip is resampled to the device's rate in Python before playback, so this
-    does not depend on the engine's converter being available. Blocks until done.
+    does not depend on the engine's converter being available.
+
+    Without should_stop the call blocks until the clip finishes and returns True,
+    the unchanged default. Pass should_stop (a callable that returns True on a
+    wake/speech event) to make the reply abortable mid-playback (issue #16): the
+    clip then plays non-blocking and is polled every poll_ms, and a barge-in stops
+    the stream and returns False. Returns True if the clip played to completion.
     """
     data, sr = sf.read(str(path), dtype="float32", always_2d=False)
     idx, info, host = find_device(name, "output")
@@ -301,7 +308,33 @@ def play_wav(path, name=None) -> None:
         data = resample_poly(data, dev_sr // g, sr // g)
         sr = dev_sr
     sd.play(data, sr, device=idx, extra_settings=_wasapi_autoconvert(host))
-    sd.wait()
+    if should_stop is None:
+        sd.wait()
+        return True
+
+    def _abort_playback():
+        # Barge-in must cut now. sd.stop() calls Stream.stop(), which drains the queued
+        # PortAudio buffers before it closes, so the rest of the buffered reply would
+        # still play. Stream.abort() discards the queue and stops immediately; close()
+        # then frees the output device (issue #16 review).
+        stream = sd.get_stream()
+        stream.abort(ignore_errors=True)
+        stream.close(ignore_errors=True)
+
+    finished = wait_or_abort(
+        is_active=lambda: sd.get_stream().active,
+        should_stop=should_stop,
+        stop=_abort_playback,
+        sleep=sd.sleep,
+        poll_ms=poll_ms,
+    )
+    # A barge-in already aborted and closed the stream. On a normal finish the poll
+    # loop only saw the stream go inactive, so close it here (nothing is queued, so
+    # stop() does not drain): an unclosed stream holds the output device open until
+    # the next play() (issue #16 review).
+    if finished:
+        sd.stop()
+    return finished
 
 
 def list_devices() -> None:
