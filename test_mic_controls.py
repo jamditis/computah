@@ -345,6 +345,70 @@ def test_capture_percent_reported_over_playback():
     )
 
 
+def test_enum_named_capture_item_is_not_a_channel():
+    # A stricter enum case than the 'Mic'/'Line' one: an enum whose OPTION text is
+    # literally 'Playback'/'Capture'. The direction word sits inside quotes with no
+    # numeric state, so it must not be read as a channel or flip is_capture true.
+    text = """Simple mixer control 'Direction',0
+  Capabilities: enum
+  Items: 'Playback' 'Capture'
+  Item0: 'Capture'
+"""
+    ctl = parse_amixer_scontents(text)[0]
+    check(
+        "enum: capture-named item makes no channel",
+        ctl.channels == (),
+        f"{ctl.channels}",
+    )
+    check(
+        "enum: capture-named item is not a capture control",
+        not ctl.is_capture,
+        f"is_capture={ctl.is_capture}",
+    )
+
+
+def test_common_volume_counts_as_has_volume():
+    # has_volume must agree with has_capture_volume on the common-volume shape
+    # ('Capabilities: volume'). Otherwise a consumer filtering volume controls on
+    # has_volume drops exactly the common playback/capture control this survey adds.
+    text = """Simple mixer control 'Mic',0
+  Capabilities: volume
+  Capture channels: Mono
+  Limits: 0 - 4096
+  Mono: 2048 [50%] [on]
+"""
+    ctl = parse_amixer_scontents(text)[0]
+    check(
+        "has_volume: common volume counts as a volume control",
+        ctl.has_volume and ctl.has_capture_volume,
+        f"has_volume={ctl.has_volume} has_capture_volume={ctl.has_capture_volume}",
+    )
+
+
+def test_survey_output_shows_control_index():
+    # Two controls share a name but differ by index. amixer targets a control as
+    # 'Name',index, so the survey must print the index or the reader cannot tell
+    # which selem it chose or reproduce the follow-up amixer command.
+    text = """Simple mixer control 'Mic',0
+  Capabilities: cvolume
+  Capture channels: Mono
+  Limits: Capture 0 - 100
+  Mono: Capture 50 [50%] [on]
+Simple mixer control 'Mic',1
+  Capabilities: cvolume
+  Capture channels: Mono
+  Limits: Capture 0 - 100
+  Mono: Capture 60 [60%] [on]
+"""
+    out = format_survey(survey_card("PowerConf", run=_fake_run(stdout=text)))
+    check("index: both indices rendered", "'Mic',0" in out and "'Mic',1" in out, out)
+    check(
+        "index: gain lever names its index",
+        "gain lever: 'Mic',0" in out,
+        out.splitlines()[-1],
+    )
+
+
 def main() -> int:
     test_parse()
     test_db_and_no_switch()
@@ -355,6 +419,9 @@ def main() -> int:
     test_bare_common_volume_limits()
     test_undirected_common_volume_is_a_gain_lever()
     test_undirected_enum_line_is_not_a_channel()
+    test_enum_named_capture_item_is_not_a_channel()
+    test_common_volume_counts_as_has_volume()
+    test_survey_output_shows_control_index()
     test_capture_percent_reported_over_playback()
     test_playback_volume_is_not_a_capture_lever()
     test_survey_ok()

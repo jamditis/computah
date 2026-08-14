@@ -41,7 +41,7 @@ _HEADER = re.compile(r"^Simple mixer control '(?P<name>.*)',(?P<index>\d+)\s*$")
 # header.
 _CHAN_NAME = re.compile(r"^(?P<chan>[^:]+): (?P<rest>.+)$")
 _CHAN_STATE = re.compile(
-    r"(?P<dir>Playback|Capture)"
+    r"(?:^| )(?P<dir>Playback|Capture)"
     r"(?: (?P<value>-?\d+))?"
     r"(?: \[(?P<pct>-?\d+)%\])?"
     r"(?: \[(?P<db>-?\d+(?:\.\d+)?)dB\])?"
@@ -94,7 +94,11 @@ class MixerControl(NamedTuple):
 
     @property
     def has_volume(self) -> bool:
-        return "cvolume" in self.capabilities or "pvolume" in self.capabilities
+        # A volume lever in any direction: split capture ("cvolume") or playback
+        # ("pvolume"), or a common volume ("volume") shared across both. The bare
+        # "volume" shape must count here too, or a consumer filtering on
+        # has_volume drops exactly the common control has_capture_volume accepts.
+        return any(cap in self.capabilities for cap in ("cvolume", "pvolume", "volume"))
 
     @property
     def has_capture_volume(self) -> bool:
@@ -118,7 +122,14 @@ def _parse_channel(line: str, default_dir: str = "Playback") -> Channel | None:
         return None
     rest = head["rest"]
     # Prefer the capture state on a dual line: a capture survey reads that side.
-    states = {m["dir"]: m for m in _CHAN_STATE.finditer(rest)}
+    # A direction word only counts when it opens a real state (value, percent,
+    # dB, or switch); a bare 'Capture'/'Playback' inside an enum item line
+    # ("Items: 'Playback' 'Capture'") is not a channel.
+    states = {
+        m["dir"]: m
+        for m in _CHAN_STATE.finditer(rest)
+        if m["value"] or m["pct"] or m["db"] or m["switch"]
+    }
     m = states.get("Capture") or states.get("Playback")
     if m is not None:
         value = int(m["value"]) if m["value"] is not None else None
@@ -234,7 +245,8 @@ def format_survey(survey: CardSurvey) -> str:
         tag = "capture" if control.is_capture else "playback"
         rng = f" {control.limits[0]}-{control.limits[1]}" if control.limits else ""
         lines.append(
-            f"  [{tag}] {control.name!r}{rng}  caps={' '.join(control.capabilities) or 'none'}"
+            f"  [{tag}] {control.name!r},{control.index}{rng}"
+            f"  caps={' '.join(control.capabilities) or 'none'}"
         )
     gain = survey.capture_control
     if gain is None:
@@ -255,7 +267,8 @@ def format_survey(survey: CardSurvey) -> str:
             cur = next((c for c in gain.channels if c.percent is not None), None)
         at = f" at {cur.percent}%" if cur else ""
         lines.append(
-            f"  gain lever: {gain.name!r} range {gain.limits[0]}-{gain.limits[1]}{at}"
+            f"  gain lever: {gain.name!r},{gain.index} "
+            f"range {gain.limits[0]}-{gain.limits[1]}{at}"
         )
     return "\n".join(lines)
 
