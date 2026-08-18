@@ -79,6 +79,7 @@ jobs:
             test_run_loop_playback.py \
             test_speak_resident.py \
             test_tts_voice_eval.py \
+            test_transcribe_input.py \
             test_warm_models.py \
             test_wake_eval.py \
             test_wake_framing.py; do

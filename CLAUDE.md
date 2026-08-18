@@ -62,8 +62,9 @@ Four stages, each independently swappable (`pipeline.py`):
    audio (it lands in the cue window) -- the no-pause pre-roll case. Off keeps that
    primary flow intact; gating the cue on a pause so both coexist is the deferred fix.
 2. `transcribe` — faster-whisper (CTranslate2, int8). `transcribe_detailed` also
-   returns the decoder's confidence (`avg_logprob`, `no_speech_prob`). Both live
-   paths (`run_turn` and `live_driver`) gate on it through `guard_transcript` so a
+   returns the decoder's confidence (`avg_logprob`, `no_speech_prob`) and accepts
+   either a WAV path or a normalized 16 kHz mono waveform. Both live paths pass captured
+   PCM in memory and gate on it through `guard_transcript` so a
    misheard or silence-derived command never reaches the action-capable brain (the
    signal-level mishear guard); a rejected turn speaks a short re-prompt instead of
    dispatching.
@@ -178,8 +179,8 @@ bug.
 
 ## File index
 
-- `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`). `run_turn` exposes `on_wake` (fires at the wake->capture boundary, for the chime) and `on_capture` (fires after capture, for half-duplex mic pause); `run_loop` is the desktop live loop and wires both.
-- `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> chime -> STT -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
+- `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`). The transcription boundary accepts file paths or in-memory 16 kHz mono audio; `run_turn` uses captured PCM directly, exposes `on_wake` (fires at the wake->capture boundary, for the chime) and `on_capture` (fires after capture, for half-duplex mic pause), and `run_loop` is the desktop live loop and wires both.
+- `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> chime -> in-memory PCM transcription -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
 - `capture_quality.py` — whether a capture device can carry continuous speech (issue #34): flags a Bluetooth hands-free (HFP) endpoint by name, a low WASAPI shared-mode capture format, and the 4 kHz cliff left by upsampled narrowband audio. Hardware-free (no sounddevice) so it is testable anywhere; `audio.py` stores the advertised-property verdict on `Microphone.capture_risk`, which `run_loop` prints at startup and `--list`/`--test-mic` surface. A spectral result without that cliff stays inconclusive because it cannot rule out wideband HFP codec damage or frame drops.
 - `chime.py` — the wake-acknowledgment cue (issue #41): a pure-DSP generator for the two-tone rising chime played the instant the wake fires, before capture. Backend-free (no sounddevice/aplay) so both live loops can render the cue and play it through their own output. Gated by the `wake_chime` config key (opt-in, default off — it regresses the no-pause case on a half-duplex device); half-duplex handling keeps the cue out of the captured request when it is on.
 - `conversation.py` — the confirm-before-act readback handshake (issue #42): the framing that asks the brain to restate a request without acting on it, the classifier that reads the spoken answer as confirm / revise / cancel, and the floor that stops the revision loop. Stdlib-only and hardware-free, like `brain_bridge.py`, so it is testable anywhere. Confirmation and refusal are both all-or-nothing: a reply confirms only when every word in it is an acknowledgment, and refuses only when every word is a refusal, so "yes but make it three" and "don't send it to Bob, send it to Alice" both come back as revisions. A reply left unfinished by the silence endpoint ("yes and") is a revision too. Not wired into a loop yet; the second listening window, the config keys, and reply correlation (#19, #59) land with the wiring.

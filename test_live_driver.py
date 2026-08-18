@@ -72,6 +72,7 @@ def drive(
         "spoken": None,
         "brain_called": False,
         "brain_arg": None,
+        "transcribe_arg": None,
         "played": [],
         "events": [],
     }
@@ -88,7 +89,12 @@ def drive(
     pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None, **_: (
         np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
     )
-    pipeline.transcribe_detailed = lambda p: transcript
+
+    def fake_transcribe(audio):
+        state["transcribe_arg"] = audio
+        return transcript
+
+    pipeline.transcribe_detailed = fake_transcribe
 
     def fake_brain(text, **_):
         state["brain_called"] = True
@@ -253,6 +259,15 @@ def main() -> int:
         and s["spoken"] == "Brain answer.",
         f"brain_called={s['brain_called']} brain_arg={s['brain_arg']!r} "
         f"spoken={s['spoken']!r}",
+    )
+    check(
+        "the hardware path sends captured int16 PCM to transcription in memory",
+        isinstance(s["transcribe_arg"], np.ndarray)
+        and s["transcribe_arg"].dtype == np.int16
+        and s["transcribe_arg"].shape == (8 * FRAME_SIZE,),
+        f"type={type(s['transcribe_arg']).__name__} "
+        f"dtype={getattr(s['transcribe_arg'], 'dtype', None)} "
+        f"shape={getattr(s['transcribe_arg'], 'shape', None)}",
     )
 
     # With the guard disabled, even a low-confidence transcript dispatches (the knob
