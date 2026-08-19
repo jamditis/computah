@@ -119,6 +119,12 @@ def test_voice_dispatch_policy() -> None:
         "mid-task correction": "follow-up corrections while the subagent runs",
         "spoken result": "summarize each unreported result once",
         "one bridge reply per turn": "never emit a second reply for the original turn",
+        "voice-event scope": "apply these instructions only to voice events",
+        "confirmation before external change": (
+            "do not start the subagent or act until joe confirms"
+        ),
+        "spoken reply budget": "at most 500 characters",
+        "deferred overflow result": "leave other results unreported",
     }
     for behavior, instruction in required.items():
         check(instruction in policy, f"voice policy includes {behavior}")

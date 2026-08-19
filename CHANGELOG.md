@@ -9,10 +9,11 @@ All notable changes to computah are recorded here. The format follows
 ### Added
 - Syl voice dispatcher policy (#49): Syl's persistent-bridge prompt keeps quick
   conversation inline and instructs Syl to send explicit handoffs, tool use, and
-  multi-step work to an ephemeral background subagent. Syl gives a short spoken
-  acknowledgment so the listening loop can resume, accepts corrections while the
-  subagent runs, and speaks each saved result once at the start of a later voice
-  turn without adding an unsolicited bridge reply.
+  multi-step work to an ephemeral background subagent after any required spoken
+  confirmation. Syl gives a short acknowledgment so the listening loop can resume,
+  accepts corrections while the subagent runs, and speaks each saved result once in
+  bounded later voice replies without adding an unsolicited bridge reply or changing
+  later text-channel behavior.
 - Capture-device suitability warning (#34): `capture_quality.py` judges whether a
   mic can carry continuous speech, and the live loop says so at startup instead of
   letting it surface as a garbled transcript. A Bluetooth hands-free (HFP) mic on
