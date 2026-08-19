@@ -15,6 +15,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import brain_bridge
 import pipeline
@@ -69,7 +70,7 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
         {
             "brain_backend": "bridge",
             "brain_transport": "local",
-            "brain_persona": "sim",
+            "brain_persona": "syl",
             "brain_reply_path": str(reply),
             # A workdir controls where bot-spren sends. It must not also guess which
             # inbox the running session consumes; an explicit inbox enables that
@@ -99,6 +100,77 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
     check(
         out == "Two plus two is four.",
         f"config-driven bridge with no explicit landing probe answered: {out!r}",
+    )
+    sent = json.loads(inbox.read_text().splitlines()[0])["payload"]
+    check(
+        sent == f"{pipeline.SYL_VOICE_SYSTEM_PROMPT}\n\nUser: what is two plus two?",
+        "the bridge sends Syl the voice dispatcher policy before the transcript",
+    )
+
+
+def test_voice_dispatch_policy() -> None:
+    """The voice contract pins both escalation paths and the non-blocking handoff."""
+    policy = pipeline.SYL_VOICE_SYSTEM_PROMPT.casefold()
+    required = {
+        "explicit escalation": "explicitly asks you to hand work off",
+        "implicit escalation": "needs tools, multiple steps, or more than a quick answer",
+        "ephemeral background worker": "ephemeral subagent in the background",
+        "immediate voice-loop return": "do not do delegated work inline or wait",
+        "mid-task correction": "follow-up corrections while the subagent runs",
+        "spoken result": "summarize each unreported result once",
+        "one bridge reply per turn": "never emit a second reply for the original turn",
+        "voice-event scope": "apply these instructions only to voice events",
+        "confirmation before external change": (
+            "do not start the subagent or act until joe confirms"
+        ),
+        "spoken reply budget": "at most 500 characters",
+        "deferred overflow result": "leave other results unreported",
+    }
+    for behavior, instruction in required.items():
+        check(instruction in policy, f"voice policy includes {behavior}")
+    check(
+        pipeline._bridge_voice_system_prompt("syl") == pipeline.SYL_VOICE_SYSTEM_PROMPT,
+        "the Syl bridge persona receives the dispatcher policy",
+    )
+    check(
+        pipeline._bridge_voice_system_prompt("assistant")
+        == pipeline.VOICE_SYSTEM_PROMPT,
+        "a non-Syl bridge persona keeps the neutral voice policy",
+    )
+    check(
+        pipeline._bridge_voice_system_prompt(None) == pipeline.VOICE_SYSTEM_PROMPT,
+        "a null bridge persona falls back to the neutral voice policy",
+    )
+    check(
+        pipeline._bridge_voice_system_prompt(49) == pipeline.VOICE_SYSTEM_PROMPT,
+        "a non-string bridge persona falls back to the neutral voice policy",
+    )
+
+
+def test_cli_voice_prompt(real_brain_cli) -> None:
+    """The tool-free CLI fallback must not promise a background handoff."""
+    captured = {}
+    real_run = pipeline.subprocess.run
+
+    def fake_run(*_args, **kwargs):
+        captured["prompt"] = kwargs["input"]
+        return SimpleNamespace(returncode=0, stdout="Done.\n", stderr="")
+
+    pipeline.subprocess.run = fake_run
+    try:
+        out = real_brain_cli("file an issue", dict(pipeline.DEFAULTS))
+    finally:
+        pipeline.subprocess.run = real_run
+
+    check(out == "Done.", f"CLI fallback still returns its reply: {out!r}")
+    check(
+        captured["prompt"]
+        == f"{pipeline.VOICE_SYSTEM_PROMPT}\n\nUser: file an issue\nAssistant:",
+        "CLI fallback uses the tool-free voice prompt",
+    )
+    check(
+        "subagent" not in captured["prompt"].casefold(),
+        "CLI fallback does not claim it can delegate",
     )
 
 
@@ -215,8 +287,10 @@ def main() -> int:
         with tempfile.TemporaryDirectory(prefix="brain-dispatch-") as tmp:
             d = Path(tmp)
             test_routing(d)
+            test_voice_dispatch_policy()
             # Restore the real helpers before the live-ish bridge test.
             pipeline._brain_cli, pipeline._brain_bridge = saved[2], saved[3]
+            test_cli_voice_prompt(saved[2])
             test_bridge_via_config(d, brain_bridge)
             test_set_wake_word_no_leak(d)
             test_set_wake_word_local(d)

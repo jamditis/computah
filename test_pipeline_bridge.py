@@ -46,7 +46,7 @@ def main() -> int:
         persona="syl",
         send=brain_bridge.local_sim_send(inbox),
         read_reply=brain_bridge.file_reply_reader(reply),
-        system_prompt=pipeline.VOICE_SYSTEM_PROMPT,
+        system_prompt=pipeline.SYL_VOICE_SYSTEM_PROMPT,
         timeout_s=20,
         poll_s=0.05,
     )
