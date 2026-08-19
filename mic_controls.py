@@ -93,6 +93,14 @@ class MixerControl(NamedTuple):
         return any(ch.direction == "Capture" for ch in self.channels)
 
     @property
+    def is_playback(self) -> bool:
+        # Mirror is_capture. pvolume/pswitch and a playback channel are the
+        # positive signals. enum and other directionless caps must not count.
+        if any(c.startswith("p") for c in self.capabilities):
+            return True
+        return any(ch.direction == "Playback" for ch in self.channels)
+
+    @property
     def has_volume(self) -> bool:
         # A volume lever in any direction: split capture ("cvolume") or playback
         # ("pvolume"), or a common volume ("volume") shared across both. The bare
@@ -242,7 +250,12 @@ def format_survey(survey: CardSurvey) -> str:
         return f"card {survey.card!r}: no survey ({survey.error})"
     lines = [f"card {survey.card!r}: {len(survey.controls)} mixer control(s)"]
     for control in survey.controls:
-        tag = "capture" if control.is_capture else "playback"
+        if control.is_capture:
+            tag = "capture"
+        elif control.is_playback:
+            tag = "playback"
+        else:
+            tag = "undirected"
         rng = f" {control.limits[0]}-{control.limits[1]}" if control.limits else ""
         lines.append(
             f"  [{tag}] {control.name!r},{control.index}{rng}"

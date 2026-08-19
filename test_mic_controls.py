@@ -367,6 +367,34 @@ def test_enum_named_capture_item_is_not_a_channel():
     )
 
 
+def test_directionless_enum_is_not_labeled_playback():
+    # Capabilities: enum has no capture or playback signal. The survey must not
+    # treat "not capture" as playback; that misstates Input Source and similar
+    # selectors on speakerphone cards.
+    text = """Simple mixer control 'Input Source',0
+  Capabilities: enum
+  Items: 'Mic' 'Line'
+  Item0: 'Mic'
+"""
+    out = format_survey(survey_card("PowerConf", run=_fake_run(stdout=text)))
+    check(
+        "enum: survey does not label a directionless control as playback",
+        "[playback]" not in out,
+        out,
+    )
+    check(
+        "enum: survey uses a neutral tag",
+        "[undirected]" in out,
+        out,
+    )
+    pcm_out = format_survey(survey_card("PowerConf", run=_fake_run(stdout=FIXTURE)))
+    check(
+        "pcm: a real playback control still labels playback",
+        "[playback] 'PCM',0" in pcm_out,
+        pcm_out,
+    )
+
+
 def test_common_volume_counts_as_has_volume():
     # has_volume must agree with has_capture_volume on the common-volume shape
     # ('Capabilities: volume'). Otherwise a consumer filtering volume controls on
@@ -420,6 +448,7 @@ def main() -> int:
     test_undirected_common_volume_is_a_gain_lever()
     test_undirected_enum_line_is_not_a_channel()
     test_enum_named_capture_item_is_not_a_channel()
+    test_directionless_enum_is_not_labeled_playback()
     test_common_volume_counts_as_has_volume()
     test_survey_output_shows_control_index()
     test_capture_percent_reported_over_playback()
