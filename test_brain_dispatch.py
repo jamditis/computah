@@ -131,6 +131,14 @@ def test_voice_dispatch_policy() -> None:
         == pipeline.VOICE_SYSTEM_PROMPT,
         "a non-Syl bridge persona keeps the neutral voice policy",
     )
+    check(
+        pipeline._bridge_voice_system_prompt(None) == pipeline.VOICE_SYSTEM_PROMPT,
+        "a null bridge persona falls back to the neutral voice policy",
+    )
+    check(
+        pipeline._bridge_voice_system_prompt(49) == pipeline.VOICE_SYSTEM_PROMPT,
+        "a non-string bridge persona falls back to the neutral voice policy",
+    )
 
 
 def test_cli_voice_prompt(real_brain_cli) -> None:

@@ -178,9 +178,9 @@ SYL_VOICE_SYSTEM_PROMPT = (
 )
 
 
-def _bridge_voice_system_prompt(persona: str) -> str:
+def _bridge_voice_system_prompt(persona: object) -> str:
     """Return Syl's dispatcher policy only for the Syl bridge persona."""
-    if persona.casefold() == "syl":
+    if isinstance(persona, str) and persona.casefold() == "syl":
         return SYL_VOICE_SYSTEM_PROMPT
     return VOICE_SYSTEM_PROMPT
 
