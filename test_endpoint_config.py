@@ -194,9 +194,12 @@ def main() -> int:
     pipeline._get_oww_model = lambda path: object()
     pipeline.stream_detect_wake = lambda frames, model, threshold, preroll=None: 0.9
     pipeline.capture_request = fake_capture
-    pipeline.transcribe_detailed = lambda p: pipeline.Transcript(
-        "file an issue", 0.0, 0.0
-    )
+
+    def fake_transcribe(audio):
+        seen["transcribe_arg"] = audio
+        return pipeline.Transcript("file an issue", 0.0, 0.0)
+
+    pipeline.transcribe_detailed = fake_transcribe
     pipeline.guard_transcript = lambda heard, cfg: (True, "")
     pipeline.brain = lambda t, **_: "done"
     pipeline.speak = lambda text, out, **_: out
@@ -225,6 +228,15 @@ def main() -> int:
         "pipeline.run_turn passes cfg max_request_ms to capture_request",
         seen.get("max_request_ms") == 2000,
         f"capture_request saw max_request_ms={seen.get('max_request_ms')} want 2000",
+    )
+    check(
+        "pipeline.run_turn sends captured int16 PCM to transcription in memory",
+        isinstance(seen.get("transcribe_arg"), np.ndarray)
+        and seen["transcribe_arg"].dtype == np.int16
+        and seen["transcribe_arg"].shape == (4 * FRAME_SIZE,),
+        f"type={type(seen.get('transcribe_arg')).__name__} "
+        f"dtype={getattr(seen.get('transcribe_arg'), 'dtype', None)} "
+        f"shape={getattr(seen.get('transcribe_arg'), 'shape', None)}",
     )
 
     # live_driver.run_turn (the hardware loop) forwards the same two keys. Its wiring is

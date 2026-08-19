@@ -30,7 +30,6 @@ import tempfile
 import time
 
 import numpy as np
-import soundfile as sf
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline
@@ -248,13 +247,9 @@ def run_turn(
         return True
     log(f"captured {request_pcm.size / 16000:.2f}s of speech")
 
-    fd, req_wav = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
-    try:
-        sf.write(req_wav, request_pcm, 16000, subtype="PCM_16")
-        heard = pipeline.transcribe_detailed(req_wav)
-    finally:
-        os.unlink(req_wav)
+    # The captured int16 PCM is normalized by pipeline.transcribe_detailed and sent
+    # straight to faster-whisper; no request-side temporary WAV is needed.
+    heard = pipeline.transcribe_detailed(request_pcm)
     if not heard.text.strip():
         log("empty transcript (noise) — ignoring")
         return True

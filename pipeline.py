@@ -6,7 +6,7 @@ feeding it audio files. No microphone, no network LLM API, no PyTorch.
 
 Stages:
   detect_wake(wav)  openWakeWord (ONNX) — is the wake phrase present?
-  transcribe(wav)   faster-whisper (CTranslate2, int8) — what was said?
+  transcribe(audio) faster-whisper (CTranslate2, int8) — what was said?
   brain(text)       dispatches to a persistent assistant session (the bridge)
                     or, as a dev fallback, the local `claude` CLI subprocess.
   speak(text, out)  Piper TTS (ONNX) — render the reply to a WAV.
@@ -773,19 +773,50 @@ def _aggregate_segments(segments) -> Transcript:
     return Transcript(text, avg_logprob, no_speech_prob)
 
 
-def transcribe_detailed(wav_path: str) -> Transcript:
-    """Transcribe a WAV with faster-whisper (int8), returning the text plus the
-    confidence signals the mishear guard needs. transcribe() wraps this for callers
-    that want only the text."""
+def _whisper_audio_input(
+    audio: str | os.PathLike[str] | np.ndarray,
+) -> str | np.ndarray:
+    """Return an input in the format faster-whisper expects.
+
+    File callers stay compatible. Live callers can pass captured 16 kHz mono PCM
+    directly, avoiding a temporary WAV: signed 16-bit samples are normalized to
+    float32 in [-1, 1), while floating-point arrays must already be normalized.
+    """
+    if not isinstance(audio, np.ndarray):
+        return os.fspath(audio)
+    if audio.ndim != 1:
+        raise ValueError("transcription audio must be a one-dimensional mono array")
+    if audio.dtype == np.int16:
+        return audio.astype(np.float32) / 32768.0
+    if np.issubdtype(audio.dtype, np.floating):
+        normalized = audio.astype(np.float32, copy=False)
+        if not np.all(np.isfinite(normalized)):
+            raise ValueError("transcription audio must contain only finite samples")
+        if normalized.size and float(np.max(np.abs(normalized))) > 1.0:
+            raise ValueError("floating-point transcription audio must be normalized")
+        return normalized
+    raise TypeError("transcription arrays must use int16 or a floating-point dtype")
+
+
+def transcribe_detailed(
+    audio: str | os.PathLike[str] | np.ndarray,
+) -> Transcript:
+    """Transcribe a WAV path or normalized 16 kHz mono array with faster-whisper.
+
+    Returns the text plus the confidence signals the mishear guard needs.
+    transcribe() wraps this for callers that want only the text.
+    """
     cfg = load_config()
     model = _get_whisper(cfg["whisper_model"], cfg["whisper_compute"])
-    segments, _info = model.transcribe(wav_path, beam_size=1, language="en")
+    segments, _info = model.transcribe(
+        _whisper_audio_input(audio), beam_size=1, language="en"
+    )
     return _aggregate_segments(segments)
 
 
-def transcribe(wav_path: str) -> str:
-    """Transcribe a WAV with faster-whisper (int8). Returns the text."""
-    return transcribe_detailed(wav_path).text
+def transcribe(audio: str | os.PathLike[str] | np.ndarray) -> str:
+    """Transcribe a WAV path or normalized 16 kHz mono array. Returns the text."""
+    return transcribe_detailed(audio).text
 
 
 def transcript_confident(
@@ -1497,14 +1528,9 @@ def run_turn(
     if request_pcm.size == 0:
         return None  # wake fired but only silence followed — ignore the turn
 
-    # whisper's wrapper takes a path, so stage the captured request to a temp WAV.
-    fd, req_wav = tempfile.mkstemp(suffix=".wav")
-    os.close(fd)
-    try:
-        sf.write(req_wav, request_pcm, 16000, subtype="PCM_16")
-        heard = transcribe_detailed(req_wav)
-    finally:
-        os.unlink(req_wav)
+    # faster-whisper accepts a normalized waveform, so transcribe the captured PCM
+    # in memory instead of serializing each live request through a temporary WAV.
+    heard = transcribe_detailed(request_pcm)
 
     if not heard.text.strip():
         return None  # captured audio whisper read as no words (noise) — ignore

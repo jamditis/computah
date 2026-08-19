@@ -8,7 +8,7 @@ computah listens for a wake word, transcribes the request, sends the transcript 
 
 ## What it does
 
-computah is the mic-free core of a local voice assistant. Feed it a wav file and it runs the same stages a live loop will use later:
+computah is the core of a local voice assistant. Feed it a wav file or run one of its live microphone loops and it uses the same stages:
 
 1. Detect the wake word in the audio.
 2. Transcribe the spoken request.
@@ -31,7 +31,7 @@ The name is also the intended wake word: “computah,” said in your own voice.
 
 ## Current status
 
-v0.1.0 is a working file-based pipeline, not a live microphone appliance yet.
+v0.1.0 has a working file-based pipeline and live microphone loops. Hardware deployment remains device-specific.
 
 | Area | Status |
 | --- | --- |
@@ -39,7 +39,7 @@ v0.1.0 is a working file-based pipeline, not a live microphone appliance yet.
 | Speech-to-text | Works through faster-whisper with CTranslate2 int8. |
 | Brain | Supports a fallback CLI backend and the persistent file bridge. |
 | Text-to-speech | Works through Piper by writing a reply wav. |
-| Live loop | Planned. |
+| Live loop | Implemented for desktop microphones and an ALSA/arecord hardware path. |
 | Custom `computah` wake word | Planned; recording notes live in `docs/recording-computah.md`. |
 
 ## How the pipeline works
@@ -55,11 +55,11 @@ audio in
 | Stage | Default implementation | Boundary |
 | --- | --- | --- |
 | Wake word | openWakeWord | `detect_wake` returns whether the configured phrase fired. |
-| Speech-to-text | faster-whisper | `transcribe` returns text from the audio file. |
+| Speech-to-text | faster-whisper | `transcribe` returns text from a file path or normalized 16 kHz mono array. |
 | Brain | bridge or CLI | `brain` returns short spoken text. |
 | Text-to-speech | Piper | `speak` writes the answer to a wav file. |
 
-Module-level caches keep the wake-word and Whisper models warm inside one process. Wake-word detection normalizes audio to 16 kHz mono int16; transcription passes the wav file to faster-whisper.
+Module-level caches keep the wake-word and Whisper models warm inside one process. Wake-word detection normalizes audio to 16 kHz mono int16. File-based transcription still accepts a wav path; both live paths normalize captured int16 PCM and pass the waveform to faster-whisper in memory, without a request-side temporary file.
 
 In a live turn, a mishear guard sits between transcription and the brain: it reads faster-whisper's own confidence signals (`avg_logprob`, `no_speech_prob`) and, when a transcript looks garbled or silence-derived, speaks a short re-prompt instead of dispatching. Because the brain acts on what it hears, this keeps a misheard command from triggering an action. Both live paths (`run_turn` and the `live_driver` hardware loop) gate through the same `guard_transcript`; the file-based `run_pipeline` reports the same signals for inspection but does not gate on them.
 
