@@ -191,6 +191,32 @@ def test_whisper_compute_non_string_falls_back() -> None:
         )
 
 
+# --- live_output_pcm (spliced into the aplay argv) --------------------------- #
+
+
+def test_live_output_pcm_non_string_falls_back() -> None:
+    # A non-string reaches subprocess.run as an argv element and raises TypeError,
+    # silencing every reply; reject it at load so it falls back to the ALSA default.
+    for bad in (True, 5, [], {"a": 1}):
+        cfg, err = validate({"live_output_pcm": bad})
+        check(
+            f"live_output_pcm {bad!r} -> default (non-string)",
+            cfg["live_output_pcm"] == DEFAULTS["live_output_pcm"]
+            and "live_output_pcm" in err,
+            f"got {cfg['live_output_pcm']!r}",
+        )
+
+
+def test_live_output_pcm_string_kept() -> None:
+    for good in ("", "plughw:CARD=PowerConf,DEV=0"):
+        cfg, err = validate({"live_output_pcm": good})
+        check(
+            f"live_output_pcm {good!r} kept",
+            cfg["live_output_pcm"] == good and err == "",
+            f"got {cfg['live_output_pcm']!r}, no warning: {err == ''}",
+        )
+
+
 # --- wake_word resolution ---------------------------------------------------- #
 
 
@@ -284,6 +310,8 @@ def main() -> int:
         test_whisper_compute_valid_untouched()
         test_whisper_compute_unsupported_backend_type_falls_back()
         test_whisper_compute_non_string_falls_back()
+        test_live_output_pcm_non_string_falls_back()
+        test_live_output_pcm_string_kept()
         test_wake_word_unknown_falls_back(monkeypatch_lib)
         test_wake_word_known_kept(monkeypatch_lib)
         test_wake_word_empty_lib_deferred(monkeypatch_lib)

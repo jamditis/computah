@@ -132,6 +132,12 @@ DEFAULTS = {
     # the Pi: "powerconf" over USB.
     "mic_device": "",
     "output_device": "",
+    # ALSA PCM for live_driver.py's `aplay -D` when `-o` is omitted (issue #50).
+    # Kept distinct from output_device above: that is a sounddevice friendly-substring
+    # (e.g. "desktop speakers") for the audio.py path, and passing it to `aplay -D`
+    # would fail. This holds a literal ALSA PCM name, e.g.
+    # "plughw:CARD=PowerConf,DEV=0". Empty string means the ALSA default device.
+    "live_output_pcm": "",
     # Brain backend: "cli" (the claude -p dev fallback, default so a fresh clone
     # runs standalone) or "bridge" (a persistent assistant session).
     "brain_backend": "cli",
@@ -320,6 +326,13 @@ def validate_config(cfg: dict) -> dict:
                     file=sys.stderr,
                 )
                 cfg["wake_word"] = DEFAULTS["wake_word"]
+
+    # live_output_pcm is spliced straight into the `aplay -D` argv by live_driver. A
+    # non-string from config.local.json (a bare true, a number, a JSON array) would reach
+    # subprocess.run and raise TypeError, silencing every reply on the hardware path with
+    # no legible cause. Reject it at load so a typo falls back to the ALSA default instead.
+    if "live_output_pcm" in cfg and not isinstance(cfg["live_output_pcm"], str):
+        fall_back("live_output_pcm", "must be a string ALSA PCM name")
 
     return cfg
 
