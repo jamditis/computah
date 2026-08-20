@@ -327,6 +327,13 @@ def validate_config(cfg: dict) -> dict:
                 )
                 cfg["wake_word"] = DEFAULTS["wake_word"]
 
+    # live_output_pcm is spliced straight into the `aplay -D` argv by live_driver. A
+    # non-string from config.local.json (a bare true, a number, a JSON array) would reach
+    # subprocess.run and raise TypeError, silencing every reply on the hardware path with
+    # no legible cause. Reject it at load so a typo falls back to the ALSA default instead.
+    if "live_output_pcm" in cfg and not isinstance(cfg["live_output_pcm"], str):
+        fall_back("live_output_pcm", "must be a string ALSA PCM name")
+
     return cfg
 
 

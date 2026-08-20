@@ -269,6 +269,11 @@ def test_resolve_output_pcm() -> None:
         live_driver._resolve_output_pcm(None, {}) is None,
         "aplay with no -D plays the ALSA default device",
     )
+    check(
+        "an explicit -o '' overrides config to the ALSA default",
+        live_driver._resolve_output_pcm("", cfg_with_pcm) is None,
+        "a present -o (even empty) wins; None (omitted) and '' (override) stay distinct",
+    )
 
 
 def main() -> int:

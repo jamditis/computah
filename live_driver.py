@@ -50,8 +50,14 @@ def _resolve_output_pcm(cli_output_device: str | None, cfg: dict) -> str | None:
     else None (the ALSA default device). Only `live_output_pcm` is read here, never the
     sounddevice `output_device`: that is a friendly-substring for the audio.py path and
     would fail as an `aplay -D` argument, so the two naming conventions stay separate.
-    An empty-string config value is treated as unset, matching the DEFAULTS sentinel."""
-    return cli_output_device or cfg.get("live_output_pcm") or None
+    An empty-string value is treated as unset, matching the DEFAULTS sentinel.
+
+    `-o` present (including an explicit `-o ''`) always wins, so `None` (option omitted)
+    and `""` (explicit override to the ALSA default) stay distinct: a live_output_pcm in
+    config cannot override an `-o ''` on the command line."""
+    if cli_output_device is not None:
+        return cli_output_device or None
+    return cfg.get("live_output_pcm") or None
 
 
 def _play_wav(path: str, device: str | None) -> None:
