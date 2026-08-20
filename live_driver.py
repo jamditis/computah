@@ -13,10 +13,11 @@ without relaunching the process.
 -v/--debug adds per-frame rms+score telemetry to stderr (use it to see why a wake
 did or did not fire). Without it, only a one-line summary per turn is printed.
 
-This is the real-hardware counterpart to experiments/live_loop.py, which fakes the
-mic with a WAV file and a sim persona. Keep them distinct: that one is a no-hardware
-proof of the streaming/endpointing logic; this one drives the actual device against
-the real persistent brain.
+This is the real-hardware counterpart to the mic-free streaming proof in
+test_stream_turn.py, which drives pipeline.stream_detect_wake and capture_request
+with synthetic audio instead of a live mic. Keep them distinct: that one
+proves the streaming/endpointing logic with no hardware; this one drives the actual
+device against the real persistent brain.
 """
 
 from __future__ import annotations
