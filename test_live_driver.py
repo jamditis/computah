@@ -234,8 +234,46 @@ def test_stdin_mic() -> None:
         os.close(r)
 
 
+def test_resolve_output_pcm() -> None:
+    """The live driver's default output PCM comes from `-o`, then config live_output_pcm,
+    then the ALSA default, and never from the sounddevice output_device (issue #50)."""
+    print("\n=== live_driver: -o over live_output_pcm, never the sounddevice name ===")
+
+    pcm = "plughw:CARD=PowerConf,DEV=0"
+    cfg_with_pcm = {"live_output_pcm": pcm, "output_device": "desktop speakers"}
+
+    check(
+        "-o wins over config live_output_pcm",
+        live_driver._resolve_output_pcm("hw:CARD=Other,DEV=0", cfg_with_pcm)
+        == "hw:CARD=Other,DEV=0",
+        "explicit CLI value must override the config default",
+    )
+    check(
+        "config live_output_pcm is the default when -o is omitted",
+        live_driver._resolve_output_pcm(None, cfg_with_pcm) == pcm,
+        f"expected {pcm!r}",
+    )
+    check(
+        "the sounddevice output_device never leaks into the aplay PCM",
+        live_driver._resolve_output_pcm(None, {"output_device": "desktop speakers"})
+        is None,
+        "output_device is a friendly-substring and would fail as `aplay -D`",
+    )
+    check(
+        "an empty live_output_pcm falls back to the ALSA default (None)",
+        live_driver._resolve_output_pcm(None, {"live_output_pcm": ""}) is None,
+        "empty string is the unset sentinel, matching DEFAULTS",
+    )
+    check(
+        "no config and no -o means the ALSA default (None)",
+        live_driver._resolve_output_pcm(None, {}) is None,
+        "aplay with no -D plays the ALSA default device",
+    )
+
+
 def main() -> int:
     test_stdin_mic()
+    test_resolve_output_pcm()
     print("\n=== live_driver.run_turn: the hardware path honors the guard ===")
 
     # A low-confidence transcript on the hardware path must be re-prompted, not

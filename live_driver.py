@@ -43,6 +43,17 @@ def log(msg: str) -> None:
     print(f"[computah] {msg}", file=sys.stderr, flush=True)
 
 
+def _resolve_output_pcm(cli_output_device: str | None, cfg: dict) -> str | None:
+    """Pick the ALSA PCM live_driver plays through, `-o` winning over config (issue #50).
+
+    Precedence: an explicit `-o/--output-device` first, else the config `live_output_pcm`,
+    else None (the ALSA default device). Only `live_output_pcm` is read here, never the
+    sounddevice `output_device`: that is a friendly-substring for the audio.py path and
+    would fail as an `aplay -D` argument, so the two naming conventions stay separate.
+    An empty-string config value is treated as unset, matching the DEFAULTS sentinel."""
+    return cli_output_device or cfg.get("live_output_pcm") or None
+
+
 def _play_wav(path: str, device: str | None) -> None:
     """Play a WAV through ALSA's aplay — the Pi's native output, symmetric with the
     arecord capture side and dependency-free. (The sounddevice-based audio.play_wav
@@ -294,7 +305,8 @@ def main() -> int:
         "--output-device",
         default=None,
         help="ALSA output PCM for aplay -D (e.g. "
-        "plughw:CARD=PowerConf,DEV=0); default: ALSA default device",
+        "plughw:CARD=PowerConf,DEV=0); default: config live_output_pcm, "
+        "then the ALSA default device",
     )
     args = ap.parse_args()
 
@@ -305,6 +317,7 @@ def main() -> int:
         os.close(fd)
 
     cfg = pipeline.load_config()
+    output_pcm = _resolve_output_pcm(args.output_device, cfg)
     name = cfg["wake_word"]
     threshold = cfg["wake_threshold"]
     model = pipeline._get_oww_model(pipeline._resolve_wake_path(name))
@@ -324,7 +337,7 @@ def main() -> int:
                 model,
                 threshold,
                 out_wav,
-                args.output_device,
+                output_pcm,
                 cfg,
                 args.debug,
             ):

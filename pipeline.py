@@ -132,6 +132,12 @@ DEFAULTS = {
     # the Pi: "powerconf" over USB.
     "mic_device": "",
     "output_device": "",
+    # ALSA PCM for live_driver.py's `aplay -D` when `-o` is omitted (issue #50).
+    # Kept distinct from output_device above: that is a sounddevice friendly-substring
+    # (e.g. "desktop speakers") for the audio.py path, and passing it to `aplay -D`
+    # would fail. This holds a literal ALSA PCM name, e.g.
+    # "plughw:CARD=PowerConf,DEV=0". Empty string means the ALSA default device.
+    "live_output_pcm": "",
     # Brain backend: "cli" (the claude -p dev fallback, default so a fresh clone
     # runs standalone) or "bridge" (a persistent assistant session).
     "brain_backend": "cli",
