@@ -108,6 +108,72 @@ def main() -> int:
         f"empty after {consumed} frames, not the {pipeline._MAX_REQUEST_FRAMES} cap",
     )
 
+    # ----- peek_cue_gate: gate the cue on a pause (#55), no model ----------- #
+    print("\n=== peek_cue_gate: tell a no-pause command from a pause (no model) ===")
+
+    play, peeked = pipeline.peek_cue_gate(iter(silent(pipeline._CUE_PEEK_FRAMES + 3)))
+    check(
+        "silence peeks the whole window and plays the cue (a pause)",
+        play is True and len(peeked) == pipeline._CUE_PEEK_FRAMES,
+        f"play={play} peeked={len(peeked)} frames",
+    )
+
+    it = iter(loud(6) + silent(4))
+    play, peeked = pipeline.peek_cue_gate(it)
+    remaining = sum(1 for _ in it)
+    check(
+        "speech in the window skips the cue and stops at onset (no-pause command)",
+        play is False
+        and len(peeked) == pipeline._SPEECH_ONSET_FRAMES
+        and remaining == 10 - pipeline._SPEECH_ONSET_FRAMES,
+        f"play={play} peeked={len(peeked)} remaining={remaining}",
+    )
+
+    # A lone transient (a click or echo, 1-2 frames) is not an onset: the gate still
+    # plays the cue, matching capture_request's sustained-run onset test (#54).
+    play, peeked = pipeline.peek_cue_gate(
+        iter(loud(pipeline._SPEECH_ONSET_FRAMES - 1) + silent(5))
+    )
+    check(
+        "a transient below the onset run still plays the cue",
+        play is True and len(peeked) == pipeline._CUE_PEEK_FRAMES,
+        f"play={play} peeked={len(peeked)}",
+    )
+
+    # The stream ending inside the window decides on what was seen, and never raises.
+    play, peeked = pipeline.peek_cue_gate(iter(silent(1)))
+    check(
+        "a stream that ends inside the window decides on what was seen",
+        play is True and len(peeked) == 1,
+        f"play={play} peeked={len(peeked)}",
+    )
+
+    # Peeking must not drop audio: the frames returned are exactly the ones consumed,
+    # in order, so the caller can feed them back to capture on the no-pause branch.
+    src = loud(2) + silent(2)
+    it = iter(src)
+    play, peeked = pipeline.peek_cue_gate(it)
+    roundtrip = peeked + list(it)
+    check(
+        "peeked frames are exactly the consumed frames (no audio dropped)",
+        len(roundtrip) == len(src)
+        and all(np.array_equal(a, b) for a, b in zip(roundtrip, src)),
+        f"roundtrip={len(roundtrip)}/{len(src)}",
+    )
+
+    # The window is _SPEECH_ONSET_FRAMES + 1 on purpose: a single quiet leading frame
+    # (a breath before the command) must not defeat detection. This pins the +1 -- with
+    # _CUE_PEEK_FRAMES == _SPEECH_ONSET_FRAMES the sustained run can't complete after a
+    # quiet frame and the command would be misread as a pause and clipped.
+    play, peeked = pipeline.peek_cue_gate(
+        iter(silent(1) + loud(pipeline._SPEECH_ONSET_FRAMES) + silent(2))
+    )
+    check(
+        "a single quiet leading frame still reads as a no-pause command (+1 window)",
+        play is False and len(peeked) == pipeline._CUE_PEEK_FRAMES,
+        f"play={play} peeked={len(peeked)}",
+    )
+
     # ----- streaming detection + run_turn (loads bundled hey_jarvis) ------- #
     print("\n=== stream_detect_wake + run_turn (bundled hey_jarvis, synth audio) ===")
     jarvis = build_stream("hey jarvis, what is two plus two?", "jarvis")
@@ -352,6 +418,124 @@ def main() -> int:
         "on_capture fires on a wake even when no speech follows",
         si_turn is None and fired_silent["n"] == 1,
         f"calls={fired_silent['n']}",
+    )
+
+    # ----- run_turn wires the cue gate to both branches (#55) --------------- #
+    print("\n=== run_turn: the cue gate skips the cue on a no-pause command ===")
+    real_sdw, real_cap4 = pipeline.stream_detect_wake, pipeline.capture_request
+
+    def _fire_without_consuming(fr, model, threshold, preroll=None):
+        return 0.9  # fire but consume nothing, so the peek sees the frames below
+
+    def _count_capture(store):
+        def _cap(fr, preroll=None, vad_threshold=None, **_):
+            store["frames"] = sum(1 for _ in fr)  # count what capture actually receives
+            return np.zeros(0, dtype=np.int16)  # empty -> the turn returns None
+
+        return _cap
+
+    # No-pause: speech right after the wake. on_wake (the cue) must NOT fire, and the
+    # peeked command frames must reach capture -- nothing clipped. Input is 6 loud + 15
+    # silent; the peek stops at onset (3 frames) and prepends them, so capture sees all 21.
+    store_np, cue_np = {}, {"n": 0}
+    pipeline.stream_detect_wake = _fire_without_consuming
+    pipeline.capture_request = _count_capture(store_np)
+    try:
+        r_np = pipeline.run_turn(
+            iter(loud(6) + silent(15)),
+            model_name="hey_jarvis",
+            threshold=DETECT_THR,
+            on_wake=lambda: cue_np.__setitem__("n", cue_np["n"] + 1) or True,
+        )
+    finally:
+        pipeline.stream_detect_wake, pipeline.capture_request = real_sdw, real_cap4
+    check(
+        "no-pause command: cue skipped, the peeked frames reach capture",
+        r_np is None and cue_np["n"] == 0 and store_np.get("frames") == 21,
+        f"cue_calls={cue_np['n']} capture_frames={store_np.get('frames')}",
+    )
+
+    # Pause: silence right after the wake. on_wake (the cue) fires, and its peeked
+    # pre-cue room tone is dropped from capture. Input is 6 + 4 + 12 = 22 frames; the
+    # peek reads the first _CUE_PEEK_FRAMES of silence and drops them, so capture sees 18.
+    store_pa, cue_pa = {}, {"n": 0}
+    pipeline.stream_detect_wake = _fire_without_consuming
+    pipeline.capture_request = _count_capture(store_pa)
+    try:
+        r_pa = pipeline.run_turn(
+            iter(silent(6) + loud(4) + silent(12)),
+            model_name="hey_jarvis",
+            threshold=DETECT_THR,
+            on_wake=lambda: cue_pa.__setitem__("n", cue_pa["n"] + 1) or True,
+        )
+    finally:
+        pipeline.stream_detect_wake, pipeline.capture_request = real_sdw, real_cap4
+    check(
+        "pause: the cue fires and its peeked room tone is dropped from capture",
+        r_pa is None
+        and cue_pa["n"] == 1
+        and store_pa.get("frames") == 22 - pipeline._CUE_PEEK_FRAMES,
+        f"cue_calls={cue_pa['n']} capture_frames={store_pa.get('frames')}",
+    )
+
+    # Cue failure on the pause branch: on_wake fired but returned falsy (the cue could
+    # not play, nothing was flushed). The buffered audio must be kept -- the peeked
+    # frames are fed back to capture, not dropped -- so a command starting inside the
+    # peek window is not clipped. Input is 22 frames; capture must see all 22.
+    store_fail, cue_fail = {}, {"n": 0}
+    pipeline.stream_detect_wake = _fire_without_consuming
+    pipeline.capture_request = _count_capture(store_fail)
+    try:
+        r_fail = pipeline.run_turn(
+            iter(silent(6) + loud(4) + silent(12)),
+            model_name="hey_jarvis",
+            threshold=DETECT_THR,
+            on_wake=lambda: cue_fail.__setitem__("n", cue_fail["n"] + 1) or False,
+        )
+    finally:
+        pipeline.stream_detect_wake, pipeline.capture_request = real_sdw, real_cap4
+    check(
+        "cue failure on a pause keeps the peeked frames (no clip)",
+        r_fail is None and cue_fail["n"] == 1 and store_fail.get("frames") == 22,
+        f"cue_calls={cue_fail['n']} capture_frames={store_fail.get('frames')}",
+    )
+
+    # End-to-end with the cue enabled: the gate, a real capture, and real transcription
+    # still complete a full turn -- the cue wiring does not break the live path. The
+    # deterministic no-pause / pause branch behavior is pinned by the stubbed checks
+    # above; this is the real-audio integration smoke test. The jarvis synth has an
+    # internal pause, so acoustically it exercises the cue-plays branch here (a genuine
+    # one-breath command cannot be synthesized reliably), which is why this asserts a
+    # completed turn rather than an unclipped leading word.
+    print("\n=== run_turn: the cue-enabled path completes a real turn ===")
+    real_brain6 = pipeline.brain
+    pipeline.brain = lambda text, **_: "Two plus two is four."
+    cue_real = {"n": 0}
+    try:
+        r_real = pipeline.run_turn(
+            pipeline.iter_wav_frames(jarvis),
+            model_name="hey_jarvis",
+            threshold=DETECT_THR,
+            out_wav_path=str(TEST_DIR / "turn_reply.wav"),
+            on_wake=lambda: cue_real.__setitem__("n", cue_real["n"] + 1) or True,
+        )
+    finally:
+        pipeline.brain = real_brain6
+    ok_cue = (
+        r_real is not None
+        and (
+            "2" in (r_real["transcript"] or "")
+            or "two" in (r_real["transcript"] or "").lower()
+        )
+        and r_real["reply"] == "Two plus two is four."
+    )
+    check(
+        "a full turn completes with the cue enabled (real audio)",
+        ok_cue,
+        f"transcript={r_real['transcript']!r} reply={r_real['reply']!r} "
+        f"cue_calls={cue_real['n']}"
+        if r_real
+        else "returned None",
     )
 
     # A model not built by _get_oww_model (a future mic adapter may build its own)

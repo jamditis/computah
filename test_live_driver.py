@@ -276,9 +276,104 @@ def test_resolve_output_pcm() -> None:
     )
 
 
+def _frames(*groups):
+    """Build a frame list from (value, count) groups: _frames((4000, 6), (0, 15)) is
+    6 loud frames then 15 of room tone."""
+    out = []
+    for val, n in groups:
+        out.extend(np.full(FRAME_SIZE, val, dtype=np.int16) for _ in range(n))
+    return out
+
+
+CUE_ON = dict(GUARD_OFF, wake_chime=True)
+
+
+def test_cue_pause_gate() -> None:
+    """The cue is gated on a pause (#55): the hardware path peeks the post-wake audio,
+    skips the cue when a command is already being spoken (so the no-pause command is not
+    clipped by the cue window), and plays the cue only when the window is silent."""
+    print("\n=== live_driver.run_turn: gate the wake chime on a pause (#55) ===")
+
+    real = (
+        live_driver.listen_for_wake,
+        live_driver._play_wav,
+        pipeline.capture_request,
+    )
+    live_driver.listen_for_wake = lambda fr, m, t, d, preroll=None: (
+        0.9
+    )  # fire, consume nothing
+
+    def run(frames: list, store: dict, play_error=None) -> tuple[int, int]:
+        played = {"n": 0}
+
+        def fake_play(path, dev):
+            played["n"] += 1
+            if play_error is not None:
+                raise play_error
+
+        live_driver._play_wav = fake_play
+
+        def cap(fr, preroll=None, vad_threshold=None, **_):
+            store["frames"] = sum(1 for _ in fr)  # count what capture actually receives
+            return np.zeros(0, dtype=np.int16)  # empty -> the turn ends after the gate
+
+        pipeline.capture_request = cap
+        mic = _FakeMic()
+        live_driver.run_turn(
+            iter(frames), mic, object(), 0.5, "/dev/null", None, CUE_ON, False
+        )
+        return played["n"], mic.flushed
+
+    try:
+        # No-pause: 6 loud + 15 silent. The cue is skipped and the peeked command frames
+        # (stopped at onset) are prepended, so capture sees all 21 and the mic is not flushed.
+        store: dict = {}
+        plays, flushed = run(_frames((4000, 6), (0, 15)), store)
+        check(
+            "no-pause command: cue skipped, no flush, peeked frames reach capture",
+            plays == 0 and flushed == 0 and store.get("frames") == 21,
+            f"plays={plays} flushed={flushed} capture_frames={store.get('frames')}",
+        )
+
+        # Pause: 6 + 4 + 12 = 22 frames with a silent onset. The cue plays, the post-cue
+        # flush runs, and the peeked room tone is dropped from capture.
+        store = {}
+        plays, flushed = run(_frames((0, 6), (4000, 4), (0, 12)), store)
+        check(
+            "pause: cue plays, mic flushed, peeked room tone dropped from capture",
+            plays == 1
+            and flushed == 1
+            and store.get("frames") == 22 - pipeline._CUE_PEEK_FRAMES,
+            f"plays={plays} flushed={flushed} capture_frames={store.get('frames')}",
+        )
+
+        # Cue failure on the pause branch: aplay raises, so nothing played and nothing
+        # was flushed. The buffered audio must be kept -- the peeked frames are fed back
+        # to capture, not dropped -- so capture still sees all 22 and the mic is not
+        # flushed (matches the pre-cue no-clip contract, issues #30, #55).
+        store = {}
+        plays, flushed = run(
+            _frames((0, 6), (4000, 4), (0, 12)),
+            store,
+            play_error=RuntimeError("aplay: no such device"),
+        )
+        check(
+            "cue failure on a pause keeps the peeked frames and skips the flush",
+            plays == 1 and flushed == 0 and store.get("frames") == 22,
+            f"plays={plays} flushed={flushed} capture_frames={store.get('frames')}",
+        )
+    finally:
+        (
+            live_driver.listen_for_wake,
+            live_driver._play_wav,
+            pipeline.capture_request,
+        ) = real
+
+
 def main() -> int:
     test_stdin_mic()
     test_resolve_output_pcm()
+    test_cue_pause_gate()
     print("\n=== live_driver.run_turn: the hardware path honors the guard ===")
 
     # A low-confidence transcript on the hardware path must be re-prompted, not

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import itertools
 import json
 import os
 import re
@@ -578,6 +579,14 @@ _PREROLL_FRAMES = 2  # ~0.16 s of audio kept before the wake fire and
 # onset never clipped at any size here, so the real risk
 # was over-capture, not under-capture. Larger recovers
 # more leading audio but bleeds more of the wake word in.
+_CUE_PEEK_FRAMES = _SPEECH_ONSET_FRAMES + 1  # ~0.32 s window peeked after the wake
+# word to tell a no-pause command from a pause before the
+# acknowledgment cue plays (issue #55). Must be at least
+# _SPEECH_ONSET_FRAMES so a sustained voiced run can form
+# inside it; the +1 lets one quiet leading frame not defeat
+# detection. Larger tolerates more but delays the cue on the
+# paused case -- the cue plays only after this window is read,
+# at 80 ms/frame.
 
 
 _FRAME_MS = FRAME_SIZE / 16000 * 1000  # 80.0 ms of audio per capture frame
@@ -673,6 +682,55 @@ def _confirm_speech(pcm: np.ndarray, threshold: float) -> bool:
         if prob > peak:
             peak = prob
     return peak >= threshold
+
+
+def peek_cue_gate(frames):
+    """Peek the post-wake audio to decide whether the acknowledgment cue plays (#55).
+
+    The cue (#41) and no-pause capture (#30) conflict on a half-duplex device: the cue
+    cannot play while the mic captures, so a command spoken in one breath with the wake
+    word ("computah file an issue") lands in the cue window and is lost. Reading a short
+    window first tells the two cases apart -- a no-pause command already has speech here,
+    a user waiting for the cue has room tone -- so the cue can be skipped when it would
+    clip a command and played when it is safe.
+
+    Pulls up to _CUE_PEEK_FRAMES frames off `frames`, stopping the instant a sustained
+    voiced run appears (_SPEECH_ONSET_FRAMES in a row -- the same onset test
+    capture_request uses, so a lone click or cough edge does not count as speech).
+    Returns (play_cue, peeked): play_cue is False when speech is already present (skip
+    the cue, capture the command intact), True when the window is silent (safe to play
+    the cue, then capture). `peeked` is every frame pulled; because `frames` is a
+    one-shot iterator, the caller MUST feed `peeked` back to capture ahead of the rest
+    of the stream on the no-pause branch, so peeking never drops command audio. On the
+    silent branch `peeked` is pre-cue room tone the caller drops with the cue bleed.
+
+    Bounded residual edge: a command that starts in the last one or two frames of the
+    window (a very short pause) has fewer than _SPEECH_ONSET_FRAMES voiced frames here,
+    so the gate reads it as a pause, plays the cue, and drops that leading fragment with
+    the cue bleed. The clip is at most _SPEECH_ONSET_FRAMES - 1 frames (~160 ms) and cannot
+    be stitched back: on this half-duplex device the mic is flushed while the cue plays, so a
+    pre-cue fragment and the post-cue tail are separated by the flushed cue span. Dropping the
+    fragment (a clean, later start) beats prepending it across that gap (a corrupt one).
+    This is strictly better than the pre-#55 cue, which lost the whole command, and the
+    boundary is tuned by _CUE_PEEK_FRAMES / _SPEECH_ONSET_FRAMES in the PowerConf
+    hardware-validation pass #55 still calls for. Tracked as computah #106.
+    """
+    peeked: list[np.ndarray] = []
+    voiced_run = 0
+    speech = False
+    for _ in range(_CUE_PEEK_FRAMES):
+        frame = next(frames, None)
+        if frame is None:
+            break  # stream ended inside the peek; decide on what was seen
+        peeked.append(frame)
+        if _frame_rms(frame) < _SILENCE_RMS:
+            voiced_run = 0
+        else:
+            voiced_run += 1
+            if voiced_run >= _SPEECH_ONSET_FRAMES:
+                speech = True
+                break
+    return (not speech), peeked
 
 
 def capture_request(
@@ -1515,16 +1573,20 @@ def run_turn(
     always-on loop calls repeatedly; the loop wrapper and mic/speaker I/O land with
     the microphone (issues #10, #11).
 
-    `on_wake`, if given, is called the instant the wake word fires -- after detection,
-    before capture -- so a live loop can play an acknowledgment chime to signal the
-    mic is now listening (issue #41). It fires only on a real wake, never when the
-    stream ends with no detection. Being half-duplex, the loop's hook keeps the cue
-    out of the captured request (e.g. by pausing the mic and flushing the cue frames).
-    It returns True if it established a fresh post-cue capture boundary (cue played,
-    buffered audio flushed); run_turn then drops the detection pre-roll too, so the
-    pre-cue wake-word tail does not prepend a command spoken after the cue. If the cue
-    failed (returns falsy, buffered audio kept), the pre-roll is kept so a no-pause
-    command is still recovered (issue #30) rather than clipped.
+    `on_wake`, if given, plays an acknowledgment chime to signal the mic is now
+    listening (issue #41). It is gated on a pause (issue #55): after a real wake,
+    peek_cue_gate reads the post-wake audio, and on_wake is called only when that window
+    is silent (the user paused, waiting for the cue). When a command is already being
+    spoken (no pause), the cue is skipped -- it would clip the command on a half-duplex
+    device -- and the peeked command frames are fed to capture ahead of the rest of the
+    stream, so nothing is lost. on_wake never fires when the stream ends with no
+    detection. Being half-duplex, the loop's hook keeps the cue out of the captured
+    request (e.g. by pausing the mic and flushing the cue frames). It returns True if it
+    established a fresh post-cue capture boundary (cue played, buffered audio flushed);
+    run_turn then drops the detection pre-roll too, so the pre-cue wake-word tail does
+    not prepend a command spoken after the cue. If the cue failed (returns falsy,
+    buffered audio kept), the pre-roll is kept so a no-pause command is still recovered
+    (issue #30) rather than clipped.
 
     `on_capture`, if given, is called once the request has been captured (listening
     for this turn is over). A half-duplex live loop uses it to stop the mic before
@@ -1548,21 +1610,36 @@ def run_turn(
     # The wake fired. Acknowledge it now -- after detection, before capture -- so a
     # live loop can chime "listening" (issue #41). on_wake runs only on a real wake,
     # never on an ended stream, so silence never triggers the cue.
+    capture_frames = frames
     if on_wake is not None:
-        # on_wake plays the cue and returns True only if it established a fresh
-        # post-cue capture boundary (cue played, the audio buffered up to now
-        # flushed). Drop the detection pre-roll only then, matching that flush: the
-        # pre-roll exists only to recover a no-pause command's leading audio that
-        # detection latency ate (issue #30), and a user who waits for the cue speaks
-        # fresh after it, so keeping it would inject the stale pre-cue wake-word tail
-        # into the post-cue command (issue #41). If the cue failed (hook returns
-        # falsy -- no boundary, buffered audio kept), keep the pre-roll too, so the
-        # no-pause case is still recovered instead of clipped.
-        if on_wake():
+        # Gate the cue on a pause (issue #55). Peek the post-wake audio first: if a
+        # command is already being spoken (no pause), skip the cue so it cannot clip
+        # the command on this half-duplex device, and feed the peeked command frames
+        # back to capture ahead of the rest of the stream -- the pre-roll stays, so the
+        # leading audio detection ate is still recovered (issue #30). If the window is
+        # silent (the user waited for the cue), play it.
+        play_cue, peeked = peek_cue_gate(frames)
+        if play_cue and on_wake():
+            # The window was silent (a pause) AND on_wake established a fresh post-cue
+            # capture boundary (cue played, the audio buffered up to now flushed). The
+            # peeked frames are pre-cue room tone, dropped with the cue bleed the hook
+            # flushes. Drop the detection pre-roll too, matching that flush: it exists
+            # only to recover a no-pause command's leading audio that detection latency
+            # ate (issue #30), and a user who waits for the cue speaks fresh after it, so
+            # keeping it would inject the stale pre-cue wake-word tail into the post-cue
+            # command (issue #41).
             preroll.clear()
+        else:
+            # Either a no-pause command (play_cue False -- on_wake was not called, the
+            # cue is skipped so it cannot clip the command), or the cue failed to
+            # establish a boundary (on_wake returned falsy -- no flush, buffered audio
+            # kept). Both keep the pre-roll and feed the peeked frames back to capture
+            # ahead of the rest of the stream, so no leading audio is clipped
+            # (issues #30, #55).
+            capture_frames = itertools.chain(peeked, frames)
 
     request_pcm = capture_request(
-        frames,
+        capture_frames,
         preroll=list(preroll),
         vad_threshold=cfg["capture_vad_threshold"],
         endpoint_silence_ms=cfg["endpoint_silence_ms"],
