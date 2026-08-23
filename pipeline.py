@@ -684,7 +684,7 @@ def _confirm_speech(pcm: np.ndarray, threshold: float) -> bool:
     return peak >= threshold
 
 
-def peek_cue_gate(frames):
+def peek_cue_gate(frames, vad_threshold=None):
     """Peek the post-wake audio to decide whether the acknowledgment cue plays (#55).
 
     The cue (#41) and no-pause capture (#30) conflict on a half-duplex device: the cue
@@ -697,6 +697,9 @@ def peek_cue_gate(frames):
     Pulls up to _CUE_PEEK_FRAMES frames off `frames`, stopping the instant a sustained
     voiced run appears (_SPEECH_ONSET_FRAMES in a row -- the same onset test
     capture_request uses, so a lone click or cough edge does not count as speech).
+    When `vad_threshold` is given, the sustained-energy candidate must also pass the
+    same Silero VAD used by capture_request. This keeps a fan or room rumble from
+    suppressing the cue when the user has paused.
     Returns (play_cue, peeked): play_cue is False when speech is already present (skip
     the cue, capture the command intact), True when the window is silent (safe to play
     the cue, then capture). `peeked` is every frame pulled; because `frames` is a
@@ -730,6 +733,8 @@ def peek_cue_gate(frames):
             if voiced_run >= _SPEECH_ONSET_FRAMES:
                 speech = True
                 break
+    if speech and vad_threshold is not None:
+        speech = _confirm_speech(np.concatenate(peeked), vad_threshold)
     return (not speech), peeked
 
 
@@ -1618,7 +1623,9 @@ def run_turn(
         # back to capture ahead of the rest of the stream -- the pre-roll stays, so the
         # leading audio detection ate is still recovered (issue #30). If the window is
         # silent (the user waited for the cue), play it.
-        play_cue, peeked = peek_cue_gate(frames)
+        play_cue, peeked = peek_cue_gate(
+            frames, vad_threshold=cfg["capture_vad_threshold"]
+        )
         if play_cue and on_wake():
             # The window was silent (a pause) AND on_wake established a fresh post-cue
             # capture boundary (cue played, the audio buffered up to now flushed). The

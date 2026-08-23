@@ -56,11 +56,11 @@ Four stages, each independently swappable (`pipeline.py`):
    before capture, fired through `run_turn`'s `on_wake` hook; the loop handles it
    half-duplex so the cue is not captured into the request, and the detection
    pre-roll is dropped with it so the pre-cue wake-word tail does not prepend the
-   post-cue command. The chime is opt-in,
-   default off: on a half-duplex device the cue and capture cannot overlap, so when
-   it is on a command spoken in one breath with the wake word loses its leading
-   audio (it lands in the cue window) -- the no-pause pre-roll case. Off keeps that
-   primary flow intact; gating the cue on a pause so both coexist is the deferred fix.
+   post-cue command. The chime is opt-in and default off pending PowerConf validation.
+   On a half-duplex device the cue and capture cannot overlap, so `peek_cue_gate`
+   checks the post-wake window with energy plus Silero VAD. It skips the cue for a
+   no-pause command and plays it after a pause. The remaining short-pause boundary is
+   tracked in issue #106.
 2. `transcribe` — faster-whisper (CTranslate2, int8). `transcribe_detailed` also
    returns the decoder's confidence (`avg_logprob`, `no_speech_prob`) and accepts
    either a WAV path or a normalized 16 kHz mono waveform. Both live paths pass captured
@@ -182,7 +182,7 @@ bug.
 - `pipeline.py` — stages, chain, CLI, and the live-streaming turn (`stream_detect_wake`, `capture_request`, `run_turn`). The transcription boundary accepts file paths or in-memory 16 kHz mono audio; `run_turn` uses captured PCM directly, exposes `on_wake` (fires at the wake->capture boundary, for the chime) and `on_capture` (fires after capture, for half-duplex mic pause), and `run_loop` is the desktop live loop and wires both.
 - `live_driver.py` — always-on live loop: real mic (arecord on stdin) -> wake -> chime -> in-memory PCM transcription -> brain -> spoken reply, re-arming after each turn. Gates the transcript through `pipeline.guard_transcript` before dispatch, the same mishear guard as `run_turn`.
 - `capture_quality.py` — whether a capture device can carry continuous speech (issue #34): flags a Bluetooth hands-free (HFP) endpoint by name, a low WASAPI shared-mode capture format, and the 4 kHz cliff left by upsampled narrowband audio. Hardware-free (no sounddevice) so it is testable anywhere; `audio.py` stores the advertised-property verdict on `Microphone.capture_risk`, which `run_loop` prints at startup and `--list`/`--test-mic` surface. A spectral result without that cliff stays inconclusive because it cannot rule out wideband HFP codec damage or frame drops.
-- `chime.py` — the wake-acknowledgment cue (issue #41): a pure-DSP generator for the two-tone rising chime played the instant the wake fires, before capture. Backend-free (no sounddevice/aplay) so both live loops can render the cue and play it through their own output. Gated by the `wake_chime` config key (opt-in, default off — it regresses the no-pause case on a half-duplex device); half-duplex handling keeps the cue out of the captured request when it is on.
+- `chime.py` — the wake-acknowledgment cue (issue #41): a pure-DSP generator for the two-tone rising chime played after a post-wake pause is confirmed. Backend-free (no sounddevice/aplay) so both live loops can render the cue and play it through their own output. The `wake_chime` config key remains opt-in and default off pending PowerConf validation. `peek_cue_gate` skips the cue for a VAD-confirmed no-pause command, and half-duplex handling keeps a played cue out of the captured request.
 - `conversation.py` — the confirm-before-act readback handshake (issue #42): the framing that asks the brain to restate a request without acting on it, the classifier that reads the spoken answer as confirm / revise / cancel, and the floor that stops the revision loop. Stdlib-only and hardware-free, like `brain_bridge.py`, so it is testable anywhere. Confirmation and refusal are both all-or-nothing: a reply confirms only when every word in it is an acknowledgment, and refuses only when every word is a refusal, so "yes but make it three" and "don't send it to Bob, send it to Alice" both come back as revisions. A reply left unfinished by the silence endpoint ("yes and") is a revision too. Not wired into a loop yet; the second listening window, the config keys, and reply correlation (#19, #59) land with the wiring.
 - `brain_bridge.py` — bridge plus transports.
 - `sim_persona.py` — test stand-in for the assistant.

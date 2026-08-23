@@ -298,10 +298,12 @@ def test_cue_pause_gate() -> None:
         live_driver.listen_for_wake,
         live_driver._play_wav,
         pipeline.capture_request,
+        pipeline._confirm_speech,
     )
     live_driver.listen_for_wake = lambda fr, m, t, d, preroll=None: (
         0.9
     )  # fire, consume nothing
+    pipeline._confirm_speech = lambda _pcm, _threshold: True
 
     def run(frames: list, store: dict, play_error=None) -> tuple[int, int]:
         played = {"n": 0}
@@ -367,6 +369,7 @@ def test_cue_pause_gate() -> None:
             live_driver.listen_for_wake,
             live_driver._play_wav,
             pipeline.capture_request,
+            pipeline._confirm_speech,
         ) = real
 
 

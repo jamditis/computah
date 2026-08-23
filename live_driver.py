@@ -243,7 +243,9 @@ def run_turn(
     capture_frames = frames
     if cfg.get("wake_chime", False):  # opt-in, default off (issue #41) until the
         # pause-gate (issue #55) is validated on the PowerConf hardware
-        play_cue, peeked = pipeline.peek_cue_gate(frames)
+        play_cue, peeked = pipeline.peek_cue_gate(
+            frames, vad_threshold=cfg["capture_vad_threshold"]
+        )
         cue_boundary = False
         if play_cue:
             try:
@@ -262,6 +264,12 @@ def run_turn(
                 # the brain (issue #41).
                 preroll.clear()
                 cue_boundary = True
+                log(
+                    f"wake cue gate: play ({len(peeked)} peeked frames; "
+                    "capture boundary established)"
+                )
+        else:
+            log(f"wake cue gate: skip ({len(peeked)} peeked frames; speech detected)")
         if not cue_boundary:
             # Either a no-pause command (cue skipped so it cannot clip the command) or a
             # cue that failed to establish a boundary (nothing flushed, buffered audio

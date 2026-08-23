@@ -140,6 +140,36 @@ def main() -> int:
         f"play={play} peeked={len(peeked)}",
     )
 
+    # Sustained room noise can clear the cheap energy gate. The live cue path must use
+    # the same speech-sensitive VAD that later protects capture_request, or a fan makes
+    # a real pause look like a no-pause command and suppresses the cue.
+    real_confirm = pipeline._confirm_speech
+    pipeline._confirm_speech = lambda _pcm, _threshold: False
+    try:
+        play, peeked = pipeline.peek_cue_gate(
+            iter(loud(pipeline._CUE_PEEK_FRAMES + 2)), vad_threshold=0.5
+        )
+    finally:
+        pipeline._confirm_speech = real_confirm
+    check(
+        "sustained non-speech noise still plays the cue",
+        play is True and len(peeked) == pipeline._SPEECH_ONSET_FRAMES,
+        f"play={play} peeked={len(peeked)}",
+    )
+
+    pipeline._confirm_speech = lambda _pcm, _threshold: True
+    try:
+        play, peeked = pipeline.peek_cue_gate(
+            iter(loud(pipeline._CUE_PEEK_FRAMES + 2)), vad_threshold=0.5
+        )
+    finally:
+        pipeline._confirm_speech = real_confirm
+    check(
+        "VAD-confirmed speech still skips the cue",
+        play is False and len(peeked) == pipeline._SPEECH_ONSET_FRAMES,
+        f"play={play} peeked={len(peeked)}",
+    )
+
     # The stream ending inside the window decides on what was seen, and never raises.
     play, peeked = pipeline.peek_cue_gate(iter(silent(1)))
     check(
@@ -422,7 +452,11 @@ def main() -> int:
 
     # ----- run_turn wires the cue gate to both branches (#55) --------------- #
     print("\n=== run_turn: the cue gate skips the cue on a no-pause command ===")
-    real_sdw, real_cap4 = pipeline.stream_detect_wake, pipeline.capture_request
+    real_sdw, real_cap4, real_confirm4 = (
+        pipeline.stream_detect_wake,
+        pipeline.capture_request,
+        pipeline._confirm_speech,
+    )
 
     def _fire_without_consuming(fr, model, threshold, preroll=None):
         return 0.9  # fire but consume nothing, so the peek sees the frames below
@@ -440,6 +474,7 @@ def main() -> int:
     store_np, cue_np = {}, {"n": 0}
     pipeline.stream_detect_wake = _fire_without_consuming
     pipeline.capture_request = _count_capture(store_np)
+    pipeline._confirm_speech = lambda _pcm, _threshold: True
     try:
         r_np = pipeline.run_turn(
             iter(loud(6) + silent(15)),
@@ -448,7 +483,15 @@ def main() -> int:
             on_wake=lambda: cue_np.__setitem__("n", cue_np["n"] + 1) or True,
         )
     finally:
-        pipeline.stream_detect_wake, pipeline.capture_request = real_sdw, real_cap4
+        (
+            pipeline.stream_detect_wake,
+            pipeline.capture_request,
+            pipeline._confirm_speech,
+        ) = (
+            real_sdw,
+            real_cap4,
+            real_confirm4,
+        )
     check(
         "no-pause command: cue skipped, the peeked frames reach capture",
         r_np is None and cue_np["n"] == 0 and store_np.get("frames") == 21,
