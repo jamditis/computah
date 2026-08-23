@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import itertools
 import os
 import subprocess
 import sys
@@ -215,46 +216,69 @@ def run_turn(
         return False
     log(f"wake fired (score={score:.3f})")
 
-    # Acknowledge the wake with a cue before capture (issue #41). arecord cannot be
-    # paused, so on a shared mic/speaker device (the PowerConf) the cue bleeds straight
-    # back into the mic; drop the frames buffered while it played so the cue is not
-    # captured as part of the request. Flush-to-now does this (issue #56): mic.flush()
-    # drops, in one non-blocking shot, exactly what is buffered the instant capture
-    # starts -- cue bleed and ambient -- then capture reads only fresh audio.
+    # Acknowledge the wake with a cue before capture (issue #41), but only when the
+    # user paused after the wake word (issue #55). arecord cannot be paused, so on a
+    # shared mic/speaker device (the PowerConf) the cue bleeds straight back into the
+    # mic, and a command spoken in one breath with the wake word would be lost to the
+    # cue window. peek_cue_gate reads the post-wake audio first: a no-pause command has
+    # speech there, a user waiting for the cue has room tone.
     #
-    # This replaces sizing the drop by _play_wav's wall-clock span, which conflated the
-    # cue's audio with subprocess overhead (a failed unprivileged aplay then a sudo
+    # No-pause command: skip the cue so it cannot clip the command, and prepend the
+    # peeked command frames to capture -- the pre-roll stays, recovering the leading
+    # audio detection ate (issue #30). Paused: play the cue, then drop the frames
+    # buffered while it played so it is not captured as part of the request. Flush-to-now
+    # does this (issue #56): mic.flush() drops, in one non-blocking shot, exactly what is
+    # buffered the instant capture starts -- cue bleed, the peeked pre-cue room tone, and
+    # ambient -- then capture reads only fresh audio.
+    #
+    # flush() replaces sizing the drop by _play_wav's wall-clock span, which conflated
+    # the cue's audio with subprocess overhead (a failed unprivileged aplay then a sudo
     # retry, plus device-open and teardown latency). That frame-count guess could
     # under-drain, leaking a cue tail into the transcript, or -- because drain() blocked
     # per frame -- over-drain past the buffer and consume the start of a command spoken
     # after the cue. flush() carries no time estimate and never blocks on or consumes
-    # fresh frames, so a command spoken once _play_wav returns is captured intact.
-    #
-    # It does NOT rescue speech uttered in the narrow window between the cue audio
-    # ending and _play_wav returning (teardown latency): that audio is already buffered
-    # when flush() runs and is dropped with the bleed. That is inherent to a blocking
-    # cue on a half-duplex mic -- capture cannot begin until playback returns -- and
-    # capturing through the cue is the deferred half-duplex fix (the #41 no-pause
-    # regression that keeps the chime opt-in). On a cue failure nothing played and
-    # nothing bled in, so the flush is skipped (the else) and the request is untouched.
-    if cfg.get("wake_chime", False):  # opt-in, default off (issue #41): the cue
-        # regresses the no-pause case on this half-duplex device, so off unless enabled
-        try:
-            _play_wav(chime.wake_cue_wav(), output_device)
-        except Exception as e:  # noqa: BLE001 - the chime is a nicety, not core
-            log(f"wake chime failed ({type(e).__name__}: {e})")
+    # fresh frames, so a command spoken once _play_wav returns is captured intact. On a
+    # cue failure nothing played and nothing bled in, so the flush is skipped (the else)
+    # and the request is untouched.
+    capture_frames = frames
+    if cfg.get("wake_chime", False):  # opt-in, default off (issue #41) until the
+        # pause-gate (issue #55) is validated on the PowerConf hardware
+        play_cue, peeked = pipeline.peek_cue_gate(
+            frames, vad_threshold=cfg["capture_vad_threshold"]
+        )
+        cue_boundary = False
+        if play_cue:
+            try:
+                _play_wav(chime.wake_cue_wav(), output_device)
+            except Exception as e:  # noqa: BLE001 - the chime is a nicety, not core
+                log(f"wake chime failed ({type(e).__name__}: {e})")
+            else:
+                mic.flush()
+                # The flush established a clean post-cue capture boundary (it dropped the
+                # frames buffered while the cue played). The peeked pre-cue room tone was
+                # already pulled off the stream and is dropped here by not being chained
+                # back into capture. Drop the detection pre-roll too: it holds the pre-cue
+                # wake-word tail, kept only to recover a no-pause command's leading audio
+                # (issue #30) -- which does not apply once the user waits for the cue.
+                # Without this the stale tail would prepend the post-cue command and reach
+                # the brain (issue #41).
+                preroll.clear()
+                cue_boundary = True
+                log(
+                    f"wake cue gate: play ({len(peeked)} peeked frames; "
+                    "capture boundary established)"
+                )
         else:
-            mic.flush()
-            # The flush established a clean post-cue capture boundary (it dropped the
-            # frames buffered while the cue played). Drop the detection pre-roll with it:
-            # it holds the pre-cue wake-word tail, kept only to recover a no-pause
-            # command's leading audio (issue #30) -- which does not apply once the user
-            # waits for the cue. Without this the stale tail would prepend the post-cue
-            # command and reach the brain (issue #41).
-            preroll.clear()
+            log(f"wake cue gate: skip ({len(peeked)} peeked frames; speech detected)")
+        if not cue_boundary:
+            # Either a no-pause command (cue skipped so it cannot clip the command) or a
+            # cue that failed to establish a boundary (nothing flushed, buffered audio
+            # kept). Both keep the pre-roll and feed the peeked frames to capture ahead of
+            # the rest of the stream, so no leading audio is clipped (issues #30, #55).
+            capture_frames = itertools.chain(peeked, frames)
 
     request_pcm = pipeline.capture_request(
-        frames,
+        capture_frames,
         preroll=list(preroll),
         vad_threshold=cfg["capture_vad_threshold"],
         endpoint_silence_ms=cfg["endpoint_silence_ms"],
