@@ -579,6 +579,10 @@ _PREROLL_FRAMES = 2  # ~0.16 s of audio kept before the wake fire and
 # onset never clipped at any size here, so the real risk
 # was over-capture, not under-capture. Larger recovers
 # more leading audio but bleeds more of the wake word in.
+_WAKE_HISTORY_FRAMES = 40  # ~3.2 s retained only for empty-capture recovery (#53).
+# This is deliberately separate from the two-frame pre-roll above: normal requests
+# must not receive the wake phrase, while a command fully consumed during detection
+# needs enough context for transcription to distinguish "wake" from "wake + command."
 _CUE_PEEK_FRAMES = _SPEECH_ONSET_FRAMES + 1  # ~0.32 s window peeked after the wake
 # word to tell a no-pause command from a pause before the
 # acknowledgment cue plays (issue #55). Must be at least
@@ -590,6 +594,47 @@ _CUE_PEEK_FRAMES = _SPEECH_ONSET_FRAMES + 1  # ~0.32 s window peeked after the w
 
 
 _FRAME_MS = FRAME_SIZE / 16000 * 1000  # 80.0 ms of audio per capture frame
+
+
+class WakeAudioBuffer:
+    """Keep normal pre-roll and longer recovery history from one detection stream.
+
+    Detectors only need an append-capable object, so this preserves their existing
+    caller-owned-buffer contract while maintaining two independently bounded views.
+    `preroll` remains the short, wake-tail-safe seed for normal capture. `history` is
+    transcribed only after capture found no post-fire speech, when it can prove that a
+    fully consumed command followed the wake phrase (#53).
+    """
+
+    def __init__(self) -> None:
+        self.preroll = collections.deque(maxlen=_PREROLL_FRAMES)
+        self.history = collections.deque(maxlen=_WAKE_HISTORY_FRAMES)
+
+    def append(self, frame: np.ndarray) -> None:
+        self.preroll.append(frame)
+        self.history.append(frame)
+
+    def extend(self, frames) -> None:
+        for frame in frames:
+            self.append(frame)
+
+    def clear(self) -> None:
+        self.preroll.clear()
+        self.history.clear()
+
+
+class _EmptyCapture(np.ndarray):
+    """A zero-length PCM array that records why capture rejected the turn."""
+
+
+_EMPTY_NO_ONSET = "no_speech_onset"
+_EMPTY_VAD_REJECTED = "vad_rejected"
+
+
+def _empty_capture(reason: str) -> np.ndarray:
+    pcm = np.zeros(0, dtype=np.int16).view(_EmptyCapture)
+    pcm.empty_reason = reason
+    return pcm
 
 
 def _ms_to_frames(ms: float) -> int:
@@ -812,21 +857,18 @@ def capture_request(
             break
     if not speech_seen:
         # No sustained speech after the wake fired (silence, or only a transient like a
-        # click or cough). The pre-roll is dropped here on purpose: by post-fire audio
-        # alone an abandoned wake is indistinguishable from a short command consumed
-        # entirely during detection, and the wake word always sits in the pre-roll.
-        # Prepending it whenever the pre-roll holds speech would dispatch a bare wake
-        # word as a phantom command, against the mishear-guard rule. Dropping is the safe
-        # side; a genuine command with fewer than _SPEECH_ONSET_FRAMES of post-fire speech
-        # (the wake consumed the rest) is dropped here too -- the cost of not being able to
-        # tell it from a transient -- and is tracked as its own problem (#53).
-        return np.zeros(0, dtype=np.int16)
+        # click or cough). Never prepend the short pre-roll here: it always holds the wake
+        # phrase, so doing that based on energy would turn a bare wake into a phantom
+        # request. A caller can transcribe a separate, longer detection history;
+        # recover_consumed_command then requires a wake-prefixed transcript with a
+        # nonempty suffix before dispatch (#53).
+        return _empty_capture(_EMPTY_NO_ONSET)
     command = np.concatenate(captured)
     if vad_threshold is not None and not _confirm_speech(command, vad_threshold):
         # Energy was sustained but the VAD says it is not speech (a long cough, a fan,
         # room rumble). Treat it as an abandoned wake: drop the pre-roll so the wake word
         # it holds is never prepended and transcribed as a phantom command (#54).
-        return np.zeros(0, dtype=np.int16)
+        return _empty_capture(_EMPTY_VAD_REJECTED)
     if preroll:
         return np.concatenate([*preroll, command])
     return command
@@ -923,6 +965,46 @@ def transcribe_detailed(
         _whisper_audio_input(audio), beam_size=1, language="en"
     )
     return _aggregate_segments(segments)
+
+
+_WAKE_TRANSCRIPT_ALIASES = {
+    # Whisper commonly writes the custom phonetic wake "computah" as this standard
+    # spelling. Keep aliases explicit rather than fuzzy-matching arbitrary words: this
+    # path is a last-chance action dispatch after an otherwise abandoned wake.
+    "computah": (("computah",), ("computer",)),
+}
+
+
+def recover_consumed_command(detection_frames, wake_word: str) -> Transcript | None:
+    """Recover a command consumed before post-fire speech onset could be confirmed.
+
+    Transcribe the bounded detection history after normal post-fire capture found no
+    speech. Dispatch remains fail-closed: the transcript must start with the configured
+    wake phrase (or an explicit spelling alias) and contain at least one later word. A
+    bare wake and a false detector fire therefore both return None. The returned command
+    retains the original decoder confidence so callers apply the normal guard before it
+    can reach the brain.
+    """
+    detection = list(detection_frames)
+    if not detection:
+        return None
+    audio = np.concatenate(detection)
+    heard = transcribe_detailed(audio)
+    words = list(re.finditer(r"[a-z0-9]+(?:'[a-z0-9]+)?", heard.text, re.IGNORECASE))
+    tokens = tuple(match.group(0).casefold() for match in words)
+    # `wake_word` is the configured friendly model name, not a versioned model file.
+    # Using _strip_version here would truncate legitimate names at any `_v` (for
+    # example `hey_vera` -> `hey`) and weaken the false-wake prefix check.
+    canonical = wake_word.replace("_", " ").replace("-", " ")
+    phrases = _WAKE_TRANSCRIPT_ALIASES.get(
+        canonical.casefold(),
+        (tuple(re.findall(r"[a-z0-9]+", canonical.casefold())),),
+    )
+    for phrase in phrases:
+        if phrase and tokens[: len(phrase)] == phrase and len(tokens) > len(phrase):
+            command = heard.text[words[len(phrase)].start() :].strip()
+            return Transcript(command, heard.avg_logprob, heard.no_speech_prob)
+    return None
 
 
 def transcribe(audio: str | os.PathLike[str] | np.ndarray) -> str:
@@ -1607,8 +1689,8 @@ def run_turn(
     frames = iter(frames)
     # Keep the most recent frames during detection so the request's leading audio,
     # consumed while the detector was crossing threshold, is recovered (issue #30).
-    preroll = collections.deque(maxlen=_PREROLL_FRAMES)
-    score = stream_detect_wake(frames, model, threshold, preroll=preroll)
+    wake_audio = WakeAudioBuffer()
+    score = stream_detect_wake(frames, model, threshold, preroll=wake_audio)
     if score is None:
         return None
 
@@ -1635,7 +1717,7 @@ def run_turn(
             # ate (issue #30), and a user who waits for the cue speaks fresh after it, so
             # keeping it would inject the stale pre-cue wake-word tail into the post-cue
             # command (issue #41).
-            preroll.clear()
+            wake_audio.clear()
         else:
             # Either a no-pause command (play_cue False -- on_wake was not called, the
             # cue is skipped so it cannot clip the command), or the cue failed to
@@ -1647,7 +1729,7 @@ def run_turn(
 
     request_pcm = capture_request(
         capture_frames,
-        preroll=list(preroll),
+        preroll=list(wake_audio.preroll),
         vad_threshold=cfg["capture_vad_threshold"],
         endpoint_silence_ms=cfg["endpoint_silence_ms"],
         max_request_ms=cfg["max_request_ms"],
@@ -1658,11 +1740,15 @@ def run_turn(
     if on_capture is not None:
         on_capture()
     if request_pcm.size == 0:
-        return None  # wake fired but only silence followed — ignore the turn
-
-    # faster-whisper accepts a normalized waveform, so transcribe the captured PCM
-    # in memory instead of serializing each live request through a temporary WAV.
-    heard = transcribe_detailed(request_pcm)
+        if getattr(request_pcm, "empty_reason", None) != _EMPTY_NO_ONSET:
+            return None  # VAD rejection or an unknown empty result stays fail-closed
+        heard = recover_consumed_command(wake_audio.history, model_name)
+        if heard is None:
+            return None  # bare/false wake, or no recoverable command — ignore the turn
+    else:
+        # faster-whisper accepts a normalized waveform, so transcribe captured PCM in
+        # memory instead of serializing each live request through a temporary WAV.
+        heard = transcribe_detailed(request_pcm)
 
     if not heard.text.strip():
         return None  # captured audio whisper read as no words (noise) — ignore
