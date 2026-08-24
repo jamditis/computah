@@ -49,10 +49,12 @@ Four stages, each independently swappable (`pipeline.py`):
    file, and `run_turn` runs one full turn from that stream. `stream_detect_wake`
    keeps a `_PREROLL_FRAMES`-deep ring buffer of the most recent frames and
    `capture_request` prepends it, so a command spoken with no pause after the wake
-   word is not clipped by detection latency (the pre-roll is dropped on an
-   abandoned wake, so it never becomes a phantom request). The pre-roll size is
-   tuned to the deployed mic's real wake-detection latency. On a live mic the wake
-   fire can also play an acknowledgment chime (`chime.py`, `wake_chime` config key)
+   word is not clipped by detection latency. A separate bounded detection history
+   recovers commands consumed entirely before capture only when transcription starts
+   with the configured wake phrase and has a nonempty suffix; bare and false wakes
+   still dispatch nothing. The short pre-roll size is tuned to the deployed mic's
+   real wake-detection latency. On a live mic the wake fire can also play an
+   acknowledgment chime (`chime.py`, `wake_chime` config key)
    before capture, fired through `run_turn`'s `on_wake` hook; the loop handles it
    half-duplex so the cue is not captured into the request, and the detection
    pre-roll is dropped with it so the pre-cue wake-word tail does not prepend the

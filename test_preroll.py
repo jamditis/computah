@@ -90,8 +90,30 @@ class _FiringModel:
 
 
 def main() -> int:
+    # ----- detection audio keeps separate bounded views ------------------- #
+    print("=== detection audio keeps short pre-roll and bounded recovery history ===")
+    wake_audio = pipeline.WakeAudioBuffer()
+    wake_audio.extend(frame(i) for i in range(pipeline._WAKE_HISTORY_FRAMES + 5))
+    check(
+        "normal pre-roll stays at its tuned two-frame size",
+        len(wake_audio.preroll) == pipeline._PREROLL_FRAMES,
+        f"len={len(wake_audio.preroll)} want {pipeline._PREROLL_FRAMES}",
+    )
+    check(
+        "recovery history is independently bounded and ends at the same frame",
+        len(wake_audio.history) == pipeline._WAKE_HISTORY_FRAMES
+        and int(wake_audio.history[-1][0]) == int(wake_audio.preroll[-1][0]),
+        f"history={len(wake_audio.history)} last={int(wake_audio.history[-1][0])}",
+    )
+    wake_audio.clear()
+    check(
+        "a capture boundary clears both stale detection views",
+        not wake_audio.preroll and not wake_audio.history,
+        f"preroll={len(wake_audio.preroll)} history={len(wake_audio.history)}",
+    )
+
     # ----- stream_detect_wake keeps a pre-roll ring buffer ----------------- #
-    print("=== stream_detect_wake fills a caller-owned pre-roll buffer ===")
+    print("\n=== stream_detect_wake fills a caller-owned pre-roll buffer ===")
     n = pipeline._PREROLL_FRAMES
     fire_on = n + 5  # fire well after the ring buffer has filled
     model = _FiringModel(fire_on=fire_on)
@@ -234,8 +256,9 @@ def main() -> int:
         )
         check(
             "sustained noise the VAD rejects stays empty (no phantom command)",
-            cap_noise.size == 0,
-            f"got {cap_noise.size} samples, want 0",
+            cap_noise.size == 0
+            and cap_noise.empty_reason == pipeline._EMPTY_VAD_REJECTED,
+            f"got {cap_noise.size} samples, reason={cap_noise.empty_reason!r}",
         )
 
         # The crux: the gate must run on the command audio ONLY, never the pre-roll. The
@@ -325,6 +348,133 @@ def main() -> int:
         r is not None and got not in ("unset", None) and len(got) == 2,
         f"capture_request saw preroll={('unset' if got == 'unset' else (None if got is None else len(got)))}",
     )
+
+    # ----- fully consumed short commands recover without phantom dispatch -- #
+    print("\n=== empty post-fire capture recovers only wake-prefixed commands ===")
+    real = (
+        pipeline.stream_detect_wake,
+        pipeline.capture_request,
+        pipeline.transcribe_detailed,
+        pipeline.guard_transcript,
+        pipeline.brain,
+        pipeline.speak,
+        pipeline._get_oww_model,
+        pipeline._resolve_wake_path,
+    )
+    state = {"heard": None, "brain_arg": None}
+
+    def consumed_detect(frames, model, threshold, preroll=None):
+        if preroll is not None:
+            preroll.extend([frame(i) for i in range(30)])
+        return 0.9
+
+    capture_reason = {"value": pipeline._EMPTY_NO_ONSET}
+
+    def empty_capture(frames, **_):
+        return pipeline._empty_capture(capture_reason["value"])
+
+    pipeline._resolve_wake_path = lambda name: "x"
+    pipeline._get_oww_model = lambda path: object()
+    pipeline.stream_detect_wake = consumed_detect
+    pipeline.capture_request = empty_capture
+    pipeline.guard_transcript = lambda heard, cfg: (True, "")
+    pipeline.brain = lambda text, **_: state.update(brain_arg=text) or "done"
+    pipeline.speak = lambda text, out: out
+    try:
+        pipeline.transcribe_detailed = lambda pcm: pipeline.Transcript(
+            "Computer, stop.", -0.2, 0.01
+        )
+        recovered = pipeline.run_turn(
+            iter([]),
+            model_name="computah",
+            threshold=0.5,
+            out_wav_path=str(TEST_DIR / "short_command_reply.wav"),
+        )
+        check(
+            "a fully consumed no-pause command is stripped and dispatched",
+            recovered is not None
+            and recovered["transcript"] == "stop."
+            and state["brain_arg"] == "stop.",
+            f"result={recovered!r} brain_arg={state['brain_arg']!r}",
+        )
+
+        for transcript in ("Computer.", "please stop"):
+            state["brain_arg"] = None
+            pipeline.transcribe_detailed = lambda pcm, text=transcript: (
+                pipeline.Transcript(text, -0.2, 0.01)
+            )
+            rejected = pipeline.run_turn(
+                iter([]),
+                model_name="computah",
+                threshold=0.5,
+                out_wav_path=str(TEST_DIR / "short_command_reply.wav"),
+            )
+            check(
+                f"{transcript!r} dispatches nothing after an empty capture",
+                rejected is None and state["brain_arg"] is None,
+                f"result={rejected!r} brain_arg={state['brain_arg']!r}",
+            )
+
+        # Friendly wake names can legitimately contain `_v`; that is not a model-file
+        # version delimiter here. Truncating `hey_vera` to `hey` would let the false
+        # transcript below pass the prefix check and dispatch a destructive command.
+        state["brain_arg"] = None
+        pipeline.transcribe_detailed = lambda pcm: pipeline.Transcript(
+            "Hey delete everything", -0.2, 0.01
+        )
+        rejected = pipeline.run_turn(
+            iter([]),
+            model_name="hey_vera",
+            threshold=0.5,
+            out_wav_path=str(TEST_DIR / "short_command_reply.wav"),
+        )
+        check(
+            "a custom `_v` wake name is not truncated into a weaker false-wake prefix",
+            rejected is None and state["brain_arg"] is None,
+            f"result={rejected!r} brain_arg={state['brain_arg']!r}",
+        )
+        pipeline.transcribe_detailed = lambda pcm: pipeline.Transcript(
+            "Hey Vera, stop.", -0.2, 0.01
+        )
+        recovered = pipeline.run_turn(
+            iter([]),
+            model_name="hey_vera",
+            threshold=0.5,
+            out_wav_path=str(TEST_DIR / "short_command_reply.wav"),
+        )
+        check(
+            "the complete custom `_v` wake phrase still recovers its command",
+            recovered is not None and state["brain_arg"] == "stop.",
+            f"result={recovered!r} brain_arg={state['brain_arg']!r}",
+        )
+
+        capture_reason["value"] = pipeline._EMPTY_VAD_REJECTED
+        state["brain_arg"] = None
+        pipeline.transcribe_detailed = lambda pcm: pipeline.Transcript(
+            "Computer, delete everything.", -0.2, 0.01
+        )
+        rejected = pipeline.run_turn(
+            iter([]),
+            model_name="computah",
+            threshold=0.5,
+            out_wav_path=str(TEST_DIR / "short_command_reply.wav"),
+        )
+        check(
+            "VAD-rejected post-wake noise never enters short-command recovery",
+            rejected is None and state["brain_arg"] is None,
+            f"result={rejected!r} brain_arg={state['brain_arg']!r}",
+        )
+    finally:
+        (
+            pipeline.stream_detect_wake,
+            pipeline.capture_request,
+            pipeline.transcribe_detailed,
+            pipeline.guard_transcript,
+            pipeline.brain,
+            pipeline.speak,
+            pipeline._get_oww_model,
+            pipeline._resolve_wake_path,
+        ) = real
 
     n_pass = sum(1 for x in results if x[0] == PASS)
     n_total = len(results)

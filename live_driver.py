@@ -23,7 +23,6 @@ device against the real persistent brain.
 from __future__ import annotations
 
 import argparse
-import collections
 import itertools
 import os
 import subprocess
@@ -210,8 +209,8 @@ def run_turn(
     """
     # Keep the most recent frames during detection so the request's leading audio,
     # consumed while the detector crossed threshold, is recovered (issue #30).
-    preroll = collections.deque(maxlen=pipeline._PREROLL_FRAMES)
-    score = listen_for_wake(frames, model, threshold, debug, preroll=preroll)
+    wake_audio = pipeline.WakeAudioBuffer()
+    score = listen_for_wake(frames, model, threshold, debug, preroll=wake_audio)
     if score is None:
         return False
     log(f"wake fired (score={score:.3f})")
@@ -262,7 +261,7 @@ def run_turn(
                 # (issue #30) -- which does not apply once the user waits for the cue.
                 # Without this the stale tail would prepend the post-cue command and reach
                 # the brain (issue #41).
-                preroll.clear()
+                wake_audio.clear()
                 cue_boundary = True
                 log(
                     f"wake cue gate: play ({len(peeked)} peeked frames; "
@@ -279,19 +278,25 @@ def run_turn(
 
     request_pcm = pipeline.capture_request(
         capture_frames,
-        preroll=list(preroll),
+        preroll=list(wake_audio.preroll),
         vad_threshold=cfg["capture_vad_threshold"],
         endpoint_silence_ms=cfg["endpoint_silence_ms"],
         max_request_ms=cfg["max_request_ms"],
     )
     if request_pcm.size == 0:
-        log("wake fired but no speech followed — ignoring")
-        return True
-    log(f"captured {request_pcm.size / 16000:.2f}s of speech")
-
-    # The captured int16 PCM is normalized by pipeline.transcribe_detailed and sent
-    # straight to faster-whisper; no request-side temporary WAV is needed.
-    heard = pipeline.transcribe_detailed(request_pcm)
+        if getattr(request_pcm, "empty_reason", None) != pipeline._EMPTY_NO_ONSET:
+            log("post-wake audio was rejected — ignoring")
+            return True
+        heard = pipeline.recover_consumed_command(wake_audio.history, cfg["wake_word"])
+        if heard is None:
+            log("wake fired but no recoverable command followed — ignoring")
+            return True
+        log(f"recovered consumed command: {heard.text!r}")
+    else:
+        log(f"captured {request_pcm.size / 16000:.2f}s of speech")
+        # The captured int16 PCM is normalized by transcribe_detailed and sent straight
+        # to faster-whisper; no request-side temporary WAV is needed.
+        heard = pipeline.transcribe_detailed(request_pcm)
     if not heard.text.strip():
         log("empty transcript (noise) — ignoring")
         return True

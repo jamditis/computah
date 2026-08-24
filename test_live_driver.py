@@ -44,6 +44,7 @@ class _FakeMic:
 
 
 GUARD_ON = {
+    "wake_word": "computah",
     "stt_confidence_guard": True,
     "stt_min_avg_logprob": -1.0,
     "stt_max_no_speech_prob": 0.6,
@@ -59,6 +60,7 @@ def drive(
     transcript: Transcript,
     output_device=None,
     play_error: Exception | None = None,
+    empty_capture: bool = False,
 ) -> dict:
     """Run one live_driver turn with wake/capture/transcribe/brain/playback stubbed.
 
@@ -85,10 +87,23 @@ def drive(
         pipeline.speak,
         live_driver._play_wav,
     )
-    live_driver.listen_for_wake = lambda fr, m, t, d, preroll=None: 0.9
-    pipeline.capture_request = lambda fr, preroll=None, vad_threshold=None, **_: (
-        np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
-    )
+
+    def fake_wake(fr, model, threshold, debug, preroll=None):
+        if preroll is not None:
+            preroll.extend(np.full(FRAME_SIZE, i, dtype=np.int16) for i in range(30))
+        return 0.9
+
+    def fake_capture(fr, **_):
+        if empty_capture:
+            return pipeline._empty_capture(
+                pipeline._EMPTY_VAD_REJECTED
+                if empty_capture == "vad_rejected"
+                else pipeline._EMPTY_NO_ONSET
+            )
+        return np.full(8 * FRAME_SIZE, 4000, dtype=np.int16)
+
+    live_driver.listen_for_wake = fake_wake
+    pipeline.capture_request = fake_capture
 
     def fake_transcribe(audio):
         state["transcribe_arg"] = audio
@@ -409,6 +424,51 @@ def main() -> int:
         f"type={type(s['transcribe_arg']).__name__} "
         f"dtype={getattr(s['transcribe_arg'], 'dtype', None)} "
         f"shape={getattr(s['transcribe_arg'], 'shape', None)}",
+    )
+
+    print("\n=== live_driver.run_turn: recover a fully consumed short command ===")
+    s = drive(
+        GUARD_ON,
+        Transcript("Computer, stop.", -0.3, 0.05),
+        empty_capture=True,
+    )
+    check(
+        "a fully consumed wake-prefixed command reaches the brain without its wake",
+        s["ran"] is True and s["brain_called"] and s["brain_arg"] == "stop.",
+        f"ran={s['ran']} brain_called={s['brain_called']} brain_arg={s['brain_arg']!r}",
+    )
+    s = drive(
+        GUARD_ON,
+        Transcript("Computer, stop.", -3.0, 0.05),
+        empty_capture=True,
+    )
+    check(
+        "a recovered low-confidence command is re-prompted, never dispatched",
+        s["ran"] is True
+        and not s["brain_called"]
+        and s["spoken"] == pipeline.STT_REPROMPT,
+        f"brain_called={s['brain_called']} spoken={s['spoken']!r}",
+    )
+    for transcript in ("Computer.", "please stop"):
+        s = drive(
+            GUARD_ON,
+            Transcript(transcript, -0.3, 0.05),
+            empty_capture=True,
+        )
+        check(
+            f"{transcript!r} dispatches nothing after an empty hardware capture",
+            s["ran"] is True and not s["brain_called"] and s["spoken"] is None,
+            f"ran={s['ran']} brain_called={s['brain_called']} spoken={s['spoken']!r}",
+        )
+    s = drive(
+        GUARD_ON,
+        Transcript("Computer, delete everything.", -0.3, 0.05),
+        empty_capture="vad_rejected",
+    )
+    check(
+        "VAD-rejected noise cannot enter hardware short-command recovery",
+        s["ran"] is True and not s["brain_called"] and s["transcribe_arg"] is None,
+        f"brain_called={s['brain_called']} transcribe_arg={s['transcribe_arg']!r}",
     )
 
     # With the guard disabled, even a low-confidence transcript dispatches (the knob
