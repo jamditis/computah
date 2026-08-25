@@ -201,10 +201,22 @@ def main() -> int:
     real_run = brain_bridge.subprocess.run
     brain_bridge.subprocess.run = _fake_run
     try:
-        brain_bridge.cli_send("bot-spren", working_dir="/x/syl")("syl", "hi")
+        brain_bridge.cli_send("bot-spren", working_dir="/x/syl")(
+            "syl", "hi", event_id="turn-123"
+        )
         check(
-            captured[-1] == ["bot-spren", "send", "-d", "/x/syl", "syl", "hi"],
-            f"cli_send with workdir inserts -d: {captured[-1]}",
+            captured[-1]
+            == [
+                "bot-spren",
+                "send",
+                "-d",
+                "/x/syl",
+                "--event-id",
+                "turn-123",
+                "syl",
+                "hi",
+            ],
+            f"cli_send forwards the event id with -d: {captured[-1]}",
         )
 
         brain_bridge.cli_send("bot-spren")("syl", "hi")
@@ -213,11 +225,74 @@ def main() -> int:
             f"cli_send without workdir omits -d: {captured[-1]}",
         )
 
-        brain_bridge.ssh_cli_send("ofj", "bot-spren", working_dir="/x/syl")("syl", "hi")
+        brain_bridge.ssh_cli_send("ofj", "bot-spren", working_dir="/x/syl")(
+            "syl", "hi", event_id="turn-456"
+        )
         remote = captured[-1][-1]  # the joined remote command is the last ssh arg
         check(
-            "send -d /x/syl syl hi" in remote,
-            f"ssh_cli_send with workdir inserts -d into remote: {remote!r}",
+            "send -d /x/syl --event-id turn-456 syl hi" in remote,
+            f"ssh_cli_send forwards the event id in the remote command: {remote!r}",
+        )
+
+        # Staged rollout: officejawn can still have a bot-spren CLI from before
+        # --event-id existed. Click rejects an unknown option before the command
+        # handler writes an inbox event, so only that exact error permits one safe
+        # positional-mode retry. Exercise the local and SSH command shapes.
+        attempts: list[list[str]] = []
+
+        def _old_cli_run(cmd, *a, **kw):
+            attempts.append(cmd)
+            if any("--event-id" in part for part in cmd):
+                raise brain_bridge.subprocess.CalledProcessError(
+                    2,
+                    cmd,
+                    stderr="Error: No such option: --event-id\n",
+                )
+            return _FakeProc()
+
+        brain_bridge.subprocess.run = _old_cli_run
+        brain_bridge.cli_send("bot-spren", working_dir="/x/syl")(
+            "syl", "hi", event_id="turn-789"
+        )
+        check(
+            len(attempts) == 2
+            and "--event-id" in attempts[0]
+            and "--event-id" not in attempts[1],
+            f"old local CLI gets one flag-free retry: {attempts!r}",
+        )
+
+        attempts.clear()
+        brain_bridge.ssh_cli_send("ofj", "bot-spren", working_dir="/x/syl")(
+            "syl", "hi", event_id="turn-987"
+        )
+        check(
+            len(attempts) == 2
+            and "--event-id" in attempts[0][-1]
+            and "--event-id" not in attempts[1][-1],
+            f"old remote CLI gets one flag-free retry: {attempts!r}",
+        )
+
+        # A transport or send failure may have an unknown outcome. It must surface
+        # after one attempt rather than risk writing the same prompt twice.
+        attempts.clear()
+
+        def _failed_send(cmd, *a, **kw):
+            attempts.append(cmd)
+            raise brain_bridge.subprocess.CalledProcessError(
+                1, cmd, stderr="connection closed"
+            )
+
+        brain_bridge.subprocess.run = _failed_send
+        failed_loud = False
+        try:
+            brain_bridge.cli_send("bot-spren", working_dir="/x/syl")(
+                "syl", "hi", event_id="turn-fail"
+            )
+        except brain_bridge.subprocess.CalledProcessError:
+            failed_loud = True
+        check(
+            failed_loud and len(attempts) == 1,
+            f"non-compatibility failures are not retried: {attempts!r}",
         )
     finally:
         brain_bridge.subprocess.run = real_run
