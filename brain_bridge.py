@@ -59,8 +59,8 @@ _DELIVERY_RE = re.compile(
 )
 
 # (persona, prompt, *, event_id=None) -> None, raises on failure. event_id is this
-# turn's correlation id (#19); a transport that can carry it stamps it into the inbound
-# event so the reply can echo it, others accept and ignore it (positional fallback).
+# turn's correlation id (#19); the concrete transports pass it to bot-spren so the
+# reply producer can echo it. Test stand-ins may accept and ignore it.
 SendFn = Callable[..., None]
 ReplyReader = Callable[[], str]  # () -> full reply-file text ("" if absent)
 
@@ -252,9 +252,13 @@ def brain_via_bridge(
 # Concrete transports
 # --------------------------------------------------------------------------- #
 def _send_argv(
-    bot_spren_bin: str, working_dir: str | None, persona: str, prompt: str
+    bot_spren_bin: str,
+    working_dir: str | None,
+    persona: str,
+    prompt: str,
+    event_id: str | None,
 ) -> list[str]:
-    """Build the `bot-spren send` argv, inserting -d when a working dir is set.
+    """Build the `bot-spren send` argv with its routing and correlation fields.
 
     bot-spren resolves the persona's inbox from its working directory (--working-dir,
     default ~/.bot-spren/<name>), NOT from BOT_SPREN_STATE_DIR. A send without -d
@@ -262,12 +266,50 @@ def _send_argv(
     file the running session (which reads BOT_SPREN_STATE_DIR) never tails, so the
     message is silently lost and the turn just times out. Passing -d <persona project
     dir> points the send at the same inbox the session consumes.
+
+    The caller-generated event_id must reach that inbox unchanged. Once FileOutbound
+    echoes it, the bridge can match the reply by identity instead of file position.
     """
     argv = [bot_spren_bin, "send"]
     if working_dir:
         argv += ["-d", working_dir]
+    if event_id is not None:
+        argv += ["--event-id", event_id]
     argv += [persona, prompt]
     return argv
+
+
+_UNKNOWN_EVENT_ID_OPTION = "No such option: --event-id"
+
+
+def _run_send_command(
+    command: list[str], *, legacy_command: list[str] | None, timeout_s: int
+) -> None:
+    """Run a send, falling back only when an older CLI rejects --event-id.
+
+    Click rejects an unknown option before it invokes bot-spren's send handler, so
+    this exact failure cannot have appended an inbox event. Retrying without the
+    option is therefore safe during a staged bot-spren upgrade. Every other failure
+    remains fatal so a send with an unknown outcome is never duplicated.
+    """
+    try:
+        subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        if legacy_command is None or _UNKNOWN_EVENT_ID_OPTION not in (exc.stderr or ""):
+            raise
+        subprocess.run(
+            legacy_command,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=True,
+        )
 
 
 def cli_send(
@@ -275,19 +317,21 @@ def cli_send(
 ) -> SendFn:
     """Send via the local bot-spren CLI (persona on this host).
 
-    event_id is accepted for the SendFn contract but not yet forwarded: bot-spren has
-    no flag to set the inbound event_id, so stamping the reply (the #19 producer side)
-    is a separate, held step. Until it lands these sends are unstamped and the bridge
-    matches them positionally.
+    bot-spren's --event-id option preserves the bridge's correlation id in the
+    inbound event. An older CLI gets one safe positional-mode retry without the
+    unsupported option. FileOutbound does not echo the id yet, so replies remain
+    unstamped and positional until that producer step lands.
     """
 
     def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
-        subprocess.run(
-            _send_argv(bot_spren_bin, working_dir, persona, prompt),
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
+        _run_send_command(
+            _send_argv(bot_spren_bin, working_dir, persona, prompt, event_id),
+            legacy_command=(
+                _send_argv(bot_spren_bin, working_dir, persona, prompt, None)
+                if event_id is not None
+                else None
+            ),
+            timeout_s=30,
         )
 
     return _send
@@ -306,16 +350,20 @@ def ssh_cli_send(
     """
 
     def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
-        # event_id accepted but not forwarded yet — see cli_send. The held #19 producer
-        # step adds the remote --event-id flow plus the FileOutbound stamp.
-        argv = _send_argv(bot_spren_bin, working_dir, persona, prompt)
+        argv = _send_argv(bot_spren_bin, working_dir, persona, prompt, event_id)
         remote = " ".join(shlex.quote(p) for p in argv)
-        subprocess.run(
+        legacy_remote = None
+        if event_id is not None:
+            legacy_argv = _send_argv(bot_spren_bin, working_dir, persona, prompt, None)
+            legacy_remote = " ".join(shlex.quote(p) for p in legacy_argv)
+        _run_send_command(
             ["ssh", "-o", "ConnectTimeout=15", host, remote],
-            capture_output=True,
-            text=True,
-            timeout=40,
-            check=True,
+            legacy_command=(
+                ["ssh", "-o", "ConnectTimeout=15", host, legacy_remote]
+                if legacy_remote is not None
+                else None
+            ),
+            timeout_s=40,
         )
 
     return _send
