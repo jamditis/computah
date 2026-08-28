@@ -236,9 +236,11 @@ def run_turn(
     # under-drain, leaking a cue tail into the transcript, or -- because drain() blocked
     # per frame -- over-drain past the buffer and consume the start of a command spoken
     # after the cue. flush() carries no time estimate and never blocks on or consumes
-    # fresh frames, so a command spoken once _play_wav returns is captured intact. On a
-    # cue failure nothing played and nothing bled in, so the flush is skipped (the else)
-    # and the request is untouched.
+    # fresh frames, so a command spoken once _play_wav returns is captured intact. A cue
+    # failure can happen before or after partial output. Skip the flush because no clean
+    # post-cue boundary exists; this preserves the available request audio but can also
+    # retain partial cue bleed. The transcript guard contains that degraded path, while
+    # issue #58 tracks the audio that buffering or backpressure can lose.
     capture_frames = frames
     if cfg.get("wake_chime", False):  # opt-in, default off (issue #41) until the
         # pause-gate (issue #55) is validated on the PowerConf hardware
@@ -250,7 +252,15 @@ def run_turn(
             try:
                 _play_wav(chime.wake_cue_wav(), output_device)
             except Exception as e:  # noqa: BLE001 - the chime is a nicety, not core
-                log(f"wake chime failed ({type(e).__name__}: {e})")
+                # cfg is the process-local mapping main() reuses for every turn. A
+                # slow playback failure can lose speech captured during that cue
+                # window (#58); disable the optional cue after its first failure so
+                # later turns use the no-chime path instead of repeating the loss.
+                cfg["wake_chime"] = False
+                log(
+                    f"wake chime failed ({type(e).__name__}: {e}); "
+                    "disabled until restart"
+                )
             else:
                 mic.flush()
                 # The flush established a clean post-cue capture boundary (it dropped the
@@ -273,7 +283,8 @@ def run_turn(
             # Either a no-pause command (cue skipped so it cannot clip the command) or a
             # cue that failed to establish a boundary (nothing flushed, buffered audio
             # kept). Both keep the pre-roll and feed the peeked frames to capture ahead of
-            # the rest of the stream, so no leading audio is clipped (issues #30, #55).
+            # the rest of the stream, preserving all audio that is still available
+            # (issues #30, #55, #58).
             capture_frames = itertools.chain(peeked, frames)
 
     request_pcm = pipeline.capture_request(

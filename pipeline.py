@@ -1915,12 +1915,15 @@ def run_loop(
             paused = True
 
         def chime_for_turn():
+            nonlocal cue_wav
             # The wake fired: pause the mic, play the cue, then flush so the cue --
             # which bleeds straight back in on a shared mic/speaker device like the
             # PowerConf -- is not captured as part of the request, then resume so
-            # capture starts from clean audio. A failed cue must never kill the loop,
-            # and on failure nothing was emitted, so skip the flush and leave the
-            # buffered post-wake audio intact for capture (matches live_driver).
+            # capture starts from clean audio. A failed cue must never kill the loop.
+            # A failure does not prove whether playback emitted part of the cue; skip
+            # the flush because no clean post-cue boundary was established, and
+            # preserve all buffered post-wake audio that still exists for capture
+            # (matches live_driver).
             # Return True only when the cue played and the buffer was flushed, so
             # run_turn drops the detection pre-roll exactly when this boundary was
             # established, and keeps it (no-pause recovery, issue #30) when the cue
@@ -1930,7 +1933,15 @@ def run_loop(
             try:
                 audio.play_wav(cue_wav, output_name)
             except Exception as e:  # noqa: BLE001 - the chime is a nicety, not core
-                print(f"  wake chime failed ({type(e).__name__}: {e})")
+                # A slow playback failure loses any speech made while the mic is
+                # stopped (#58). The current turn cannot recover those samples, but
+                # retrying the same broken output on every wake would repeat the loss.
+                # Disable it until restart so later turns use no-chime semantics.
+                cue_wav = None
+                print(
+                    f"  wake chime failed ({type(e).__name__}: {e}); "
+                    "disabled until restart"
+                )
             else:
                 mic.flush()
                 flushed = True

@@ -387,7 +387,7 @@ def test_live_driver_chime_failure_keeps_preroll() -> None:
         ) = real
 
     check(
-        "a failed cue does not flush (nothing bled into the pipe)",
+        "a failed cue does not flush without a clean playback boundary",
         mic.flushed == 0,
         f"flushed={mic.flushed}",
     )
