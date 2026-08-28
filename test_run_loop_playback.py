@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression: pipeline.run_loop must degrade a reply-playback failure, never crash.
+"""Playback-failure regressions for pipeline.run_loop.
 
 The always-on live loop (pipeline.run_loop) plays each reply through the configured
 output device. A dead or busy output device that raises mid-playback must be logged and
@@ -14,6 +14,8 @@ Exit code is 0 only if every check passes.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import sys
 import types
 
@@ -60,7 +62,8 @@ class _FakeMic:
         return False
 
 
-def main() -> int:
+def test_reply_failure_does_not_crash() -> None:
+    print("=== reply playback failure ===")
     state = {"turns": 0, "played": []}
     saved_load = pipeline.load_config
     saved_warm = pipeline.warm_models
@@ -128,6 +131,78 @@ def main() -> int:
         else:
             sys.modules["audio"] = saved_audio
 
+
+def test_failed_wake_chime_stays_disabled() -> None:
+    """One failed optional cue must not put every later turn at the same risk (#58)."""
+    print("\n=== wake chime stays disabled after failure ===")
+    state = {"turns": 0, "cue_calls": 0, "hook_presence": []}
+    saved_load = pipeline.load_config
+    saved_warm = pipeline.warm_models
+    saved_run_turn = pipeline.run_turn
+    saved_audio = sys.modules.get("audio")
+    saved_chime = sys.modules.get("chime")
+
+    pipeline.load_config = lambda: {"wake_word": "computah", "wake_chime": True}
+    pipeline.warm_models = lambda cfg=None, wake_word=None: {}
+
+    def fake_run_turn(frames, **kw):
+        state["turns"] += 1
+        on_wake = kw.get("on_wake")
+        state["hook_presence"].append(on_wake is not None)
+        if on_wake is not None:
+            on_wake()
+        return None
+
+    pipeline.run_turn = fake_run_turn
+
+    class _TwoTurnMic(_FakeMic):
+        def active(self) -> bool:
+            return state["turns"] < 2
+
+    fake_audio = types.ModuleType("audio")
+    fake_audio.Microphone = lambda name=None: _TwoTurnMic()
+
+    def fail_cue(path, name=None):
+        state["cue_calls"] += 1
+        raise RuntimeError("PortAudioError: output device unavailable")
+
+    fake_audio.play_wav = fail_cue
+    fake_chime = types.ModuleType("chime")
+    fake_chime.wake_cue_wav = lambda: "cue.wav"
+    sys.modules["audio"] = fake_audio
+    sys.modules["chime"] = fake_chime
+
+    output = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(output):
+            pipeline.run_loop()
+        check(
+            "a failed cue is attempted only once across later turns",
+            state["cue_calls"] == 1 and state["hook_presence"] == [True, False],
+            f"cue_calls={state['cue_calls']} hooks={state['hook_presence']}",
+        )
+        check(
+            "the operator is told the cue stays disabled until restart",
+            "disabled until restart" in output.getvalue(),
+            output.getvalue().strip(),
+        )
+    finally:
+        pipeline.load_config = saved_load
+        pipeline.warm_models = saved_warm
+        pipeline.run_turn = saved_run_turn
+        if saved_audio is None:
+            sys.modules.pop("audio", None)
+        else:
+            sys.modules["audio"] = saved_audio
+        if saved_chime is None:
+            sys.modules.pop("chime", None)
+        else:
+            sys.modules["chime"] = saved_chime
+
+
+def main() -> int:
+    test_reply_failure_does_not_crash()
+    test_failed_wake_chime_stays_disabled()
     n_pass = sum(1 for r in results if r[0] == PASS)
     print(f"\n=== {n_pass}/{len(results)} checks passed ===")
     return 0 if n_pass == len(results) else 1

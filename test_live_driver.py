@@ -320,7 +320,9 @@ def test_cue_pause_gate() -> None:
     )  # fire, consume nothing
     pipeline._confirm_speech = lambda _pcm, _threshold: True
 
-    def run(frames: list, store: dict, play_error=None) -> tuple[int, int]:
+    def run(
+        frames: list, store: dict, play_error=None, cfg: dict | None = None
+    ) -> tuple[int, int]:
         played = {"n": 0}
 
         def fake_play(path, dev):
@@ -337,7 +339,14 @@ def test_cue_pause_gate() -> None:
         pipeline.capture_request = cap
         mic = _FakeMic()
         live_driver.run_turn(
-            iter(frames), mic, object(), 0.5, "/dev/null", None, CUE_ON, False
+            iter(frames),
+            mic,
+            object(),
+            0.5,
+            "/dev/null",
+            None,
+            CUE_ON.copy() if cfg is None else cfg,
+            False,
         )
         return played["n"], mic.flushed
 
@@ -364,19 +373,38 @@ def test_cue_pause_gate() -> None:
             f"plays={plays} flushed={flushed} capture_frames={store.get('frames')}",
         )
 
-        # Cue failure on the pause branch: aplay raises, so nothing played and nothing
-        # was flushed. The buffered audio must be kept -- the peeked frames are fed back
-        # to capture, not dropped -- so capture still sees all 22 and the mic is not
-        # flushed (matches the pre-cue no-clip contract, issues #30, #55).
+        # Cue failure on the pause branch: aplay raises, so no clean playback boundary
+        # was established and nothing is flushed. The buffered audio must be kept -- the
+        # peeked frames are fed back to capture, not dropped -- so capture still sees all
+        # 22 frames (issues #30, #55, #58).
         store = {}
+        runtime_cfg = CUE_ON.copy()
         plays, flushed = run(
             _frames((0, 6), (4000, 4), (0, 12)),
             store,
             play_error=RuntimeError("aplay: no such device"),
+            cfg=runtime_cfg,
         )
         check(
             "cue failure on a pause keeps the peeked frames and skips the flush",
             plays == 1 and flushed == 0 and store.get("frames") == 22,
+            f"plays={plays} flushed={flushed} capture_frames={store.get('frames')}",
+        )
+        check(
+            "cue failure disables the optional cue for later turns",
+            runtime_cfg["wake_chime"] is False,
+            f"wake_chime={runtime_cfg['wake_chime']}",
+        )
+
+        # main() reuses runtime_cfg. The next turn must bypass _play_wav entirely,
+        # proving the assignment above changes behavior rather than only state.
+        store = {}
+        plays, flushed = run(
+            _frames((0, 6), (4000, 4), (0, 12)), store, cfg=runtime_cfg
+        )
+        check(
+            "the next turn uses no-chime semantics after a cue failure",
+            plays == 0 and flushed == 0 and store.get("frames") == 22,
             f"plays={plays} flushed={flushed} capture_frames={store.get('frames')}",
         )
     finally:
