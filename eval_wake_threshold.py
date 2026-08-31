@@ -17,7 +17,8 @@ The script is committed; the recordings are not.
 Usage:
   .venv/bin/python eval_wake_threshold.py                      # defaults under samples/
   .venv/bin/python eval_wake_threshold.py --model computah \
-      --min-threshold 0.1 --max-threshold 0.9 --step 0.05 --max-fa-per-hour 1.0
+      --min-threshold 0.1 --max-threshold 0.9 --step 0.05 --max-fa-per-hour 1.0 \
+      --max-latency-s 1.0
 
 Record the recommended value in config.json (wake_threshold) for the shipped model;
 see docs/wake-threshold-tuning.md.
@@ -51,15 +52,19 @@ def _clips(directory: Path) -> list[Path]:
     return sorted(p for p in directory.iterdir() if p.suffix.lower() in AUDIO_EXTS)
 
 
-def _positive_peak(path: Path, model_name: str) -> float:
-    """The detector's peak score for one activation clip.
+def _positive_activation(path: Path, model_name: str) -> wake_eval.Activation:
+    """The detector's score trace for one activation clip.
 
-    The peak is the max over the same padded frame scores detect_wake decides on, so
-    a positive and a non-wake clip are scored through one routine and sit on the same
-    footing. The sweep applies every threshold afterward.
+    The sweep keeps the trace, not only its peak, so it can measure the first
+    crossing independently at every threshold. wake_frame_scores prepends context
+    padding; first_score_at_s puts each score back on the real clip's timeline.
     """
     scores = pipeline.wake_frame_scores(str(path), model_name)
-    return max(scores) if scores else 0.0
+    return wake_eval.Activation(
+        peak=max(scores) if scores else 0.0,
+        frame_scores=scores,
+        first_score_at_s=FRAME_HOP_S - pipeline._WAKE_LEAD_SAMPLES / 16000,
+    )
 
 
 def _frame_scores(path: Path, model_name: str) -> tuple[list[float], float]:
@@ -118,6 +123,13 @@ def main() -> int:
         help="post-fire gap before a new false accept can count, seconds "
         "(default: the live re-arm floor, ~1.6s)",
     )
+    p.add_argument(
+        "--max-latency-s",
+        type=float,
+        default=None,
+        help="count a positive as rejected when its first threshold crossing arrives "
+        "later than this many seconds after the clip starts (default: disabled)",
+    )
     args = p.parse_args()
 
     model_name = args.model or pipeline.load_config()["wake_word"]
@@ -144,10 +156,7 @@ def main() -> int:
         f"{len(nonwake_paths)} non-wake clips ..."
     )
 
-    positives = [
-        wake_eval.Activation(peak=_positive_peak(path, model_name))
-        for path in positives_paths
-    ]
+    positives = [_positive_activation(path, model_name) for path in positives_paths]
     nonwake = []
     for path in nonwake_paths:
         scores, seconds = _frame_scores(path, model_name)
@@ -162,6 +171,7 @@ def main() -> int:
         thresholds,
         refractory_s=args.refractory_s,
         frame_hop_s=FRAME_HOP_S,
+        latency_tolerance_s=args.max_latency_s,
     )
     _print_table(rows)
 
@@ -169,6 +179,8 @@ def main() -> int:
     total_hours = rows[0].nonwake_hours if rows else 0.0
     label = "recommended" if rec.meets_budget else "best available (budget not met)"
     print(f"\nnon-wake audio evaluated: {total_hours * 60:.1f} min")
+    if args.max_latency_s is not None:
+        print(f"activation latency tolerance: {args.max_latency_s:.2f} s")
     print(f"{label} wake_threshold for {model_name}: {rec.threshold:.3f}")
     print(f"  {rec.reason}")
     print(

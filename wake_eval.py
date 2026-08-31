@@ -41,13 +41,20 @@ class Activation(NamedTuple):
     """One real wake-word activation (a positive recording).
 
     peak is the detector's highest score over the clip (pipeline.detect_wake's
-    third return). latency_s, when measured, is the time from clip start to the
-    first frame that crosses the evaluated threshold; None means latency was not
-    measured, and the sweep then judges the activation on peak alone.
+    third return). frame_scores and first_score_at_s let the sweep find the first
+    crossing separately for every evaluated threshold. The latter is the time,
+    relative to the real clip's start, when frame_scores[0] becomes available; it
+    can be negative when the scoring stream includes leading context padding.
+
+    latency_s remains as a compatibility path for callers that measured one fixed
+    latency. When frame_scores is present it takes precedence because a crossing's
+    latency changes with the threshold.
     """
 
     peak: float
     latency_s: float | None = None
+    frame_scores: Sequence[float] | None = None
+    first_score_at_s: float = 0.0
 
 
 class NonWakeClip(NamedTuple):
@@ -107,19 +114,33 @@ def threshold_grid(
 
 
 def _activation_accepted(
-    a: Activation, threshold: float, latency_tolerance_s: float | None
+    a: Activation,
+    threshold: float,
+    latency_tolerance_s: float | None,
+    frame_hop_s: float,
 ) -> bool:
     """True when this activation fires within the peak and (optional) latency budget.
 
     Peak below threshold is always a miss. When a latency tolerance is set AND this
     activation's latency was measured, a fire later than the tolerance is a miss too
-    (a wake that arrives after the user has given up is a reject in practice). An
-    unmeasured latency (latency_s is None) is judged on peak alone rather than
-    penalized, so peak-only runs are unaffected by the latency feature.
+    (a wake that arrives after the user has given up is a reject in practice).
+    Frame scores are preferred so the first crossing is recomputed for this exact
+    threshold. An unmeasured latency is judged on peak alone rather than penalized,
+    so peak-only runs are unaffected by the latency feature.
     """
     if a.peak < threshold:
         return False
-    if latency_tolerance_s is not None and a.latency_s is not None:
+    if latency_tolerance_s is None:
+        return True
+    if a.frame_scores is not None:
+        crossing = next(
+            (i for i, score in enumerate(a.frame_scores) if score >= threshold), None
+        )
+        if crossing is None:
+            return False
+        latency_s = max(0.0, a.first_score_at_s + crossing * frame_hop_s)
+        return latency_s <= latency_tolerance_s
+    if a.latency_s is not None:
         return a.latency_s <= latency_tolerance_s
     return True
 
@@ -160,6 +181,8 @@ def sweep(
         raise ValueError("frame_hop_s must be positive")
     if refractory_s < 0:
         raise ValueError("refractory_s must be non-negative")
+    if latency_tolerance_s is not None and latency_tolerance_s < 0:
+        raise ValueError("latency_tolerance_s must be non-negative")
     # 0 s means no suppression (every crossing counts); a fraction of a frame still
     # rounds up to a 1-frame gap so a small positive value is not silently a no-op.
     refractory_frames = ceil(refractory_s / frame_hop_s)
@@ -169,7 +192,9 @@ def sweep(
     rows: list[ThresholdRow] = []
     for t in sorted(thresholds):
         fr = sum(
-            1 for a in positives if not _activation_accepted(a, t, latency_tolerance_s)
+            1
+            for a in positives
+            if not _activation_accepted(a, t, latency_tolerance_s, frame_hop_s)
         )
         fa = sum(
             count_false_accepts(c.frame_scores, t, refractory_frames) for c in nonwake

@@ -46,7 +46,9 @@ from pathlib import Path
 
 import numpy as np
 
+import eval_wake_threshold
 import pipeline
+import wake_eval
 
 PASS, FAIL = "PASS", "FAIL"
 results: list[tuple[str, str]] = []
@@ -315,6 +317,30 @@ def _run_checks(tmp: Path) -> int:
         "detect_wake's peak is the max of wake_frame_scores",
         abs(max(frame_scores) - 0.61) < 1e-9,
         f"max of {len(frame_scores)} frame scores = {max(frame_scores):.4f}",
+    )
+
+    print("\n=== threshold latency uses the real padded frame timeline ===")
+    planted = [0.0] * n
+    planted[18] = 0.4
+    planted[20] = 0.9
+    with _fake_model(_RecordingModel(planted)):
+        activation = eval_wake_threshold._positive_activation(wav, "fake_wake")
+    latency_rows = wake_eval.sweep(
+        [activation],
+        [],
+        [0.3, 0.8],
+        frame_hop_s=eval_wake_threshold.FRAME_HOP_S,
+        latency_tolerance_s=0.1,
+    )
+    check(
+        "the score origin reflects the non-frame-aligned 1.5s lead",
+        abs(activation.first_score_at_s - (-1.42)) < 1e-9,
+        f"first score at {activation.first_score_at_s:.2f}s",
+    )
+    check(
+        "threshold crossings at 0.02s and 0.18s get different verdicts",
+        [row.false_rejects for row in latency_rows] == [0, 1],
+        f"rejects={[row.false_rejects for row in latency_rows]}",
     )
 
     n_pass = sum(1 for r in results if r[0] == PASS)
