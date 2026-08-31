@@ -180,6 +180,44 @@ def test_latency_tolerance() -> None:
         f"rate={unmeasured[0].false_rejects_per_activation}",
     )
 
+    traced = Activation(
+        peak=0.9,
+        frame_scores=[0.1, 0.4, 0.9],
+        first_score_at_s=0.1,
+    )
+    threshold_dependent = wake_eval.sweep(
+        [traced],
+        [],
+        [0.3, 0.8],
+        frame_hop_s=0.1,
+        latency_tolerance_s=0.25,
+    )
+    check(
+        "latency is recomputed at each threshold",
+        [row.false_rejects for row in threshold_dependent] == [0, 1],
+        f"rejects={[row.false_rejects for row in threshold_dependent]}",
+    )
+
+    padded = Activation(
+        peak=0.9,
+        frame_scores=[0.1, 0.9],
+        first_score_at_s=-0.1,
+    )
+    at_start = wake_eval.sweep(
+        [padded], [], [0.5], frame_hop_s=0.1, latency_tolerance_s=0.0
+    )
+    check(
+        "context-padding time is clamped to the clip start",
+        at_start[0].false_rejects == 0,
+        f"rejects={at_start[0].false_rejects}",
+    )
+
+    try:
+        wake_eval.sweep([], [], [0.5], latency_tolerance_s=-0.1)
+        check("negative latency tolerance raises", False, "no error")
+    except ValueError:
+        check("negative latency tolerance raises", True, "ValueError")
+
 
 def test_recommend() -> None:
     print("=== recommend: budget and tie-break ===")

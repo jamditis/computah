@@ -100,7 +100,8 @@ set to bootstrap ownership.
 
 ```bash
 .venv/bin/python eval_wake_threshold.py --model computah \
-    --min-threshold 0.1 --max-threshold 0.9 --step 0.05 --max-fa-per-hour 1.0
+    --min-threshold 0.1 --max-threshold 0.9 --step 0.05 --max-fa-per-hour 1.0 \
+    --max-latency-s 1.0
 ```
 
 `--model` must match the wake word you recorded in step 1: score the `computah`
@@ -127,6 +128,12 @@ quiet or clipped activation. If no threshold meets the budget it says so and rep
 the lowest achievable false-accept rate rather than a silently-worse default. That
 is the signal to record cleaner negatives or accept a higher rate.
 
+`--max-latency-s` is the longest acceptable delay from the start of a positive
+clip to the detector's first crossing. The evaluator measures that crossing again
+at every threshold—a higher threshold can cross later even when the clip's peak is
+unchanged—and counts a late activation as a false reject. Omit the option when clip
+starts are not aligned closely enough for latency measurements to be meaningful.
+
 ## 3. Record the result
 
 Put the recommended value in `config.json` under `wake_threshold`, and fill in the
@@ -150,6 +157,6 @@ tuned value.
 - The metrics core (`wake_eval.py`) is separate from the scoring driver
   (`eval_wake_threshold.py`) so the math is unit-tested with plain values and no
   audio (`test_wake_eval.py`), the way the confidence guard is tested.
-- The core also supports an activation-latency tolerance (a fire that arrives too
-  late counts as a reject). The driver scores on peak only today; wire a measured
-  latency in once a latency budget is set for the deployed device.
+- Activation latency is measured from each prepared clip's start. Context-padding
+  frames are translated back onto that real clip timeline and never create a
+  negative latency.
