@@ -237,9 +237,21 @@ def split_sessions(clips, label):
 
     target_count = max(1, ceil(len(clips) * 0.15))
     ranked = sorted(sessions, key=lambda stem: sha256(stem.encode()).hexdigest())
+    train_candidates = [
+        stem
+        for stem in ranked
+        if len(clips) - len(sessions[stem]) >= target_count
+    ]
+    if not train_candidates:
+        raise SystemExit(
+            f"{label} cannot meet the 15% holdout with whole sessions"
+        )
+    preserved_train_session = train_candidates[-1]
     held_sessions = set()
     held_count = 0
-    for source_stem in ranked[:-1]:
+    for source_stem in ranked:
+        if source_stem == preserved_train_session:
+            continue
         held_sessions.add(source_stem)
         held_count += len(sessions[source_stem])
         if held_count >= target_count:
