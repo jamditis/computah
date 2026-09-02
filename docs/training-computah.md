@@ -280,16 +280,20 @@ contained 50 positive and 19 negative training clips, but those counts do not re
 a manifest for a new recording set.
 
 The base ONNX model above is trained on synthetic positives. Real clips provide the
-deployment check and can later train openWakeWord's optional speaker verifier.
+threshold-tuning check and can later train openWakeWord's optional speaker verifier.
 computah does not yet pass a verifier model to `openwakeword.Model`, so a verifier
 artifact is not part of this reproduction.
 
 Run the evaluator against the isolated holdout root with the same false-positive
 target as training. The held-out background set must contain at least five hours of
-non-wake audio; a shorter run is a smoke test, not deployment validation. Five hours
-provides only one-event resolution at 0.2 false accepts per hour, so use substantially
-more audio from multiple sessions and environments for confidence in a production
-rate:
+non-wake audio; a shorter run is only a smoke test. Five hours provides only
+one-event resolution at 0.2 false accepts per hour, so use substantially more audio
+from multiple sessions and environments before selecting a production threshold.
+This set is held out from training but not from threshold selection: the evaluator
+selects a threshold and reports that threshold's metrics on the same recordings.
+Treat the result as tuning evidence, not independent deployment validation. Issue
+[#113](https://github.com/jamditis/computah/issues/113) tracks the untouched test
+set, separate near-word metric, and positive-sample sufficiency needed for that claim:
 
 ```bash
 <computah-checkout>/.venv/bin/python <computah-checkout>/eval_wake_threshold.py \
@@ -299,9 +303,15 @@ rate:
   --max-fa-per-hour 0.2 --max-latency-s 1.0
 ```
 
+The evaluator's paste-ready `config.json` instruction is for a model shipped by the
+repository. This unshipped `computah` model is enabled with `--local`, so put its
+recommended `wake_threshold` in the gitignored `config.local.json` beside the local
+`wake_word` override. Do not change the tracked threshold for the shipped model.
+
 Record the selected threshold, false rejects per activation, false accepts per hour,
 sample counts, openWakeWord commit, configuration checksum, input checksums, and
-model checksum. The recovered recipe does not define a false-reject ceiling. Meeting
-0.2 false accepts per hour is necessary, but deployment remains blocked until a
-false-reject ceiling is selected and the held-out run meets it. See [threshold
+model checksum. This is a tuning receipt. The recovered recipe does not define a
+false-reject ceiling, and meeting 0.2 false accepts per hour on the tuning set is not
+deployment evidence. Deployment remains blocked until a false-reject ceiling is
+selected and the independent checks in #113 meet it. See [threshold
 tuning](wake-threshold-tuning.md) for the evaluator's full contract.

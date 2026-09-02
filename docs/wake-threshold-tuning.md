@@ -1,9 +1,11 @@
 # Tuning the wake threshold
 
-`wake_threshold` in `config.json` decides how high the wake-word score must be to
-fire. Set it too low and background speech triggers the assistant; too high and real
-activations are missed. This picks it from measured behavior on your own recordings
-instead of the shipped default (0.5), which has no data behind it.
+`wake_threshold` decides how high the wake-word score must be to fire. The tracked
+`config.json` supplies the shipped default; the gitignored `config.local.json` can
+override it for an unshipped local model. Set it too low and background speech
+triggers the assistant; too high and real activations are missed. This picks it from
+measured behavior on your own recordings instead of the shipped default (0.5), which
+has no data behind it.
 
 Two numbers drive the choice:
 
@@ -136,9 +138,11 @@ starts are not aligned closely enough for latency measurements to be meaningful.
 
 ## 3. Record the result
 
-Put the recommended value in `config.json` under `wake_threshold`, and fill in the
-row below so the shipped default is traceable to a run. Re-run whenever the model or
-the microphone changes.
+For a shipped model, put the recommended value in `config.json` under
+`wake_threshold`. For an unshipped model activated with `--local`, put it in
+`config.local.json` beside the local `wake_word` override so the tracked default is
+unchanged. Fill in the row below only for a shipped model so its default is traceable
+to a run. Re-run whenever the model or the microphone changes.
 
 | Model | Recommended `wake_threshold` | FR/activation | FA/hour | Sample set | Date |
 |-------|------------------------------|---------------|---------|------------|------|

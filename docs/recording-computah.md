@@ -43,8 +43,10 @@ The negatives and background measure false triggers now. They can also teach a
 future verifier what not to fire on. A two-minute background take is enough only to
 smoke-test the evaluator. The deployment recipe requires at least five hours of
 held-out non-wake audio: at that duration one false accept equals 0.2 per hour. Use
-substantially more audio, across several sessions and environments, before treating
-the rate as confident production evidence.
+substantially more audio, across several sessions and environments, before using
+the rate to select a production threshold. This tuning set is not independent
+deployment evidence; [issue #113](https://github.com/jamditis/computah/issues/113)
+tracks the untouched test set and separate near-word checks needed for that claim.
 
 ## Format
 
