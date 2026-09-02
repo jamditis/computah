@@ -168,26 +168,34 @@ cp training-output/computah.onnx <computah-checkout>/models/computah.onnx
 ## Real recordings and held-out evaluation
 
 Follow [the recording protocol](recording-computah.md): collect normal, style, and
-distance positives; the near-word negatives; and continuous background speech. For
-this held-out workflow, prepare the full set under a staging directory instead of
-the evaluator's default directories:
+distance positives; the near-word negatives; and continuous background speech. Each
+positive style and the negatives need at least two separately recorded source
+sessions. For this held-out workflow, prepare the full set under a staging directory
+instead of the evaluator's default directories. These commands run from the training
+workspace, so invoke the scripts and virtual environment from the computah checkout:
 
 ```bash
-.venv/bin/python prep_wake_samples.py --input <folder>/computah_*.wav \
+<computah-checkout>/.venv/bin/python <computah-checkout>/prep_wake_samples.py \
+  --input <folder>/computah_*.wav \
   --output samples/computah-prepared/positive --label positive
-.venv/bin/python prep_wake_samples.py --input <folder>/negatives.wav \
+<computah-checkout>/.venv/bin/python <computah-checkout>/prep_wake_samples.py \
+  --input <folder>/negatives_*.wav \
   --output samples/computah-prepared/negative --label negative
-.venv/bin/python prep_wake_samples.py --input <folder>/background.wav \
+<computah-checkout>/.venv/bin/python <computah-checkout>/prep_wake_samples.py \
+  --input <folder>/background_*.wav \
   --output samples/computah-prepared/background --label background
 ```
 
-The recovered split rule reserves 15% from every positive recording style before
-the remaining clips are pooled. Apply the same 15% holdout to the real negative
-clips. The continuous background recording is evaluation-only and is not split.
+The recovered split rule reserves at least 15% from every positive recording style
+before the remaining clips are pooled. Apply the same minimum holdout to the real
+negative clips. Reserve whole source sessions, not individual clips: the room,
+microphone, noise, and gain shared by a raw recording would otherwise leak across the
+split. The continuous background recordings are evaluation-only and are not split.
 
-The following deterministic split ranks each filename by SHA-256, holds out 15% of
-each positive style and the negative set, and refuses to mix with an earlier split.
-The prepared clip names preserve the source recording stems used here.
+The following deterministic split ranks source recording stems by SHA-256, holds out
+whole sessions until each positive style and the negative set reach at least 15%, and
+refuses to mix with an earlier split. The prepared clip names preserve their source
+recording stem followed by a numeric clip suffix.
 
 ```bash
 python - <<'PY'
@@ -219,18 +227,34 @@ background = sorted((prepared / "background").glob("*.wav"))
 if not negative or not background:
     raise SystemExit("negative and background staging must both contain audio")
 
-def split_group(clips, label):
-    ranked = sorted(clips, key=lambda path: sha256(path.name.encode()).hexdigest())
-    held = set(ranked[: max(1, ceil(len(ranked) * 0.15))])
+def split_sessions(clips, label):
+    sessions = {}
     for clip in clips:
-        destination = held_out if clip in held else train
+        source_stem = clip.stem.rsplit("_", 1)[0]
+        sessions.setdefault(source_stem, []).append(clip)
+    if len(sessions) < 2:
+        raise SystemExit(f"{label} needs at least two source recording sessions")
+
+    target_count = max(1, ceil(len(clips) * 0.15))
+    ranked = sorted(sessions, key=lambda stem: sha256(stem.encode()).hexdigest())
+    held_sessions = set()
+    held_count = 0
+    for source_stem in ranked[:-1]:
+        held_sessions.add(source_stem)
+        held_count += len(sessions[source_stem])
+        if held_count >= target_count:
+            break
+
+    for source_stem, source_clips in sessions.items():
+        destination = held_out if source_stem in held_sessions else train
         target = destination / label
         target.mkdir(parents=True, exist_ok=True)
-        copy2(clip, target / clip.name)
+        for clip in source_clips:
+            copy2(clip, target / clip.name)
 
 for group in positive_groups:
-    split_group(group, "positive")
-split_group(negative, "negative")
+    split_sessions(group, "positive")
+split_sessions(negative, "negative")
 for clip in background:
     target = held_out / "background"
     target.mkdir(parents=True, exist_ok=True)
@@ -249,10 +273,15 @@ computah does not yet pass a verifier model to `openwakeword.Model`, so a verifi
 artifact is not part of this reproduction.
 
 Run the evaluator against the isolated holdout root with the same false-positive
-target as training:
+target as training. The held-out background set must contain at least five hours of
+non-wake audio; a shorter run is a smoke test, not deployment validation. Five hours
+provides only one-event resolution at 0.2 false accepts per hour, so use substantially
+more audio from multiple sessions and environments for confidence in a production
+rate:
 
 ```bash
-.venv/bin/python eval_wake_threshold.py --model computah \
+<computah-checkout>/.venv/bin/python <computah-checkout>/eval_wake_threshold.py \
+  --model computah \
   --samples samples/computah-heldout \
   --min-threshold 0.1 --max-threshold 0.9 --step 0.05 \
   --max-fa-per-hour 0.2 --max-latency-s 1.0
@@ -264,10 +293,3 @@ model checksum. The recovered recipe does not define a false-reject ceiling. Mee
 0.2 false accepts per hour is necessary, but deployment remains blocked until a
 false-reject ceiling is selected and the held-out run meets it. See [threshold
 tuning](wake-threshold-tuning.md) for the evaluator's full contract.
-
-Record the selected threshold, false rejects per activation, false accepts per hour,
-sample counts, openWakeWord commit, configuration checksum, and model checksum. The
-recovered recipe does not define a false-reject ceiling. Meeting 0.2 false accepts
-per hour is necessary, but deployment remains blocked until a false-reject ceiling
-is selected and the held-out run meets it. See [threshold tuning](wake-threshold-tuning.md)
-for the evaluator's full contract.

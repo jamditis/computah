@@ -25,19 +25,26 @@ word.
 
 ## The recordings
 
-About 10 minutes of effort. You can stop after the first file and still get a small
-evaluation set; the rest cover more ways you speak and more room conditions.
+About 10 minutes of effort produces a smoke-test set. Record each positive style and
+the near-word negatives in at least two separate sessions, with a new source file for
+each session. A session boundary matters: clips from the same raw recording share the
+same room, microphone, noise, and gain, so they must stay together when the recipe
+splits training from evaluation.
 
 | File | What to do | Reps |
 |------|-----------|------|
-| `computah_normal.wav` | Quiet room, normal voice, at the mic | ~30 |
-| `computah_styles.wav` | Soft, loud, fast, slow drawl, questioning, flat | ~20 |
-| `computah_distance.wav` | 8-10 feet from the mic, normal volume | ~15 |
-| `negatives.wav` | "computer", "commuter", "computing", "compute" (~5 each) | ~20 |
-| `background.wav` | Talk or read for ~2 min; do NOT say "computah" | n/a |
+| `computah_normal_sNN.wav` | Quiet room, normal voice, at the mic | ~30 total |
+| `computah_styles_sNN.wav` | Soft, loud, fast, slow drawl, questioning, flat | ~20 total |
+| `computah_distance_sNN.wav` | 8-10 feet from the mic, normal volume | ~15 total |
+| `negatives_sNN.wav` | "computer", "commuter", "computing", "compute" (~5 each) | ~20 total |
+| `background_sNN.wav` | Talk, read, or capture normal room audio; do NOT say "computah" | 5+ hr held out |
 
 The negatives and background measure false triggers now. They can also teach a
-future verifier what not to fire on.
+future verifier what not to fire on. A two-minute background take is enough only to
+smoke-test the evaluator. The deployment recipe requires at least five hours of
+held-out non-wake audio: at that duration one false accept equals 0.2 per hour. Use
+substantially more audio, across several sessions and environments, before treating
+the rate as confident production evidence.
 
 ## Format
 
@@ -63,11 +70,11 @@ labeled as wake words.
   --output samples/positive --label positive
 
 # hard negatives (segmented on silence)
-.venv/bin/python prep_wake_samples.py --input <folder>/negatives.wav \
+.venv/bin/python prep_wake_samples.py --input <folder>/negatives_*.wav \
   --output samples/negative --label negative
 
 # continuous background (normalized, not segmented)
-.venv/bin/python prep_wake_samples.py --input <folder>/background.wav \
+.venv/bin/python prep_wake_samples.py --input <folder>/background_*.wav \
   --output samples/background --label background
 ```
 
