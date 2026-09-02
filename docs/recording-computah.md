@@ -1,6 +1,6 @@
 # Recording the "computah" wake word
 
-Custom wake-word detection in computah has two trained parts:
+Custom wake-word detection in computah can have two trained parts:
 
 1. The main openWakeWord model, trained on synthesized speech (many TTS voices and
    augmentations). This needs no real recordings.
@@ -8,9 +8,10 @@ Custom wake-word detection in computah has two trained parts:
    one person's voice and pronunciation. This is trained on real recordings of the
    target speaker saying the wake word, plus negatives.
 
-Your recordings train the verifier and double as the real-world evaluation set. The
-point of a custom wake word is that it fires on your pronunciation, not a stock
-phrase, so the recordings should sound like you actually say it.
+computah currently loads only the main ONNX model; it does not pass a verifier to
+openWakeWord yet. Your recordings are the real-world evaluation set now and can train
+the verifier after that integration exists. A custom wake word must fire on your
+pronunciation, so the recordings should sound like you actually say it.
 
 ## How to say it
 
@@ -24,8 +25,8 @@ word.
 
 ## The recordings
 
-About 10 minutes of effort. You can stop after the first file and still get a usable
-verifier; the rest sharpen it.
+About 10 minutes of effort. You can stop after the first file and still get a small
+evaluation set; the rest cover more ways you speak and more room conditions.
 
 | File | What to do | Reps |
 |------|-----------|------|
@@ -35,8 +36,8 @@ verifier; the rest sharpen it.
 | `negatives.wav` | "computer", "commuter", "computing", "compute" (~5 each) | ~20 |
 | `background.wav` | Talk or read for ~2 min; do NOT say "computah" | n/a |
 
-The negatives and background teach the model what not to fire on, which is what
-prevents false triggers.
+The negatives and background measure false triggers now. They can also teach a
+future verifier what not to fire on.
 
 ## Format
 
@@ -91,6 +92,6 @@ keep; omitted sources are treated as intentionally dropped.
 ## Training
 
 Training runs externally (openWakeWord 0.4.0 ships no train submodule) on a GPU host.
-The main model is trained from synthetic data; the custom verifier is trained from the
-processed `samples/positive` and `samples/negative` clips. See the training notes once
-the recordings exist.
+The main model is trained from synthetic data. See [the reproducible training
+recipe](training-computah.md) for its pinned source, configuration, three phases,
+held-out split, and validation target.
