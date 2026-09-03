@@ -518,7 +518,9 @@ def build_brain(
         return lambda _text: "Sorry, the brain reply path is not configured."
 
     persona = cfg.get("brain_persona") or "assistant"
-    transport = cfg.get("brain_transport") or "local"
+    transport = cfg.get("brain_transport")
+    if transport is None or transport == "":
+        transport = "local"
     bot_spren_bin = cfg.get("brain_bot_spren_bin") or "bot-spren"
     workdir = cfg.get("brain_bot_spren_workdir") or None
     inbox_path = cfg.get("brain_inbox_path") or ""

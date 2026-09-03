@@ -460,7 +460,7 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
             ),
             "a fully configured bridge writes to the session",
         )
-        for name, half in (
+        for name, configuration in (
             ("no reply path", {"brain_backend": "bridge", "brain_reply_path": ""}),
             (
                 "ssh with no host",
@@ -496,12 +496,57 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
                     "brain_transport": "carrier-pigeon",
                 },
             ),
+            (
+                "array transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": ["ssh"],
+                },
+            ),
+            (
+                "object transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": {"name": "ssh"},
+                },
+            ),
+            (
+                "empty array transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": [],
+                },
+            ),
+            (
+                "empty object transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": {},
+                },
+            ),
             ("cli backend", {"brain_backend": "cli", "brain_reply_path": "/tmp/r"}),
         ):
             check(
-                f"a half-configured bridge stays measurable: {name}",
-                not benchmark.bridge_reaches_a_session(half),
+                f"a non-live configuration stays measurable: {name}",
+                not benchmark.bridge_reaches_a_session(configuration),
                 "the turn never leaves this host, so there is nothing to consent to",
+            )
+
+        for value in (["ssh"], {"name": "ssh"}, [], {}):
+            check(
+                f"malformed transport {value!r} is classified as unsupported",
+                benchmark.bridge_configuration_issue(
+                    {
+                        "brain_reply_path": "/tmp/replies",
+                        "brain_transport": value,
+                    }
+                )
+                == "unsupported-transport",
+                "the benchmark must report the runtime refusal instead of crashing or sending",
             )
     finally:
         if saved is None:

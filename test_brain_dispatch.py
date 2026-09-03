@@ -151,6 +151,14 @@ def test_factory_validation() -> None:
             {"brain_reply_path": "/tmp/reply", "brain_transport": "carrier-pigeon"},
             "is not supported",
         ),
+        (
+            {"brain_reply_path": "/tmp/reply", "brain_transport": []},
+            "is not supported",
+        ),
+        (
+            {"brain_reply_path": "/tmp/reply", "brain_transport": {}},
+            "is not supported",
+        ),
     )
     for cfg, expected in cases:
         reply = brain_bridge.build_brain(cfg)("hello")

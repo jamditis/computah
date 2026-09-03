@@ -229,12 +229,14 @@ def bridge_configuration_issue(cfg: dict) -> str | None:
     """Return the bridge setting that makes build_brain() refuse locally."""
     if not cfg.get("brain_reply_path"):
         return "missing-reply-path"
-    transport = cfg.get("brain_transport") or "local"
+    transport = cfg.get("brain_transport")
+    if transport is None or transport == "":
+        transport = "local"
     if transport == "ssh" and not cfg.get("brain_host"):
         return "missing-ssh-host"
     if transport == "sim" and not cfg.get("brain_inbox_path"):
         return "missing-sim-inbox"
-    if transport not in {"local", "ssh", "sim"}:
+    if not isinstance(transport, str) or transport not in {"local", "ssh", "sim"}:
         return "unsupported-transport"
     return None
 
