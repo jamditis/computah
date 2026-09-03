@@ -148,6 +148,14 @@ def test_factory_validation() -> None:
             "inbox path is not configured",
         ),
         (
+            {
+                "brain_reply_path": "/tmp/reply",
+                "brain_transport": "sim",
+                "brain_inbox_path": ["/tmp/inbox"],
+            },
+            "inbox path is not a filesystem path",
+        ),
+        (
             {"brain_reply_path": "/tmp/reply", "brain_transport": "carrier-pigeon"},
             "is not supported",
         ),

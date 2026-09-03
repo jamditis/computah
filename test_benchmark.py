@@ -263,9 +263,11 @@ def test_a_failed_ssh_hop_is_not_a_timing() -> None:
     )
     sim = "\n".join(benchmark.report_lines(collected, {"transport": "sim"}))
     check(
-        "a simulator is reported separately from a local assistant",
-        "local simulator" in sim and "no live assistant session" in sim,
-        "the benchmark is a simulation, not a conversation round trip",
+        "the sim transport does not claim its configured inbox is isolated",
+        "configured local inbox" in sim
+        and "SimPersona or another running consumer" in sim
+        and "does not prove it is isolated" in sim,
+        "a free-form sim inbox can belong to a live consumer",
     )
     check(
         "the hop row carries its own probe count and caveat",
@@ -430,8 +432,10 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
             raised = str(e)
         check(
             "a bridge backend refuses to run without --live-brain",
-            "live assistant session" in raised and "20 run(s)" in raised,
-            "each run sends the transcript into somebody's live conversation",
+            "configured bridge endpoint" in raised
+            and "live assistant inbox" in raised
+            and "20 run(s)" in raised,
+            "each run writes to an endpoint that may be somebody's live conversation",
         )
         check(
             "it refuses before it touches a model, not after",
@@ -449,17 +453,30 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
         # 'the brain reply path is not configured' locally and writes nothing, and
         # main() has a report line for exactly that state. Refusing here would take
         # away a measurement without protecting anybody.
-        check(
-            "a working bridge is what needs consent",
-            benchmark.bridge_reaches_a_session(
+        for name, configuration in (
+            (
+                "local bridge",
                 {
                     "brain_backend": "bridge",
                     "brain_reply_path": "/tmp/replies",
                     "brain_transport": "local",
-                }
+                },
             ),
-            "a fully configured bridge writes to the session",
-        )
+            (
+                "simulation with an arbitrary inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                    "brain_inbox_path": "/tmp/inbox",
+                },
+            ),
+        ):
+            check(
+                f"a working {name} needs consent",
+                benchmark.bridge_writes_to_configured_endpoint(configuration),
+                "either transport can write into somebody's running session inbox",
+            )
         for name, configuration in (
             ("no reply path", {"brain_backend": "bridge", "brain_reply_path": ""}),
             (
@@ -469,15 +486,6 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
                     "brain_reply_path": "/tmp/replies",
                     "brain_transport": "ssh",
                     "brain_host": "",
-                },
-            ),
-            (
-                "simulation transport",
-                {
-                    "brain_backend": "bridge",
-                    "brain_reply_path": "/tmp/replies",
-                    "brain_transport": "sim",
-                    "brain_inbox_path": "/tmp/inbox",
                 },
             ),
             (
@@ -532,7 +540,7 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
         ):
             check(
                 f"a non-live configuration stays measurable: {name}",
-                not benchmark.bridge_reaches_a_session(configuration),
+                not benchmark.bridge_writes_to_configured_endpoint(configuration),
                 "the turn never leaves this host, so there is nothing to consent to",
             )
 
@@ -547,6 +555,20 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
                 )
                 == "unsupported-transport",
                 "the benchmark must report the runtime refusal instead of crashing or sending",
+            )
+
+        for value in (["inbox"], {"path": "/tmp/inbox"}, 1, True):
+            check(
+                f"malformed simulator inbox {value!r} is rejected",
+                benchmark.bridge_configuration_issue(
+                    {
+                        "brain_reply_path": "/tmp/replies",
+                        "brain_transport": "sim",
+                        "brain_inbox_path": value,
+                    }
+                )
+                == "invalid-sim-inbox",
+                "the benchmark must match the factory's spoken refusal",
             )
     finally:
         if saved is None:
@@ -787,6 +809,16 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
                     "brain_transport": "carrier-pigeon",
                 },
                 "brain_transport is unsupported",
+            ),
+            (
+                "sim with a malformed inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                    "brain_inbox_path": ["/tmp/inbox"],
+                },
+                "brain_inbox_path is not a filesystem path",
             ),
         ):
             stub.load_config = lambda cfg=cfg: {

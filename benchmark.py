@@ -234,29 +234,34 @@ def bridge_configuration_issue(cfg: dict) -> str | None:
         transport = "local"
     if transport == "ssh" and not cfg.get("brain_host"):
         return "missing-ssh-host"
-    if transport == "sim" and not cfg.get("brain_inbox_path"):
-        return "missing-sim-inbox"
+    if transport == "sim":
+        inbox_path = cfg.get("brain_inbox_path")
+        if not inbox_path:
+            return "missing-sim-inbox"
+        if not isinstance(inbox_path, (str, Path)):
+            return "invalid-sim-inbox"
     if not isinstance(transport, str) or transport not in {"local", "ssh", "sim"}:
         return "unsupported-transport"
     return None
 
 
-def bridge_reaches_a_session(cfg: dict) -> bool:
-    """Whether a turn on this config would write to a live assistant session.
+def bridge_writes_to_configured_endpoint(cfg: dict) -> bool:
+    """Whether a turn on this config would write to a configured bridge endpoint.
 
     Only a bridge backend writes at all, and only when it is fully configured:
     _brain_bridge answers with a local spoken error and sends nothing when
     brain_reply_path is empty, when ssh has no brain_host, or when build_brain()
-    selects the local simulator or rejects an unknown transport. Those configurations
-    have no live session at the other end, so they are measurable without asking
-    anyone, and main() already has a report line for half-configured bridges.
+    rejects an unknown transport. A configured simulator can still point at an
+    arbitrary inbox, so it stays behind the same consent gate as local and ssh.
+    Refused configurations have no session at the other end, so they are measurable
+    without asking anyone, and main() already has a report line for them.
     """
     if cfg.get("brain_backend") != "bridge":
         return False
     if bridge_configuration_issue(cfg) is not None:
         return False
     transport = cfg.get("brain_transport") or "local"
-    return transport in {"local", "ssh"}
+    return transport in {"local", "ssh", "sim"}
 
 
 def collect(
@@ -277,16 +282,16 @@ def collect(
 
     cfg = pipeline.load_config()
     wake = wake_word or cfg["wake_word"]
-    if bridge_reaches_a_session(cfg) and not live_brain:
+    if bridge_writes_to_configured_endpoint(cfg) and not live_brain:
         # run_pipeline takes the configured brain path, so on a working bridge every
-        # run sends this transcript into the persistent assistant session. That is
-        # somebody's live conversation, and ssh_hop_samples already refuses to write
-        # to it, so the loop that would write to it 20 times asks first.
+        # run writes this transcript to the configured endpoint. It may be somebody's
+        # live conversation, so the loop that would write to it 20 times asks first.
         raise SystemExit(
             f"brain_backend is bridge, so each of the {runs} run(s) would send the "
-            "benchmark transcript into the live assistant session. Pass --live-brain "
+            "benchmark transcript into the configured bridge endpoint, which may be "
+            "a live assistant inbox. Pass --live-brain "
             "to measure the bridge on purpose, or set brain_backend to cli in "
-            "config.local.json to benchmark without touching that session."
+            "config.local.json to benchmark without touching that endpoint."
         )
     clip = wav_path or default_clip_path(wake)
     if wav_path is not None and not Path(wav_path).exists():
@@ -389,6 +394,13 @@ def _transport_lines(transport: dict | None) -> list[str]:
             "'the brain inbox path is not configured' locally, so the brain row "
             "above is that refusal, not a reply.",
         ]
+    if transport["transport"] == "invalid-sim-inbox":
+        return [
+            "",
+            "Brain transport: brain_transport is sim but brain_inbox_path is not a "
+            "filesystem path. build_brain rejects it locally, so the brain row above "
+            "is that refusal, not a reply.",
+        ]
     if transport["transport"] == "unsupported-transport":
         return [
             "",
@@ -407,8 +419,9 @@ def _transport_lines(transport: dict | None) -> list[str]:
     if transport["transport"] == "sim":
         return [
             "",
-            "Brain transport: the local simulator handles this turn, so no live "
-            "assistant session or ssh hop is involved.",
+            "Brain transport: sim writes this turn to the configured local inbox, so "
+            "there is no ssh hop. That inbox may belong to SimPersona or another "
+            "running consumer; this report does not prove it is isolated.",
         ]
     if transport["transport"] != "ssh":
         return [

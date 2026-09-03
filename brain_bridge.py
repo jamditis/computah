@@ -539,6 +539,8 @@ def build_brain(
     elif transport == "sim":
         if not inbox_path:
             return lambda _text: "Sorry, the brain inbox path is not configured."
+        if not isinstance(inbox_path, (str, Path)):
+            return lambda _text: "Sorry, the brain inbox path is not a filesystem path."
         send = local_sim_send(inbox_path)
         read_reply = file_reply_reader(reply_path)
         confirm_landing = file_inbox_probe(inbox_path)
