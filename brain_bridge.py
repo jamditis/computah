@@ -499,3 +499,67 @@ def local_sim_send(inbox_path: str | Path) -> SendFn:
             f.write(json.dumps(entry) + "\n")
 
     return _send
+
+
+def build_brain(
+    cfg: dict,
+    *,
+    system_prompt: str | None = None,
+    cursor: ReplyCursor | None = None,
+) -> Callable[[str], str]:
+    """Build a bridge-backed ``brain(text)`` callable from configuration.
+
+    Supported transports are ``local``, ``ssh``, and ``sim``. Deployment-specific
+    hosts and paths stay in the supplied configuration, while missing or unknown
+    settings degrade to a spoken error instead of escaping into the voice loop.
+    """
+    reply_path = cfg.get("brain_reply_path") or ""
+    if not reply_path:
+        return lambda _text: "Sorry, the brain reply path is not configured."
+
+    persona = cfg.get("brain_persona") or "assistant"
+    transport = cfg.get("brain_transport")
+    if transport is None or transport == "":
+        transport = "local"
+    bot_spren_bin = cfg.get("brain_bot_spren_bin") or "bot-spren"
+    workdir = cfg.get("brain_bot_spren_workdir") or None
+    inbox_path = cfg.get("brain_inbox_path") or ""
+
+    if transport == "ssh":
+        host = cfg.get("brain_host") or ""
+        if not host:
+            return lambda _text: "Sorry, the brain host is not configured."
+        send = ssh_cli_send(host, bot_spren_bin, working_dir=workdir)
+        read_reply = ssh_reply_reader(host, reply_path)
+        confirm_landing = ssh_inbox_probe(host, inbox_path) if inbox_path else None
+    elif transport == "local":
+        send = cli_send(bot_spren_bin, working_dir=workdir)
+        read_reply = file_reply_reader(reply_path)
+        confirm_landing = file_inbox_probe(inbox_path) if inbox_path else None
+    elif transport == "sim":
+        if not inbox_path:
+            return lambda _text: "Sorry, the brain inbox path is not configured."
+        if not isinstance(inbox_path, (str, Path)):
+            return lambda _text: "Sorry, the brain inbox path is not a filesystem path."
+        send = local_sim_send(inbox_path)
+        read_reply = file_reply_reader(reply_path)
+        confirm_landing = file_inbox_probe(inbox_path)
+    else:
+        return lambda _text: f"Sorry, brain transport {transport!r} is not supported."
+
+    reply_cursor = cursor if cursor is not None else ReplyCursor()
+
+    def _brain(text: str) -> str:
+        return brain_via_bridge(
+            text,
+            persona=persona,
+            send=send,
+            read_reply=read_reply,
+            cursor=reply_cursor,
+            confirm_landing=confirm_landing,
+            system_prompt=system_prompt,
+            timeout_s=cfg.get("brain_timeout_s", 120),
+            poll_s=cfg.get("brain_poll_s", 0.5),
+        )
+
+    return _brain

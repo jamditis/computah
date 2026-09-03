@@ -280,10 +280,11 @@ explicit `--wav` that does not exist is an error rather than something to fill i
 typo cannot quietly benchmark generated audio in place of your sample.
 
 The table above predates the script and was taken against a simulated brain, so it has
-no Brain reply row. `benchmark.py` has no simulator: it measures whichever backend the
-config names, so its Brain reply and End-to-end turn rows carry real assistant latency
-(the `claude` CLI under the default `brain_backend: "cli"`, or a live session under
-`bridge` with `--live-brain`). Those rows depend on the model and the load at the time.
+no Brain reply row. `benchmark.py` measures whichever backend and transport the config
+names. Its Brain reply and End-to-end turn rows can therefore describe the `claude` CLI,
+a live bridge session, or the configured local simulator. Say which one produced the
+run; simulator rows are not assistant-session latency. Those rows depend on the model
+or simulator and the load at the time.
 
 Text-to-speech is the one to watch, because it looks like a stage row and is not
 reproducible either: `run_pipeline` times `speak(reply, ...)`, so it renders the
@@ -297,12 +298,13 @@ model produced the run, and note that only the first two rows are input-driven. 
 the old caption over a pasted table would claim a simulated brain for rows that
 measured a real one.
 
-On a working bridge (`brain_backend: "bridge"` with its reply path set, and a host when
-the transport is `ssh`), every run sends the clip's transcript into the persistent
-assistant session, so the benchmark refuses to start and says so. Pass `--live-brain` to
-measure the bridge on purpose, or set `brain_backend` to `cli` to leave that session
-alone. A half-configured bridge answers locally and sends nothing, so it still runs
-without the flag.
+On a working bridge (`brain_backend: "bridge"` with its reply path set, plus the
+transport's required host or inbox), every run writes the clip's transcript to the
+configured endpoint, so the benchmark refuses to start and says so. This includes
+`sim`: its inbox path is free-form configuration and may name a running session rather
+than an isolated `SimPersona`. Pass `--live-brain` to measure the configured bridge on
+purpose, or set `brain_backend` to `cli` to leave bridge inboxes alone. A rejected bridge
+configuration answers locally and sends nothing, so it still runs without the flag.
 
 It times the ssh hop to the brain host as its own row, and only when `brain_backend` is
 `bridge`: a `cli` backend answers locally, so a leftover `brain_transport: "ssh"` buys no

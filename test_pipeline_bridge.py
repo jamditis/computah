@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Full mic-free chain with the BRIDGE brain backend (not claude -p).
 
-Runs the real wake + STT + TTS models, but swaps the brain for brain_via_bridge()
-backed by the sim persona. Proves wake -> STT -> bridge-brain -> TTS works end to
-end without a mic, without claude -p, and without a live Claude session — the
-exact shape of the eventual Syl integration, minus the ssh transport.
+Runs the real wake + STT + TTS models, but builds the brain from sim-transport
+configuration. Proves wake -> STT -> bridge-brain -> TTS works end to end without
+a mic, without claude -p, and without a live Claude session — the exact shape of
+the eventual Syl integration, minus the ssh transport.
 
 Loads models, so run it under a memory cap, e.g.:
   systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0 \
@@ -38,17 +38,19 @@ def main() -> int:
     sim = SimPersona(inbox, reply, poll_s=0.05)
     sim.start()
 
-    # Swap the module-level brain for the bridge backend. run_pipeline() calls
-    # brain() by name in this module's namespace, so reassigning it here routes
-    # the brain stage through bot-spren's send/reply contract instead of claude -p.
-    pipeline.brain = lambda text, **_: brain_bridge.brain_via_bridge(
-        text,
-        persona="syl",
-        send=brain_bridge.local_sim_send(inbox),
-        read_reply=brain_bridge.file_reply_reader(reply),
+    # Swap the module-level brain for the config-driven factory. run_pipeline()
+    # calls brain() by name in this module's namespace, so the full chain exercises
+    # the same transport selection as a deployed bridge without touching repo config.
+    pipeline.brain = brain_bridge.build_brain(
+        {
+            "brain_transport": "sim",
+            "brain_persona": "syl",
+            "brain_inbox_path": str(inbox),
+            "brain_reply_path": str(reply),
+            "brain_timeout_s": 20,
+            "brain_poll_s": 0.05,
+        },
         system_prompt=pipeline.SYL_VOICE_SYSTEM_PROMPT,
-        timeout_s=20,
-        poll_s=0.05,
     )
 
     clip = str(PROJECT / "test_audio" / "clip_jarvis.wav")

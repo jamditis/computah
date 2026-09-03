@@ -232,18 +232,42 @@ def test_a_failed_ssh_hop_is_not_a_timing() -> None:
         "every reply poll opens its own connection, so transport scales with the answer",
     )
     misconfigured = "\n".join(
-        benchmark.report_lines(collected, {"transport": "misconfigured"})
+        benchmark.report_lines(collected, {"transport": "missing-ssh-host"})
     )
     check(
         "ssh with no host reports the half-configured bridge",
         "brain_host is empty" in misconfigured and "not configured" in misconfigured,
         "the brain row is measuring a refusal, and the report has to say so",
     )
+    sim_missing = "\n".join(
+        benchmark.report_lines(collected, {"transport": "missing-sim-inbox"})
+    )
+    check(
+        "sim with no inbox reports its configuration refusal",
+        "brain_inbox_path is empty" in sim_missing and "not configured" in sim_missing,
+        "error synthesis must not be labelled as a local assistant round trip",
+    )
+    unsupported = "\n".join(
+        benchmark.report_lines(collected, {"transport": "unsupported-transport"})
+    )
+    check(
+        "an unsupported transport reports its configuration refusal",
+        "unsupported" in unsupported and "not a reply" in unsupported,
+        "error synthesis must not be labelled as a local assistant round trip",
+    )
     local = "\n".join(benchmark.report_lines(collected, {"transport": "local"}))
     check(
         "a local brain says so instead of going quiet",
         "no ssh hop" in local,
         "silence would read as an unmeasured hop rather than an absent one",
+    )
+    sim = "\n".join(benchmark.report_lines(collected, {"transport": "sim"}))
+    check(
+        "the sim transport does not claim its configured inbox is isolated",
+        "configured local inbox" in sim
+        and "SimPersona or another running consumer" in sim
+        and "does not prove it is isolated" in sim,
+        "a free-form sim inbox can belong to a live consumer",
     )
     check(
         "the hop row carries its own probe count and caveat",
@@ -408,8 +432,10 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
             raised = str(e)
         check(
             "a bridge backend refuses to run without --live-brain",
-            "live assistant session" in raised and "20 run(s)" in raised,
-            "each run sends the transcript into somebody's live conversation",
+            "configured bridge endpoint" in raised
+            and "live assistant inbox" in raised
+            and "20 run(s)" in raised,
+            "each run writes to an endpoint that may be somebody's live conversation",
         )
         check(
             "it refuses before it touches a model, not after",
@@ -427,18 +453,31 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
         # 'the brain reply path is not configured' locally and writes nothing, and
         # main() has a report line for exactly that state. Refusing here would take
         # away a measurement without protecting anybody.
-        check(
-            "a working bridge is what needs consent",
-            benchmark.bridge_reaches_a_session(
+        for name, configuration in (
+            (
+                "local bridge",
                 {
                     "brain_backend": "bridge",
                     "brain_reply_path": "/tmp/replies",
                     "brain_transport": "local",
-                }
+                },
             ),
-            "a fully configured bridge writes to the session",
-        )
-        for name, half in (
+            (
+                "simulation with an arbitrary inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                    "brain_inbox_path": "/tmp/inbox",
+                },
+            ),
+        ):
+            check(
+                f"a working {name} needs consent",
+                benchmark.bridge_writes_to_configured_endpoint(configuration),
+                "either transport can write into somebody's running session inbox",
+            )
+        for name, configuration in (
             ("no reply path", {"brain_backend": "bridge", "brain_reply_path": ""}),
             (
                 "ssh with no host",
@@ -449,12 +488,87 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
                     "brain_host": "",
                 },
             ),
+            (
+                "simulation with no inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                },
+            ),
+            (
+                "unsupported transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "carrier-pigeon",
+                },
+            ),
+            (
+                "array transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": ["ssh"],
+                },
+            ),
+            (
+                "object transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": {"name": "ssh"},
+                },
+            ),
+            (
+                "empty array transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": [],
+                },
+            ),
+            (
+                "empty object transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": {},
+                },
+            ),
             ("cli backend", {"brain_backend": "cli", "brain_reply_path": "/tmp/r"}),
         ):
             check(
-                f"a half-configured bridge stays measurable: {name}",
-                not benchmark.bridge_reaches_a_session(half),
+                f"a non-live configuration stays measurable: {name}",
+                not benchmark.bridge_writes_to_configured_endpoint(configuration),
                 "the turn never leaves this host, so there is nothing to consent to",
+            )
+
+        for value in (["ssh"], {"name": "ssh"}, [], {}):
+            check(
+                f"malformed transport {value!r} is classified as unsupported",
+                benchmark.bridge_configuration_issue(
+                    {
+                        "brain_reply_path": "/tmp/replies",
+                        "brain_transport": value,
+                    }
+                )
+                == "unsupported-transport",
+                "the benchmark must report the runtime refusal instead of crashing or sending",
+            )
+
+        for value in (["inbox"], {"path": "/tmp/inbox"}, 1, True):
+            check(
+                f"malformed simulator inbox {value!r} is rejected",
+                benchmark.bridge_configuration_issue(
+                    {
+                        "brain_reply_path": "/tmp/replies",
+                        "brain_transport": "sim",
+                        "brain_inbox_path": value,
+                    }
+                )
+                == "invalid-sim-inbox",
+                "the benchmark must match the factory's spoken refusal",
             )
     finally:
         if saved is None:
@@ -674,6 +788,72 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
             and probes == []
             and "brain reply path is not configured" in out.getvalue(),
             "the measured brain row is a local refusal and paid no ssh transport",
+        )
+
+        for name, cfg, expected in (
+            (
+                "sim with no inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                    "brain_inbox_path": "",
+                },
+                "brain_inbox_path is empty",
+            ),
+            (
+                "unsupported transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "carrier-pigeon",
+                },
+                "brain_transport is unsupported",
+            ),
+            (
+                "sim with a malformed inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                    "brain_inbox_path": ["/tmp/inbox"],
+                },
+                "brain_inbox_path is not a filesystem path",
+            ),
+        ):
+            stub.load_config = lambda cfg=cfg: {
+                **cfg,
+                "brain_poll_s": 0.5,
+                "wake_word": "hey_jarvis",
+                "wake_threshold": 0.5,
+            }
+            out = io.StringIO()
+            code = run_main(["--runs", "3"], out)
+            check(
+                f"{name} is reported as a refusal, not a local brain",
+                code == 0 and probes == [] and expected in out.getvalue(),
+                "the report must describe the same rejection build_brain applies",
+            )
+
+        probes.clear()
+        stub.load_config = lambda: {
+            "brain_backend": "bridge",
+            "brain_reply_path": "/tmp/replies",
+            "brain_transport": "sim",
+            "brain_inbox_path": "/tmp/inbox",
+            "brain_poll_s": 0.5,
+            "wake_word": "hey_jarvis",
+            "wake_threshold": 0.5,
+        }
+        out = io.StringIO()
+        code = run_main(["--runs", "3", "--live-brain", "--no-ssh"], out)
+        check(
+            "--no-ssh keeps the simulator label",
+            code == 0
+            and probes == []
+            and "configured local inbox" in out.getvalue()
+            and "does not prove it is isolated" in out.getvalue(),
+            "--no-ssh skips only the ssh probe, not non-ssh transport reporting",
         )
     finally:
         benchmark.ssh_hop_samples = saved_probe

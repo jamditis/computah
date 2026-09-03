@@ -225,20 +225,43 @@ def ensure_clip(wav_path: str, wake_word: str, synth) -> bool:
     return True
 
 
-def bridge_reaches_a_session(cfg: dict) -> bool:
-    """Whether a turn on this config would actually write to a live assistant session.
+def bridge_configuration_issue(cfg: dict) -> str | None:
+    """Return the bridge setting that makes build_brain() refuse locally."""
+    if not cfg.get("brain_reply_path"):
+        return "missing-reply-path"
+    transport = cfg.get("brain_transport")
+    if transport is None or transport == "":
+        transport = "local"
+    if transport == "ssh" and not cfg.get("brain_host"):
+        return "missing-ssh-host"
+    if transport == "sim":
+        inbox_path = cfg.get("brain_inbox_path")
+        if not inbox_path:
+            return "missing-sim-inbox"
+        if not isinstance(inbox_path, (str, Path)):
+            return "invalid-sim-inbox"
+    if not isinstance(transport, str) or transport not in {"local", "ssh", "sim"}:
+        return "unsupported-transport"
+    return None
+
+
+def bridge_writes_to_configured_endpoint(cfg: dict) -> bool:
+    """Whether a turn on this config would write to a configured bridge endpoint.
 
     Only a bridge backend writes at all, and only when it is fully configured:
     _brain_bridge answers with a local spoken error and sends nothing when
-    brain_reply_path is empty, or when the transport is ssh with no brain_host. A
-    half-configured bridge has no session at the other end, so it is measurable
-    without asking anyone, and main() already has a report line for it.
+    brain_reply_path is empty, when ssh has no brain_host, or when build_brain()
+    rejects an unknown transport. A configured simulator can still point at an
+    arbitrary inbox, so it stays behind the same consent gate as local and ssh.
+    Refused configurations have no session at the other end, so they are measurable
+    without asking anyone, and main() already has a report line for them.
     """
     if cfg.get("brain_backend") != "bridge":
         return False
-    if not cfg.get("brain_reply_path"):
+    if bridge_configuration_issue(cfg) is not None:
         return False
-    return not (cfg.get("brain_transport") == "ssh" and not cfg.get("brain_host"))
+    transport = cfg.get("brain_transport") or "local"
+    return transport in {"local", "ssh", "sim"}
 
 
 def collect(
@@ -259,16 +282,16 @@ def collect(
 
     cfg = pipeline.load_config()
     wake = wake_word or cfg["wake_word"]
-    if bridge_reaches_a_session(cfg) and not live_brain:
+    if bridge_writes_to_configured_endpoint(cfg) and not live_brain:
         # run_pipeline takes the configured brain path, so on a working bridge every
-        # run sends this transcript into the persistent assistant session. That is
-        # somebody's live conversation, and ssh_hop_samples already refuses to write
-        # to it, so the loop that would write to it 20 times asks first.
+        # run writes this transcript to the configured endpoint. It may be somebody's
+        # live conversation, so the loop that would write to it 20 times asks first.
         raise SystemExit(
             f"brain_backend is bridge, so each of the {runs} run(s) would send the "
-            "benchmark transcript into the live assistant session. Pass --live-brain "
+            "benchmark transcript into the configured bridge endpoint, which may be "
+            "a live assistant inbox. Pass --live-brain "
             "to measure the bridge on purpose, or set brain_backend to cli in "
-            "config.local.json to benchmark without touching that session."
+            "config.local.json to benchmark without touching that endpoint."
         )
     clip = wav_path or default_clip_path(wake)
     if wav_path is not None and not Path(wav_path).exists():
@@ -355,13 +378,35 @@ def _transport_lines(transport: dict | None) -> list[str]:
             "read only when the backend is bridge, so a leftover ssh setting in "
             "config.local.json does not put a hop in this turn.",
         ]
-    if transport["transport"] == "misconfigured":
+    if transport["transport"] == "missing-ssh-host":
         return [
             "",
             "Brain transport: brain_transport is ssh but brain_host is empty, so there "
             "is no host to probe. A live turn does not reach the brain either: "
             "_brain_bridge answers 'the brain host is not configured' and speaks that "
             "instead, so the brain row above is that refusal, not a reply.",
+        ]
+    if transport["transport"] == "missing-sim-inbox":
+        return [
+            "",
+            "Brain transport: brain_transport is sim but brain_inbox_path is empty, "
+            "so the simulator has nowhere to receive a turn. build_brain answers "
+            "'the brain inbox path is not configured' locally, so the brain row "
+            "above is that refusal, not a reply.",
+        ]
+    if transport["transport"] == "invalid-sim-inbox":
+        return [
+            "",
+            "Brain transport: brain_transport is sim but brain_inbox_path is not a "
+            "filesystem path. build_brain rejects it locally, so the brain row above "
+            "is that refusal, not a reply.",
+        ]
+    if transport["transport"] == "unsupported-transport":
+        return [
+            "",
+            "Brain transport: brain_transport is unsupported, so build_brain rejects "
+            "it locally. The brain row above is that refusal, not a reply from a "
+            "local or remote assistant.",
         ]
     if transport["transport"] == "missing-reply-path":
         return [
@@ -370,6 +415,13 @@ def _transport_lines(transport: dict | None) -> list[str]:
             "to read and no host to probe. A live turn does not reach the brain: "
             "_brain_bridge answers 'the brain reply path is not configured' locally, "
             "so the brain row above is that refusal, not a reply.",
+        ]
+    if transport["transport"] == "sim":
+        return [
+            "",
+            "Brain transport: sim writes this turn to the configured local inbox, so "
+            "there is no ssh hop. That inbox may belong to SimPersona or another "
+            "running consumer; this report does not prove it is isolated.",
         ]
     if transport["transport"] != "ssh":
         return [
@@ -530,28 +582,23 @@ def main(argv: list[str] | None = None) -> int:
     transport = None
     cfg = collected["config"]
     host = cfg.get("brain_host") or ""
-    configured = cfg.get("brain_transport")
+    configured = cfg.get("brain_transport") or "local"
     backend = cfg.get("brain_backend") or "cli"
-    if args.no_ssh:
-        pass
-    elif backend != "bridge":
+    if backend != "bridge":
         # brain() dispatches on brain_backend, so a cli backend never opens the
         # bridge and the measured brain stage was local whatever brain_transport
         # says. Probing on the transport setting alone would add an ssh row to a
         # turn that paid no ssh, and spend the probe time hitting a host the
         # benchmark did not use.
         transport = {"transport": "not-bridge", "backend": backend}
-    elif not cfg.get("brain_reply_path"):
-        # _brain_bridge refuses locally before selecting a transport. Probing the
-        # configured ssh host here would price a hop the measured turn never paid.
-        transport = {"transport": "missing-reply-path"}
+    elif issue := bridge_configuration_issue(cfg):
+        # build_brain refuses locally before reaching a session. Probing or reporting
+        # a live transport here would price a hop the measured turn never paid.
+        transport = {"transport": issue}
     elif configured != "ssh":
-        transport = {"transport": configured or "local"}
-    elif not host:
-        # brain_transport ssh with no brain_host is a half-configured bridge. There is
-        # nothing to probe, and the brain row is measuring a refusal, so say that
-        # rather than reporting an unreachable host that was never named.
-        transport = {"transport": "misconfigured"}
+        transport = {"transport": configured}
+    elif args.no_ssh:
+        pass
     elif shutil.which("ssh") is None:
         print("ssh is not on PATH; skipping the transport measurement", file=sys.stderr)
     else:
