@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """brain() dispatches on the brain_backend config key.
 
-test_pipeline_bridge.py proves the bridge mechanics by monkeypatching
-pipeline.brain directly. This proves the step before that: config alone selects
-the backend, so a real deployment enables the persistent-session brain by editing
-config.local.json, with no code change. No models and no bot-spren CLI are needed
--- the local transport is swapped for the sim sender, and config paths are pointed
-at temp files so the repo's own config is untouched.
+test_pipeline_bridge.py proves the full bridge chain through build_brain(). This
+proves the step before that: config alone selects the backend and transport, so a
+real deployment enables the persistent-session brain by editing config.local.json,
+with no code change. No models and no bot-spren CLI are needed — config selects the
+sim transport and points its paths at temp files, so the repo's own config is
+untouched.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ def test_routing(d: Path) -> None:
     check(pipeline.brain("hi") == "CLI", "missing brain_backend defaults to cli")
 
 
-def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
+def test_bridge_via_config(d: Path) -> None:
     """With only config.local.json set to bridge, brain() answers via the sim."""
     inbox = d / "manual-inbox.jsonl"
     reply = d / "reply.txt"
@@ -69,25 +69,13 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
         pipeline.LOCAL_CONFIG_PATH,
         {
             "brain_backend": "bridge",
-            "brain_transport": "local",
+            "brain_transport": "sim",
             "brain_persona": "syl",
             "brain_reply_path": str(reply),
-            # A workdir controls where bot-spren sends. It must not also guess which
-            # inbox the running session consumes; an explicit inbox enables that
-            # independent landing check.
-            "brain_bot_spren_workdir": str(d / "persona"),
+            "brain_inbox_path": str(inbox),
             "brain_timeout_s": 5,
             "brain_poll_s": 0.05,
         },
-    )
-
-    # The local transport normally shells the real bot-spren CLI. Swap just the
-    # sender for the sim writer; the reply reader is the real file reader.
-    real_brain_bridge.cli_send = lambda _bin, working_dir=None: (
-        real_brain_bridge.local_sim_send(inbox)
-    )
-    real_brain_bridge.file_inbox_probe = lambda _path: (_ for _ in ()).throw(
-        AssertionError("a blank brain_inbox_path must not create a guessed probe")
     )
 
     sim = SimPersona(inbox, reply, poll_s=0.02)
@@ -99,7 +87,7 @@ def test_bridge_via_config(d: Path, real_brain_bridge) -> None:
 
     check(
         out == "Two plus two is four.",
-        f"config-driven bridge with no explicit landing probe answered: {out!r}",
+        f"config-driven sim transport answered: {out!r}",
     )
     sent = json.loads(inbox.read_text().splitlines()[0])["payload"]
     check(
@@ -145,6 +133,28 @@ def test_voice_dispatch_policy() -> None:
         pipeline._bridge_voice_system_prompt(49) == pipeline.VOICE_SYSTEM_PROMPT,
         "a non-string bridge persona falls back to the neutral voice policy",
     )
+
+
+def test_factory_validation() -> None:
+    """Invalid deployment settings stay inside the voice error boundary."""
+    cases = (
+        ({}, "reply path is not configured"),
+        (
+            {"brain_reply_path": "/tmp/reply", "brain_transport": "ssh"},
+            "host is not configured",
+        ),
+        (
+            {"brain_reply_path": "/tmp/reply", "brain_transport": "sim"},
+            "inbox path is not configured",
+        ),
+        (
+            {"brain_reply_path": "/tmp/reply", "brain_transport": "carrier-pigeon"},
+            "is not supported",
+        ),
+    )
+    for cfg, expected in cases:
+        reply = brain_bridge.build_brain(cfg)("hello")
+        check(expected in reply, f"bad bridge config returns a spoken error: {reply!r}")
 
 
 def test_cli_voice_prompt(real_brain_cli) -> None:
@@ -280,18 +290,17 @@ def main() -> int:
         pipeline.LOCAL_CONFIG_PATH,
         pipeline._brain_cli,
         pipeline._brain_bridge,
-        brain_bridge.cli_send,
-        brain_bridge.file_inbox_probe,
     )
     try:
         with tempfile.TemporaryDirectory(prefix="brain-dispatch-") as tmp:
             d = Path(tmp)
             test_routing(d)
             test_voice_dispatch_policy()
+            test_factory_validation()
             # Restore the real helpers before the live-ish bridge test.
             pipeline._brain_cli, pipeline._brain_bridge = saved[2], saved[3]
             test_cli_voice_prompt(saved[2])
-            test_bridge_via_config(d, brain_bridge)
+            test_bridge_via_config(d)
             test_set_wake_word_no_leak(d)
             test_set_wake_word_local(d)
             test_set_wake_word_local_malformed_no_clobber(d)
@@ -302,8 +311,6 @@ def main() -> int:
             pipeline.LOCAL_CONFIG_PATH,
             pipeline._brain_cli,
             pipeline._brain_bridge,
-            brain_bridge.cli_send,
-            brain_bridge.file_inbox_probe,
         ) = saved
 
     n_pass = sum(1 for ok, _ in results if ok)

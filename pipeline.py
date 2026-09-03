@@ -148,7 +148,7 @@ DEFAULTS = {
     # config.local.json — persona/host/path are deployment-specific and stay out
     # of the published config.json.
     "brain_persona": "assistant",
-    "brain_transport": "local",  # "local" (this host) or "ssh" (another host)
+    "brain_transport": "local",  # "local", "ssh", or "sim" (tests)
     "brain_host": "",  # ssh host alias, required for transport "ssh"
     "brain_bot_spren_bin": "bot-spren",
     "brain_bot_spren_workdir": "",  # bot-spren --working-dir; set so the send lands
@@ -1423,51 +1423,20 @@ _bridge_cursors: dict[str, brain_bridge.ReplyCursor] = {}
 def _brain_bridge(text: str, cfg: dict) -> str:
     """Route the transcript to a persistent assistant session over the bridge.
 
-    Transport is built from config: "local" talks to bot-spren on this host,
-    "ssh" to bot-spren on another host (pipeline here, assistant elsewhere). A
-    missing required setting degrades to a spoken error, never a crash.
+    Transport is built from config by brain_bridge.build_brain(). A missing or
+    unknown setting degrades to a spoken error, never a crash.
     """
-    reply_path = cfg["brain_reply_path"]
-    if not reply_path:
-        return "Sorry, the brain reply path is not configured."
-
-    cursor = _bridge_cursors.setdefault(reply_path, brain_bridge.ReplyCursor())
-
-    persona = cfg["brain_persona"]
-    bot_spren_bin = cfg["brain_bot_spren_bin"]
-    workdir = cfg.get("brain_bot_spren_workdir") or None
-    # The send workdir and the running session's runtime.state_dir are independent
-    # configuration inputs. Guessing the inbox from the workdir can reject every
-    # valid send after an upgrade when state_dir is pinned elsewhere. Enable the
-    # landing check only with a separately verified inbox path.
-    inbox_path = cfg.get("brain_inbox_path") or ""
-    if cfg["brain_transport"] == "ssh":
-        host = cfg["brain_host"]
-        if not host:
-            return "Sorry, the brain host is not configured."
-        send = brain_bridge.ssh_cli_send(host, bot_spren_bin, working_dir=workdir)
-        read_reply = brain_bridge.ssh_reply_reader(host, reply_path)
-        confirm_landing = (
-            brain_bridge.ssh_inbox_probe(host, inbox_path) if inbox_path else None
-        )
-    else:
-        send = brain_bridge.cli_send(bot_spren_bin, working_dir=workdir)
-        read_reply = brain_bridge.file_reply_reader(reply_path)
-        confirm_landing = (
-            brain_bridge.file_inbox_probe(inbox_path) if inbox_path else None
-        )
-
-    return brain_bridge.brain_via_bridge(
-        text,
-        persona=persona,
-        send=send,
-        read_reply=read_reply,
-        cursor=cursor,
-        confirm_landing=confirm_landing,
-        system_prompt=_bridge_voice_system_prompt(persona),
-        timeout_s=cfg["brain_timeout_s"],
-        poll_s=cfg["brain_poll_s"],
+    reply_path = cfg.get("brain_reply_path") or ""
+    cursor = (
+        _bridge_cursors.setdefault(reply_path, brain_bridge.ReplyCursor())
+        if reply_path
+        else None
     )
+    return brain_bridge.build_brain(
+        cfg,
+        system_prompt=_bridge_voice_system_prompt(cfg.get("brain_persona")),
+        cursor=cursor,
+    )(text)
 
 
 def _brain_cli(
