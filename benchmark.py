@@ -230,15 +230,17 @@ def bridge_reaches_a_session(cfg: dict) -> bool:
 
     Only a bridge backend writes at all, and only when it is fully configured:
     _brain_bridge answers with a local spoken error and sends nothing when
-    brain_reply_path is empty, or when the transport is ssh with no brain_host. A
-    half-configured bridge has no session at the other end, so it is measurable
-    without asking anyone, and main() already has a report line for it.
+    brain_reply_path is empty, when ssh has no brain_host, or when build_brain()
+    selects the local simulator or rejects an unknown transport. Those configurations
+    have no live session at the other end, so they are measurable without asking
+    anyone, and main() already has a report line for half-configured bridges.
     """
     if cfg.get("brain_backend") != "bridge":
         return False
     if not cfg.get("brain_reply_path"):
         return False
-    return not (cfg.get("brain_transport") == "ssh" and not cfg.get("brain_host"))
+    transport = cfg.get("brain_transport") or "local"
+    return transport == "local" or (transport == "ssh" and bool(cfg.get("brain_host")))
 
 
 def collect(

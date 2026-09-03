@@ -449,6 +449,23 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
                     "brain_host": "",
                 },
             ),
+            (
+                "simulation transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                    "brain_inbox_path": "/tmp/inbox",
+                },
+            ),
+            (
+                "unsupported transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "carrier-pigeon",
+                },
+            ),
             ("cli backend", {"brain_backend": "cli", "brain_reply_path": "/tmp/r"}),
         ):
             check(
