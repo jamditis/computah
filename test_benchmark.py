@@ -232,18 +232,40 @@ def test_a_failed_ssh_hop_is_not_a_timing() -> None:
         "every reply poll opens its own connection, so transport scales with the answer",
     )
     misconfigured = "\n".join(
-        benchmark.report_lines(collected, {"transport": "misconfigured"})
+        benchmark.report_lines(collected, {"transport": "missing-ssh-host"})
     )
     check(
         "ssh with no host reports the half-configured bridge",
         "brain_host is empty" in misconfigured and "not configured" in misconfigured,
         "the brain row is measuring a refusal, and the report has to say so",
     )
+    sim_missing = "\n".join(
+        benchmark.report_lines(collected, {"transport": "missing-sim-inbox"})
+    )
+    check(
+        "sim with no inbox reports its configuration refusal",
+        "brain_inbox_path is empty" in sim_missing and "not configured" in sim_missing,
+        "error synthesis must not be labelled as a local assistant round trip",
+    )
+    unsupported = "\n".join(
+        benchmark.report_lines(collected, {"transport": "unsupported-transport"})
+    )
+    check(
+        "an unsupported transport reports its configuration refusal",
+        "unsupported" in unsupported and "not a reply" in unsupported,
+        "error synthesis must not be labelled as a local assistant round trip",
+    )
     local = "\n".join(benchmark.report_lines(collected, {"transport": "local"}))
     check(
         "a local brain says so instead of going quiet",
         "no ssh hop" in local,
         "silence would read as an unmeasured hop rather than an absent one",
+    )
+    sim = "\n".join(benchmark.report_lines(collected, {"transport": "sim"}))
+    check(
+        "a simulator is reported separately from a local assistant",
+        "local simulator" in sim and "no live assistant session" in sim,
+        "the benchmark is a simulation, not a conversation round trip",
     )
     check(
         "the hop row carries its own probe count and caveat",
@@ -456,6 +478,14 @@ def test_a_bridge_brain_is_not_written_to_by_accident() -> None:
                     "brain_reply_path": "/tmp/replies",
                     "brain_transport": "sim",
                     "brain_inbox_path": "/tmp/inbox",
+                },
+            ),
+            (
+                "simulation with no inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
                 },
             ),
             (
@@ -692,6 +722,41 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
             and "brain reply path is not configured" in out.getvalue(),
             "the measured brain row is a local refusal and paid no ssh transport",
         )
+
+        for name, cfg, expected in (
+            (
+                "sim with no inbox",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "sim",
+                    "brain_inbox_path": "",
+                },
+                "brain_inbox_path is empty",
+            ),
+            (
+                "unsupported transport",
+                {
+                    "brain_backend": "bridge",
+                    "brain_reply_path": "/tmp/replies",
+                    "brain_transport": "carrier-pigeon",
+                },
+                "brain_transport is unsupported",
+            ),
+        ):
+            stub.load_config = lambda cfg=cfg: {
+                **cfg,
+                "brain_poll_s": 0.5,
+                "wake_word": "hey_jarvis",
+                "wake_threshold": 0.5,
+            }
+            out = io.StringIO()
+            code = run_main(["--runs", "3"], out)
+            check(
+                f"{name} is reported as a refusal, not a local brain",
+                code == 0 and probes == [] and expected in out.getvalue(),
+                "the report must describe the same rejection build_brain applies",
+            )
     finally:
         benchmark.ssh_hop_samples = saved_probe
         benchmark.shutil.which = saved_which
