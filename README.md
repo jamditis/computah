@@ -40,7 +40,7 @@ v0.1.0 has a working file-based pipeline and live microphone loops. Hardware dep
 | Brain | Supports a fallback CLI backend and the persistent file bridge. |
 | Text-to-speech | Works through Piper by writing a reply wav. |
 | Live loop | Implemented for desktop microphones and an ALSA/arecord hardware path. |
-| Custom `computah` wake word | Planned; recording notes live in `docs/recording-computah.md`. |
+| Custom `computah` wake word | The training recipe and recording protocol are documented; the production model is not yet validated. |
 
 ## How the pipeline works
 
@@ -321,7 +321,7 @@ whether text-to-speech is still the largest cost.
 
 ## Roadmap
 
-- Train and ship a custom `computah` openWakeWord model.
+- Train and ship a custom `computah` openWakeWord model using the [reproduction recipe](docs/training-computah.md).
 - Add a live microphone loop with endpointing and playback.
 - Keep Piper loaded between turns.
 - Exercise the bridge against a live assistant session over the network.

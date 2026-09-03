@@ -1,6 +1,6 @@
 # Recording the "computah" wake word
 
-Custom wake-word detection in computah has two trained parts:
+Custom wake-word detection in computah can have two trained parts:
 
 1. The main openWakeWord model, trained on synthesized speech (many TTS voices and
    augmentations). This needs no real recordings.
@@ -8,9 +8,10 @@ Custom wake-word detection in computah has two trained parts:
    one person's voice and pronunciation. This is trained on real recordings of the
    target speaker saying the wake word, plus negatives.
 
-Your recordings train the verifier and double as the real-world evaluation set. The
-point of a custom wake word is that it fires on your pronunciation, not a stock
-phrase, so the recordings should sound like you actually say it.
+computah currently loads only the main ONNX model; it does not pass a verifier to
+openWakeWord yet. Your recordings are the real-world evaluation set now and can train
+the verifier after that integration exists. A custom wake word must fire on your
+pronunciation, so the recordings should sound like you actually say it.
 
 ## How to say it
 
@@ -24,19 +25,28 @@ word.
 
 ## The recordings
 
-About 10 minutes of effort. You can stop after the first file and still get a usable
-verifier; the rest sharpen it.
+About 10 minutes of effort produces a smoke-test set. Record each positive style and
+the near-word negatives in at least two separate sessions, with a new source file for
+each session. A session boundary matters: clips from the same raw recording share the
+same room, microphone, noise, and gain, so they must stay together when the recipe
+splits training from evaluation.
 
 | File | What to do | Reps |
 |------|-----------|------|
-| `computah_normal.wav` | Quiet room, normal voice, at the mic | ~30 |
-| `computah_styles.wav` | Soft, loud, fast, slow drawl, questioning, flat | ~20 |
-| `computah_distance.wav` | 8-10 feet from the mic, normal volume | ~15 |
-| `negatives.wav` | "computer", "commuter", "computing", "compute" (~5 each) | ~20 |
-| `background.wav` | Talk or read for ~2 min; do NOT say "computah" | n/a |
+| `computah_normal_sNN.wav` | Quiet room, normal voice, at the mic | ~30 total |
+| `computah_styles_sNN.wav` | Soft, loud, fast, slow drawl, questioning, flat | ~20 total |
+| `computah_distance_sNN.wav` | 8-10 feet from the mic, normal volume | ~15 total |
+| `negatives_sNN.wav` | "computer", "commuter", "computing", "compute" (~5 each) | ~20 total |
+| `background_sNN.wav` | Talk, read, or capture normal room audio; do NOT say "computah" | 5+ hr held out |
 
-The negatives and background teach the model what not to fire on, which is what
-prevents false triggers.
+The negatives and background measure false triggers now. They can also teach a
+future verifier what not to fire on. A two-minute background take is enough only to
+smoke-test the evaluator. The deployment recipe requires at least five hours of
+held-out non-wake audio: at that duration one false accept equals 0.2 per hour. Use
+substantially more audio, across several sessions and environments, before using
+the rate to select a production threshold. This tuning set is not independent
+deployment evidence; [issue #113](https://github.com/jamditis/computah/issues/113)
+tracks the untouched test set and separate near-word checks needed for that claim.
 
 ## Format
 
@@ -62,11 +72,11 @@ labeled as wake words.
   --output samples/positive --label positive
 
 # hard negatives (segmented on silence)
-.venv/bin/python prep_wake_samples.py --input <folder>/negatives.wav \
+.venv/bin/python prep_wake_samples.py --input <folder>/negatives_*.wav \
   --output samples/negative --label negative
 
 # continuous background (normalized, not segmented)
-.venv/bin/python prep_wake_samples.py --input <folder>/background.wav \
+.venv/bin/python prep_wake_samples.py --input <folder>/background_*.wav \
   --output samples/background --label background
 ```
 
@@ -91,6 +101,6 @@ keep; omitted sources are treated as intentionally dropped.
 ## Training
 
 Training runs externally (openWakeWord 0.4.0 ships no train submodule) on a GPU host.
-The main model is trained from synthetic data; the custom verifier is trained from the
-processed `samples/positive` and `samples/negative` clips. See the training notes once
-the recordings exist.
+The main model is trained from synthetic data. See [the reproducible training
+recipe](training-computah.md) for its pinned source, configuration, three phases,
+held-out split, and validation target.
