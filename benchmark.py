@@ -584,9 +584,7 @@ def main(argv: list[str] | None = None) -> int:
     host = cfg.get("brain_host") or ""
     configured = cfg.get("brain_transport") or "local"
     backend = cfg.get("brain_backend") or "cli"
-    if args.no_ssh:
-        pass
-    elif backend != "bridge":
+    if backend != "bridge":
         # brain() dispatches on brain_backend, so a cli backend never opens the
         # bridge and the measured brain stage was local whatever brain_transport
         # says. Probing on the transport setting alone would add an ssh row to a
@@ -599,6 +597,8 @@ def main(argv: list[str] | None = None) -> int:
         transport = {"transport": issue}
     elif configured != "ssh":
         transport = {"transport": configured}
+    elif args.no_ssh:
+        pass
     elif shutil.which("ssh") is None:
         print("ssh is not on PATH; skipping the transport measurement", file=sys.stderr)
     else:

@@ -834,6 +834,27 @@ def test_main_decides_the_probe_and_the_refusal() -> None:
                 code == 0 and probes == [] and expected in out.getvalue(),
                 "the report must describe the same rejection build_brain applies",
             )
+
+        probes.clear()
+        stub.load_config = lambda: {
+            "brain_backend": "bridge",
+            "brain_reply_path": "/tmp/replies",
+            "brain_transport": "sim",
+            "brain_inbox_path": "/tmp/inbox",
+            "brain_poll_s": 0.5,
+            "wake_word": "hey_jarvis",
+            "wake_threshold": 0.5,
+        }
+        out = io.StringIO()
+        code = run_main(["--runs", "3", "--live-brain", "--no-ssh"], out)
+        check(
+            "--no-ssh keeps the simulator label",
+            code == 0
+            and probes == []
+            and "configured local inbox" in out.getvalue()
+            and "does not prove it is isolated" in out.getvalue(),
+            "--no-ssh skips only the ssh probe, not non-ssh transport reporting",
+        )
     finally:
         benchmark.ssh_hop_samples = saved_probe
         benchmark.shutil.which = saved_which
