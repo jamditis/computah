@@ -205,7 +205,7 @@ proof a Bluetooth link is fine. Prefer USB.
 | --- | --- |
 | `wake_word` | Active openWakeWord model name. |
 | `wake_threshold` | Detection score required before the pipeline continues. |
-| `log_level` | Live-loop log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
+| `log_level` | `pipeline.py --listen` log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `whisper_model` | faster-whisper model size or path. |
 | `whisper_compute` | CTranslate2 compute type, usually `int8` on the target device. |
 | `stt_confidence_guard` | When true, a live turn drops a low-confidence transcript before the brain and speaks a re-prompt. |
