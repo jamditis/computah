@@ -1,6 +1,7 @@
 {
   "wake_word": "hey_jarvis",
   "wake_threshold": 0.5,
+  "log_level": "INFO",
   "wake_chime": false,
   "whisper_model": "tiny.en",
   "whisper_compute": "int8",

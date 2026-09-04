@@ -24,6 +24,7 @@ import argparse
 import collections
 import itertools
 import json
+import logging
 import os
 import re
 import shutil
@@ -90,6 +91,7 @@ _NON_PHRASE = {"timer", "weather"}
 DEFAULTS = {
     "wake_word": "hey_jarvis",
     "wake_threshold": 0.5,
+    "log_level": "INFO",
     "whisper_model": "tiny.en",
     "whisper_compute": "int8",
     # Mishear guard: gate a transcript on faster-whisper's confidence before it
@@ -160,6 +162,12 @@ DEFAULTS = {
     "brain_poll_s": 0.5,
 }
 
+WAKE_LOGGER = logging.getLogger("computah.wake")
+STT_LOGGER = logging.getLogger("computah.stt")
+BRAIN_LOGGER = logging.getLogger("computah.brain")
+TTS_LOGGER = logging.getLogger("computah.tts")
+_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
 VOICE_SYSTEM_PROMPT = (
     "You are a local voice assistant. Answer in one or two short, plain spoken "
     "sentences. No markdown, no bullet points, no code blocks, no emoji."
@@ -213,6 +221,19 @@ _piper_cache: dict[str, object] = {}
 # --------------------------------------------------------------------------- #
 # Config + wake-word library
 # --------------------------------------------------------------------------- #
+def configure_logging(level: str) -> None:
+    """Configure the live service's stream-only logger once per process."""
+    root = logging.getLogger("computah")
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+        )
+        root.addHandler(handler)
+    root.setLevel(level)
+    root.propagate = False
+
+
 def load_config() -> dict:
     """Read config, filling any missing key from DEFAULTS.
 
@@ -298,6 +319,16 @@ def validate_config(cfg: dict) -> dict:
     for key in ("claude_timeout_s", "brain_timeout_s"):
         if key in cfg and not _is_positive_int(cfg[key]):
             fall_back(key, "must be a positive integer")
+
+    if "log_level" in cfg:
+        if not isinstance(cfg["log_level"], str):
+            fall_back("log_level", "must be a string level name")
+        else:
+            log_level = cfg["log_level"].upper()
+            if log_level not in _LOG_LEVELS:
+                fall_back("log_level", f"must be one of {sorted(_LOG_LEVELS)}")
+            else:
+                cfg["log_level"] = log_level
 
     # Whisper compute type: a typo, or a type this CPU backend can't load, otherwise
     # surfaces deep in _get_whisper. Reject non-strings before the membership test, since a
@@ -1650,6 +1681,7 @@ def run_turn(
     would only discard. It fires whether or not speech was found, so the caller can
     pair every call with a resume.
     """
+    turn_started = time.monotonic()
     cfg = load_config()
     model_name = model_name or cfg["wake_word"]
     threshold = cfg["wake_threshold"] if threshold is None else threshold
@@ -1659,9 +1691,16 @@ def run_turn(
     # Keep the most recent frames during detection so the request's leading audio,
     # consumed while the detector was crossing threshold, is recovered (issue #30).
     wake_audio = WakeAudioBuffer()
+    stage_started = time.monotonic()
     score = stream_detect_wake(frames, model, threshold, preroll=wake_audio)
     if score is None:
         return None
+    timings = {"detect_wake": time.monotonic() - stage_started}
+    WAKE_LOGGER.info("Turn started wake_word=%s", model_name)
+    WAKE_LOGGER.debug("Wake score=%.4f", score)
+    WAKE_LOGGER.info(
+        "Stage finished stage=detect_wake duration_s=%.3f", timings["detect_wake"]
+    )
 
     # The wake fired. Acknowledge it now -- after detection, before capture -- so a
     # live loop can chime "listening" (issue #41). on_wake runs only on a real wake,
@@ -1696,6 +1735,7 @@ def run_turn(
             # (issues #30, #55).
             capture_frames = itertools.chain(peeked, frames)
 
+    stage_started = time.monotonic()
     request_pcm = capture_request(
         capture_frames,
         preroll=list(wake_audio.preroll),
@@ -1703,23 +1743,52 @@ def run_turn(
         endpoint_silence_ms=cfg["endpoint_silence_ms"],
         max_request_ms=cfg["max_request_ms"],
     )
+    timings["capture"] = time.monotonic() - stage_started
+    WAKE_LOGGER.info("Stage finished stage=capture duration_s=%.3f", timings["capture"])
     # Listening for this turn is done. Let a live loop stop the mic now, before the
     # slow stages below, so it does not buffer (then throw away) input recorded
     # while the assistant is thinking and speaking.
     if on_capture is not None:
         on_capture()
     if request_pcm.size == 0:
-        if getattr(request_pcm, "empty_reason", None) != _EMPTY_NO_ONSET:
+        empty_reason = getattr(request_pcm, "empty_reason", None)
+        if empty_reason != _EMPTY_NO_ONSET:
+            WAKE_LOGGER.info(
+                "Turn ignored reason=%s total_s=%.3f",
+                empty_reason or "empty_capture",
+                time.monotonic() - turn_started,
+            )
             return None  # VAD rejection or an unknown empty result stays fail-closed
+        stage_started = time.monotonic()
         heard = recover_consumed_command(wake_audio.history, model_name)
         if heard is None:
+            timings["transcribe"] = time.monotonic() - stage_started
+            STT_LOGGER.info(
+                "Stage finished stage=transcribe duration_s=%.3f",
+                timings["transcribe"],
+            )
+            WAKE_LOGGER.info(
+                "Turn ignored reason=no_command total_s=%.3f",
+                time.monotonic() - turn_started,
+            )
             return None  # bare/false wake, or no recoverable command — ignore the turn
     else:
         # faster-whisper accepts a normalized waveform, so transcribe captured PCM in
         # memory instead of serializing each live request through a temporary WAV.
+        stage_started = time.monotonic()
         heard = transcribe_detailed(request_pcm)
 
+    timings["transcribe"] = time.monotonic() - stage_started
+    STT_LOGGER.info(
+        "Stage finished stage=transcribe duration_s=%.3f", timings["transcribe"]
+    )
+    STT_LOGGER.debug("Transcript text=%r", heard.text)
+
     if not heard.text.strip():
+        WAKE_LOGGER.info(
+            "Turn ignored reason=empty_transcript total_s=%.3f",
+            time.monotonic() - turn_started,
+        )
         return None  # captured audio whisper read as no words (noise) — ignore
 
     if out_wav_path is None:
@@ -1732,7 +1801,15 @@ def run_turn(
     # is never called, so a garbled word cannot trigger an action.
     ok, reason = guard_transcript(heard, cfg)
     if not ok:
+        STT_LOGGER.info("Transcript rejected reason=%s", reason)
+        stage_started = time.monotonic()
         speak(STT_REPROMPT, out_wav_path)
+        timings["speak"] = time.monotonic() - stage_started
+        timings["total"] = time.monotonic() - turn_started
+        TTS_LOGGER.info("Stage finished stage=speak duration_s=%.3f", timings["speak"])
+        WAKE_LOGGER.info(
+            "Turn finished rejected=low_confidence total_s=%.3f", timings["total"]
+        )
         return {
             "wake_word": model_name,
             "wake_score": round(score, 4),
@@ -1741,16 +1818,27 @@ def run_turn(
             "output_wav": out_wav_path,
             "rejected": "low_confidence",
             "reject_reason": reason,
+            "timings_s": {key: round(value, 3) for key, value in timings.items()},
         }
 
+    stage_started = time.monotonic()
     reply = brain(heard.text)
+    timings["brain"] = time.monotonic() - stage_started
+    BRAIN_LOGGER.info("Stage finished stage=brain duration_s=%.3f", timings["brain"])
+    BRAIN_LOGGER.debug("Reply text=%r", reply)
+    stage_started = time.monotonic()
     speak(reply, out_wav_path)
+    timings["speak"] = time.monotonic() - stage_started
+    timings["total"] = time.monotonic() - turn_started
+    TTS_LOGGER.info("Stage finished stage=speak duration_s=%.3f", timings["speak"])
+    WAKE_LOGGER.info("Turn finished total_s=%.3f", timings["total"])
     return {
         "wake_word": model_name,
         "wake_score": round(score, 4),
         "transcript": heard.text,
         "reply": reply,
         "output_wav": out_wav_path,
+        "timings_s": {key: round(value, 3) for key, value in timings.items()},
     }
 
 
@@ -1784,32 +1872,40 @@ def warm_models(
     voice_onnx = VOICES_DIR / f"{cfg['voice_model']}.onnx"
     # In first-turn order: wake fires, the VAD confirms the captured command, whisper
     # transcribes it, and Piper speaks the reply.
-    loaders: list[tuple[str, Callable[[], object]]] = [
-        ("wake", lambda: _get_oww_model(_resolve_wake_path(wake_word))),
-        ("vad", lambda: _get_vad()),
-        ("whisper", lambda: _get_whisper(cfg["whisper_model"], cfg["whisper_compute"])),
-        ("piper", lambda: _get_piper(str(voice_onnx))),
+    loaders: list[tuple[str, logging.Logger, Callable[[], object]]] = [
+        ("wake", WAKE_LOGGER, lambda: _get_oww_model(_resolve_wake_path(wake_word))),
+        ("vad", WAKE_LOGGER, lambda: _get_vad()),
+        (
+            "whisper",
+            STT_LOGGER,
+            lambda: _get_whisper(cfg["whisper_model"], cfg["whisper_compute"]),
+        ),
+        ("piper", TTS_LOGGER, lambda: _get_piper(str(voice_onnx))),
     ]
     warmed: dict[str, float] = {}
-    for label, load in loaders:
+    for label, logger, load in loaders:
         t0 = time.time()
         try:
             load()
         except Exception as exc:  # noqa: BLE001 - one bad model must not stop the loop or the others
             if label == "piper" and not voice_onnx.exists():
-                print(
-                    f"  warm {label}: failed (voice model not found: {voice_onnx}. download with "
-                    f"`python -m piper.download_voices {cfg['voice_model']} --download-dir voices`); "
-                    "will load lazily on first use"
+                logger.warning(
+                    "Model warm failed stage=%s reason=voice_model_missing path=%s "
+                    "action='python -m piper.download_voices %s --download-dir voices'",
+                    label,
+                    voice_onnx,
+                    cfg["voice_model"],
                 )
             else:
-                print(
-                    f"  warm {label}: failed ({type(exc).__name__}: {exc}); "
-                    "will load lazily on first use"
+                logger.warning(
+                    "Model warm failed stage=%s error=%s detail=%s",
+                    label,
+                    type(exc).__name__,
+                    exc,
                 )
             continue
         warmed[label] = time.time() - t0
-        print(f"  warm {label}: {warmed[label]:.2f}s")
+        logger.info("Model warmed stage=%s duration_s=%.3f", label, warmed[label])
     return warmed
 
 
@@ -1838,6 +1934,7 @@ def run_loop(
     import chime  # the wake-acknowledgment cue (pure DSP; no audio backend)
 
     cfg = load_config()
+    configure_logging(cfg.get("log_level", DEFAULTS["log_level"]))
     wake_word = wake_word or cfg["wake_word"]
     if mic_name is None:
         mic_name = cfg.get("mic_device") or None
@@ -1855,9 +1952,8 @@ def run_loop(
         try:
             cue_wav = chime.wake_cue_wav()
         except Exception as e:  # noqa: BLE001 - the chime is optional, never fatal
-            print(
-                f"  wake chime unavailable ({type(e).__name__}: {e}); "
-                "continuing without it"
+            WAKE_LOGGER.warning(
+                "Wake chime unavailable error=%s detail=%s", type(e).__name__, e
             )
 
     # Warm the models before listening so the first turn is as fast as the rest
@@ -1865,16 +1961,20 @@ def run_loop(
     t0 = time.time()
     warmed = warm_models(cfg, wake_word)
     elapsed = time.time() - t0
-    print(f"warmed {len(warmed)} models in {elapsed:.1f}s")
+    WAKE_LOGGER.info("Models warmed count=%d duration_s=%.3f", len(warmed), elapsed)
 
+    # Keep these two startup notices on stdout for existing operators and callers;
+    # the structured records alongside them feed the persistent service log.
     print(f"computah listening -- wake word: {wake_word}. Ctrl-C to stop.")
+    WAKE_LOGGER.info("Listening wake_word=%s", wake_word)
     with audio.Microphone(mic_name) as mic:
-        print(f"mic: {mic.device_label}")
+        WAKE_LOGGER.info("Microphone opened device=%r", mic.device_label)
         # Say it once, here, while someone is still watching the terminal: a bad
         # capture device does not announce itself later, since only the transcript
         # is wrong (issue #34). Warn and continue -- it still serves wake fine.
         if mic.capture_risk is not None:
             print(f"  WARNING: {mic.capture_risk.message}")
+            WAKE_LOGGER.warning("Capture risk detail=%s", mic.capture_risk.message)
         frames = mic.frames()
         paused = False
 
@@ -1907,9 +2007,10 @@ def run_loop(
                 # retrying the same broken output on every wake would repeat the loss.
                 # Disable it until restart so later turns use no-chime semantics.
                 cue_wav = None
-                print(
-                    f"  wake chime failed ({type(e).__name__}: {e}); "
-                    "disabled until restart"
+                WAKE_LOGGER.warning(
+                    "Wake chime failed error=%s detail=%s action='disabled until restart'",
+                    type(e).__name__,
+                    e,
                 )
             else:
                 mic.flush()
@@ -1929,13 +2030,6 @@ def run_loop(
                     on_wake=chime_for_turn if cue_wav else None,
                 )
                 if result is not None:
-                    print(f"  heard: {result['transcript']!r}")
-                    if result.get("rejected") == "low_confidence":
-                        print(
-                            "  low confidence, re-prompting "
-                            f"({result.get('reject_reason')})"
-                        )
-                    print(f"  reply: {result['reply']!r}")
                     # A dead or busy output device on the reply must degrade, never crash
                     # the always-on loop -- the same guarantee the wake chime above and
                     # live_driver.run_turn (issue #11) already hold. The reply is saved at
@@ -1943,9 +2037,11 @@ def run_loop(
                     try:
                         audio.play_wav(out_wav, output_name)
                     except Exception as e:  # noqa: BLE001 - degrade to the saved WAV, never crash
-                        print(
-                            f"  reply playback failed ({type(e).__name__}: {e}); "
-                            f"reply WAV at {out_wav}"
+                        TTS_LOGGER.warning(
+                            "Reply playback failed error=%s detail=%s reply_wav=%s",
+                            type(e).__name__,
+                            e,
+                            out_wav,
                         )
                 if paused:
                     # A turn was captured (mic stopped before the slow stages).
@@ -1960,10 +2056,10 @@ def run_loop(
                 elif not mic.active():
                     # run_turn returned without capturing a request and the stream
                     # is no longer delivering frames: the device ended. Stop.
-                    print("mic stream ended; stopping")
+                    WAKE_LOGGER.info("Microphone stream ended")
                     break
         except KeyboardInterrupt:
-            print("\nstopped.")
+            WAKE_LOGGER.info("Stopped by operator")
 
 
 def _cli() -> int:
