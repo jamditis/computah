@@ -139,6 +139,7 @@ python -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python test_brain_bridge.py      # bridge logic — fast, no models
 .venv/bin/python test_brain_dispatch.py    # config selects the backend — fast, no models
 .venv/bin/python test_confidence_guard.py  # mishear guard decision + aggregation — fast, no models
+.venv/bin/python test_logging.py           # stage timings, log levels, content retention — fast, no models
 .venv/bin/python test_preroll.py           # pre-roll buffer keeps a no-pause request's leading audio — fast, no models
 .venv/bin/python test_endpoint_config.py   # endpoint_silence_ms / max_request_ms tune capture endpointing — fast, no models
 .venv/bin/python test_capture_quality.py   # capture-device suitability verdicts + the startup warning — fast, no models, no PortAudio

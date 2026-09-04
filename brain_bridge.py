@@ -46,7 +46,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("computah.brain")
 
 # A FileOutbound block header line: "--- <ts> delivery_id=<id> ---", optionally
 # carrying the originating request's "event_id=<id>" so a reply can be matched to its
@@ -176,6 +176,7 @@ def brain_via_bridge(
     try:
         send(persona, prompt, event_id=event_id)
     except Exception as e:  # transport failure (ssh down, CLI missing, ...)
+        logger.warning("Brain send failed error=%s", type(e).__name__)
         return f"Sorry, I couldn't reach the brain ({type(e).__name__})."
 
     # A send can exit 0 yet dead-letter to an inbox the session never reads (#44):
@@ -245,6 +246,12 @@ def brain_via_bridge(
                 return payload
         time.sleep(poll_s)
     cursor.misses += 1
+    logger.warning(
+        "Brain reply timed out persona=%r timeout_s=%s consecutive_misses=%d",
+        persona,
+        timeout_s,
+        cursor.misses,
+    )
     return "Sorry, the brain took too long to answer."
 
 

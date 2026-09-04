@@ -117,6 +117,26 @@ def test_timeout_valid_untouched() -> None:
     )
 
 
+# --- log level --------------------------------------------------------------- #
+
+
+def test_log_level_validation() -> None:
+    for good, expected in (("DEBUG", "DEBUG"), ("warning", "WARNING")):
+        cfg, err = validate({"log_level": good})
+        check(
+            f"log_level {good!r} normalized",
+            cfg["log_level"] == expected and err == "",
+            f"got {cfg['log_level']!r}, no warning: {err == ''}",
+        )
+    for bad in ("verbose", 10, True):
+        cfg, err = validate({"log_level": bad})
+        check(
+            f"log_level {bad!r} -> default",
+            cfg["log_level"] == DEFAULTS["log_level"] and "log_level" in err,
+            f"got {cfg['log_level']!r}",
+        )
+
+
 # --- whisper_compute enum ---------------------------------------------------- #
 
 
@@ -306,6 +326,7 @@ def main() -> int:
         test_stt_max_no_speech_prob_sibling()
         test_timeout_bad_values()
         test_timeout_valid_untouched()
+        test_log_level_validation()
         test_whisper_compute_unknown()
         test_whisper_compute_valid_untouched()
         test_whisper_compute_unsupported_backend_type_falls_back()

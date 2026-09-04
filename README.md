@@ -205,6 +205,7 @@ proof a Bluetooth link is fine. Prefer USB.
 | --- | --- |
 | `wake_word` | Active openWakeWord model name. |
 | `wake_threshold` | Detection score required before the pipeline continues. |
+| `log_level` | `pipeline.py --listen` log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `whisper_model` | faster-whisper model size or path. |
 | `whisper_compute` | CTranslate2 compute type, usually `int8` on the target device. |
 | `stt_confidence_guard` | When true, a live turn drops a low-confidence transcript before the brain and speaks a re-prompt. |
@@ -216,6 +217,11 @@ proof a Bluetooth link is fine. Prefer USB.
 | `claude_timeout_s` | Timeout for the fallback CLI brain. |
 
 Use `config.local.json` for machine-specific bridge values. It is gitignored and merged over `config.json`, so private hostnames, usernames, and assistant paths do not leak into commits.
+
+The `pipeline.py --listen` loop writes stage and timing records to stderr. Wake
+scores, spoken transcripts, and replies appear only at `DEBUG`; the default
+`INFO` level does not retain that content, and the built-in handler does not
+write a log file.
 
 ## Custom wake words
 
@@ -235,6 +241,7 @@ Start with the fast tests. They do not load speech models:
 .venv/bin/python test_brain_bridge.py
 .venv/bin/python test_brain_dispatch.py
 .venv/bin/python test_confidence_guard.py
+.venv/bin/python test_logging.py
 .venv/bin/python test_prep_wake_samples.py
 ```
 

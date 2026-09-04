@@ -14,8 +14,7 @@ Exit code is 0 only if every check passes.
 
 from __future__ import annotations
 
-import contextlib
-import io
+import logging
 import sys
 import types
 
@@ -172,10 +171,16 @@ def test_failed_wake_chime_stays_disabled() -> None:
     sys.modules["audio"] = fake_audio
     sys.modules["chime"] = fake_chime
 
-    output = io.StringIO()
+    records: list[logging.LogRecord] = []
+
+    class _ListHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _ListHandler()
+    logging.getLogger("computah").addHandler(handler)
     try:
-        with contextlib.redirect_stdout(output):
-            pipeline.run_loop()
+        pipeline.run_loop()
         check(
             "a failed cue is attempted only once across later turns",
             state["cue_calls"] == 1 and state["hook_presence"] == [True, False],
@@ -183,10 +188,11 @@ def test_failed_wake_chime_stays_disabled() -> None:
         )
         check(
             "the operator is told the cue stays disabled until restart",
-            "disabled until restart" in output.getvalue(),
-            output.getvalue().strip(),
+            any("disabled until restart" in record.getMessage() for record in records),
+            "; ".join(record.getMessage() for record in records),
         )
     finally:
+        logging.getLogger("computah").removeHandler(handler)
         pipeline.load_config = saved_load
         pipeline.warm_models = saved_warm
         pipeline.run_turn = saved_run_turn
