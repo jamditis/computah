@@ -10,8 +10,8 @@ without relaunching the process.
   sudo arecord -D plughw:CARD=PowerConf,DEV=0 -f S16_LE -r 16000 -c 1 -t raw \
     | .venv/bin/python live_driver.py --debug
 
--v/--debug adds per-frame rms+score telemetry to stderr (use it to see why a wake
-did or did not fire). Without it, only a one-line summary per turn is printed.
+-v/--debug sets the live logger to DEBUG and adds per-frame rms+score telemetry
+to stderr (use it to see why a wake did or did not fire).
 
 This is the real-hardware counterpart to the mic-free streaming proof in
 test_stream_turn.py, which drives pipeline.stream_detect_wake and capture_request
@@ -38,10 +38,6 @@ import chime
 
 _DRAIN_FRAMES = 25  # ~2 s discarded after a turn: clears stale/echo audio from the
 # pipe buffer so the spoken reply is not re-heard as the next wake
-
-
-def log(msg: str) -> None:
-    print(f"[computah] {msg}", file=sys.stderr, flush=True)
 
 
 def _resolve_output_pcm(cli_output_device: str | None, cfg: dict) -> str | None:
@@ -177,7 +173,9 @@ def listen_for_wake(frames, model, threshold: float, debug: bool, preroll=None):
         score = max(float(s) for s in model.predict(frame).values())
         if debug and (score > 0.2 or i % 100 == 0):
             rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
-            log(f"f{i} rms={rms:.0f} score={score:.3f}")
+            pipeline.WAKE_LOGGER.debug(
+                "Wake telemetry frame=%d rms=%.0f score=%.3f", i, rms, score
+            )
         if score >= threshold:
             return score
     return None
@@ -207,13 +205,20 @@ def run_turn(
     mic bleed (issue #56). Returns True if a turn ran (or was correctly skipped as
     noise), False only when the input stream ended and the loop should stop.
     """
+    turn_started = time.monotonic()
     # Keep the most recent frames during detection so the request's leading audio,
     # consumed while the detector crossed threshold, is recovered (issue #30).
     wake_audio = pipeline.WakeAudioBuffer()
+    stage_started = time.monotonic()
     score = listen_for_wake(frames, model, threshold, debug, preroll=wake_audio)
     if score is None:
         return False
-    log(f"wake fired (score={score:.3f})")
+    timings = {"detect_wake": time.monotonic() - stage_started}
+    pipeline.WAKE_LOGGER.info("Turn started")
+    pipeline.WAKE_LOGGER.debug("Wake score=%.4f", score)
+    pipeline.WAKE_LOGGER.info(
+        "Stage finished stage=detect_wake duration_s=%.3f", timings["detect_wake"]
+    )
 
     # Acknowledge the wake with a cue before capture (issue #41), but only when the
     # user paused after the wake word (issue #55). arecord cannot be paused, so on a
@@ -257,9 +262,10 @@ def run_turn(
                 # window (#58); disable the optional cue after its first failure so
                 # later turns use the no-chime path instead of repeating the loss.
                 cfg["wake_chime"] = False
-                log(
-                    f"wake chime failed ({type(e).__name__}: {e}); "
-                    "disabled until restart"
+                pipeline.WAKE_LOGGER.warning(
+                    "Wake chime failed error=%s detail=%s action='disabled until restart'",
+                    type(e).__name__,
+                    e,
                 )
             else:
                 mic.flush()
@@ -273,12 +279,14 @@ def run_turn(
                 # the brain (issue #41).
                 wake_audio.clear()
                 cue_boundary = True
-                log(
-                    f"wake cue gate: play ({len(peeked)} peeked frames; "
-                    "capture boundary established)"
+                pipeline.WAKE_LOGGER.debug(
+                    "Wake cue played peeked_frames=%d capture_boundary=true",
+                    len(peeked),
                 )
         else:
-            log(f"wake cue gate: skip ({len(peeked)} peeked frames; speech detected)")
+            pipeline.WAKE_LOGGER.debug(
+                "Wake cue skipped peeked_frames=%d reason=speech_detected", len(peeked)
+            )
         if not cue_boundary:
             # Either a no-pause command (cue skipped so it cannot clip the command) or a
             # cue that failed to establish a boundary (nothing flushed, buffered audio
@@ -287,6 +295,7 @@ def run_turn(
             # (issues #30, #55, #58).
             capture_frames = itertools.chain(peeked, frames)
 
+    stage_started = time.monotonic()
     request_pcm = pipeline.capture_request(
         capture_frames,
         preroll=list(wake_audio.preroll),
@@ -294,42 +303,82 @@ def run_turn(
         endpoint_silence_ms=cfg["endpoint_silence_ms"],
         max_request_ms=cfg["max_request_ms"],
     )
+    timings["capture"] = time.monotonic() - stage_started
+    pipeline.WAKE_LOGGER.info(
+        "Stage finished stage=capture duration_s=%.3f", timings["capture"]
+    )
     if request_pcm.size == 0:
-        if getattr(request_pcm, "empty_reason", None) != pipeline._EMPTY_NO_ONSET:
-            log("post-wake audio was rejected — ignoring")
+        empty_reason = getattr(request_pcm, "empty_reason", None)
+        if empty_reason != pipeline._EMPTY_NO_ONSET:
+            pipeline.WAKE_LOGGER.info(
+                "Turn ignored reason=%s total_s=%.3f",
+                empty_reason or "empty_capture",
+                time.monotonic() - turn_started,
+            )
             return True
+        stage_started = time.monotonic()
         heard = pipeline.recover_consumed_command(wake_audio.history, cfg["wake_word"])
         if heard is None:
-            log("wake fired but no recoverable command followed — ignoring")
+            timings["transcribe"] = time.monotonic() - stage_started
+            pipeline.STT_LOGGER.info(
+                "Stage finished stage=transcribe duration_s=%.3f",
+                timings["transcribe"],
+            )
+            pipeline.WAKE_LOGGER.info(
+                "Turn ignored reason=no_command total_s=%.3f",
+                time.monotonic() - turn_started,
+            )
             return True
-        log(f"recovered consumed command: {heard.text!r}")
     else:
-        log(f"captured {request_pcm.size / 16000:.2f}s of speech")
         # The captured int16 PCM is normalized by transcribe_detailed and sent straight
         # to faster-whisper; no request-side temporary WAV is needed.
+        stage_started = time.monotonic()
         heard = pipeline.transcribe_detailed(request_pcm)
+    timings["transcribe"] = time.monotonic() - stage_started
+    pipeline.STT_LOGGER.info(
+        "Stage finished stage=transcribe duration_s=%.3f", timings["transcribe"]
+    )
+    pipeline.STT_LOGGER.debug("Transcript text=%r", heard.text)
     if not heard.text.strip():
-        log("empty transcript (noise) — ignoring")
+        pipeline.WAKE_LOGGER.info(
+            "Turn ignored reason=empty_transcript total_s=%.3f",
+            time.monotonic() - turn_started,
+        )
         return True
-    log(f"you said: {heard.text!r}")
 
     # Mishear guard: this is the real-hardware path to the action-capable brain, so
     # a low-confidence transcript must not be dispatched. On a reject, speak the
     # re-prompt and skip the brain, so a garbled command never triggers an action.
     ok, reason = pipeline.guard_transcript(heard, cfg)
     if not ok:
-        log(f"low-confidence transcript ({reason}) — re-prompting, not dispatching")
+        pipeline.STT_LOGGER.info("Transcript rejected reason=%s", reason)
         reply = pipeline.STT_REPROMPT
     else:
-        t0 = time.monotonic()
+        stage_started = time.monotonic()
         reply = pipeline.brain(heard.text)
-        log(f"brain ({time.monotonic() - t0:.1f}s): {reply!r}")
+        timings["brain"] = time.monotonic() - stage_started
+        pipeline.BRAIN_LOGGER.info(
+            "Stage finished stage=brain duration_s=%.3f", timings["brain"]
+        )
+        pipeline.BRAIN_LOGGER.debug("Reply text=%r", reply)
 
+    stage_started = time.monotonic()
     pipeline.speak(reply, out_wav)
+    timings["speak"] = time.monotonic() - stage_started
+    pipeline.TTS_LOGGER.info(
+        "Stage finished stage=speak duration_s=%.3f", timings["speak"]
+    )
     try:
         _play_wav(out_wav, output_device)
     except Exception as e:  # noqa: BLE001 - degrade to a saved WAV, never crash
-        log(f"playback failed ({type(e).__name__}: {e}); reply WAV at {out_wav}")
+        pipeline.TTS_LOGGER.warning(
+            "Reply playback failed error=%s detail=%s reply_wav=%s",
+            type(e).__name__,
+            e,
+            out_wav,
+        )
+    timings["total"] = time.monotonic() - turn_started
+    pipeline.WAKE_LOGGER.info("Turn finished total_s=%.3f", timings["total"])
     return True
 
 
@@ -345,7 +394,7 @@ def main() -> int:
         "-v",
         "--debug",
         action="store_true",
-        help="per-frame rms+score telemetry to stderr",
+        help="set log level to DEBUG and add per-frame rms+score telemetry",
     )
     ap.add_argument(
         "-o",
@@ -364,6 +413,9 @@ def main() -> int:
         os.close(fd)
 
     cfg = pipeline.load_config()
+    pipeline.configure_logging(
+        "DEBUG" if args.debug else cfg.get("log_level", pipeline.DEFAULTS["log_level"])
+    )
     output_pcm = _resolve_output_pcm(args.output_device, cfg)
     name = cfg["wake_word"]
     threshold = cfg["wake_threshold"]
@@ -373,7 +425,9 @@ def main() -> int:
     # the only buffer between the pipe and a frame — see StdinMic (issue #56).
     mic = StdinMic(sys.stdin.fileno())
     frames = mic.frames()
-    log(f"listening; wake={name!r} thr={threshold} (say '{name} ...'); ctrl-c to stop")
+    pipeline.WAKE_LOGGER.info(
+        "Listening wake_word=%s threshold=%.3f action='Ctrl-C to stop'", name, threshold
+    )
 
     turn = 0
     try:
@@ -388,13 +442,13 @@ def main() -> int:
                 cfg,
                 args.debug,
             ):
-                log("input stream ended — exiting")
+                pipeline.WAKE_LOGGER.info("Input stream ended")
                 break
             turn += 1
             drain(frames, _DRAIN_FRAMES)
-            log(f"--- turn {turn} done; listening again ---")
+            pipeline.WAKE_LOGGER.info("Listening again turn=%d", turn)
     except KeyboardInterrupt:
-        log("stopped")
+        pipeline.WAKE_LOGGER.info("Stopped by operator")
     finally:
         # Remove the reply WAV only when we created it; a user-supplied path is theirs.
         if auto_wav:
