@@ -7,7 +7,7 @@ Type=simple
 WorkingDirectory=%h/computah
 ExecStart=%h/computah/.venv/bin/computah --listen
 Environment=PYTHONUNBUFFERED=1
-Restart=on-failure
+Restart=always
 RestartSec=3
 MemoryMax=1500M
 MemorySwapMax=0

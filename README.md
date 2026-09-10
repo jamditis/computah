@@ -151,9 +151,10 @@ Run the desktop microphone loop in the foreground:
 ## Run at startup
 
 `docs/computah.service` is a sample systemd user unit. It restarts the live loop
-after a failure and applies the same 1.5 GB memory and no-swap limits used by the
-project's model tests. The sample expects this checkout at `~/computah` with the
-editable install in `~/computah/.venv`. If either path differs, edit
+after a failure or a clean device-stream exit and applies the same 1.5 GB memory
+and no-swap limits used by the project's model tests. The sample expects this
+checkout at `~/computah` with the editable install in `~/computah/.venv`. If
+either path differs, edit
 `WorkingDirectory` and `ExecStart` in the copied unit.
 
 ```bash
