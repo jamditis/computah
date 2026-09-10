@@ -98,9 +98,13 @@ The project is developed on Linux/ARM64 with Python 3.13 on a Raspberry Pi 5. Ot
 
 ```bash
 python -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -e .
 .venv/bin/python -m piper.download_voices en_US-lessac-medium --download-dir voices
 ```
+
+The editable install reads the pinned dependencies from `requirements.txt`, adds
+the `.venv/bin/computah` command, and keeps configuration and model paths anchored
+to this checkout. It does not put model files in the Python package.
 
 faster-whisper downloads its model into `whisper_models/` on first use. Piper voices live in `voices/`. Custom wake-word models live in `models/`. These files are local artifacts and are not committed.
 
@@ -109,13 +113,13 @@ faster-whisper downloads its model into `whisper_models/` on first use. Piper vo
 List available wake words:
 
 ```bash
-.venv/bin/python pipeline.py --list-wake-words
+.venv/bin/computah --list-wake-words
 ```
 
 Switch the active wake word and persist it to `config.json`:
 
 ```bash
-.venv/bin/python pipeline.py --set-wake-word hey_jarvis
+.venv/bin/computah --set-wake-word hey_jarvis
 ```
 
 Use `--local` to persist the choice to the gitignored `config.local.json`
@@ -124,7 +128,7 @@ instead, so a deployment can activate its own wake word (often a gitignored
 runs with:
 
 ```bash
-.venv/bin/python pipeline.py --set-wake-word computah --local
+.venv/bin/computah --set-wake-word computah --local
 ```
 
 `config.local.json` overrides `config.json` at runtime, so the local choice
@@ -133,10 +137,40 @@ wins while the committed default stays a built-in.
 Run the pipeline on a wav file:
 
 ```bash
-.venv/bin/python pipeline.py clip.wav -o reply.wav
+.venv/bin/computah clip.wav -o reply.wav
 ```
 
 The output path receives the spoken reply.
+
+Run the desktop microphone loop in the foreground:
+
+```bash
+.venv/bin/computah --listen
+```
+
+## Run at startup
+
+`docs/computah.service` is a sample systemd user unit. It restarts the live loop
+after a failure and applies the same 1.5 GB memory and no-swap limits used by the
+project's model tests. The sample expects this checkout at `~/computah` with the
+editable install in `~/computah/.venv`. If either path differs, edit
+`WorkingDirectory` and `ExecStart` in the copied unit.
+
+```bash
+mkdir -p ~/.config/systemd/user
+cp docs/computah.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now computah.service
+sudo loginctl enable-linger "$USER"
+```
+
+Linger lets the user service start at boot and continue without an active login.
+Check the process and follow its logs with:
+
+```bash
+systemctl --user status computah.service
+journalctl --user -u computah.service -f
+```
 
 ## Choosing a microphone
 
@@ -243,6 +277,7 @@ Start with the fast tests. They do not load speech models:
 .venv/bin/python test_brain_dispatch.py
 .venv/bin/python test_confidence_guard.py
 .venv/bin/python test_logging.py
+.venv/bin/python test_package_entry.py
 .venv/bin/python test_prep_wake_samples.py
 ```
 

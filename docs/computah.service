@@ -1,0 +1,16 @@
+[Unit]
+Description=computah voice assistant live loop
+Documentation=https://github.com/jamditis/computah#readme
+
+[Service]
+Type=simple
+WorkingDirectory=%h/computah
+ExecStart=%h/computah/.venv/bin/computah --listen
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=3
+MemoryMax=1500M
+MemorySwapMax=0
+
+[Install]
+WantedBy=default.target

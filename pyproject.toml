@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "computah"
+version = "0.1.0"
+description = "Local wake-word voice assistant"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dynamic = ["dependencies"]
+
+[project.scripts]
+computah = "pipeline:_cli"
+
+[tool.setuptools]
+py-modules = [
+  "audio",
+  "brain_bridge",
+  "capture_quality",
+  "chime",
+  "live_driver",
+  "pipeline",
+  "playback_abort",
+]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
