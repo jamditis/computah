@@ -12,18 +12,16 @@ bot-spren is message-passing, not request/response:
   - reply: when the persona finishes a turn, its Stop hook delivers the response
     to an outbound adapter. A FileOutbound appends a block to a reply file:
 
-        --- <iso-ts> delivery_id=<id> ---
+        --- <iso-ts> delivery_id=<id> event_id=<request-id> ---
         <reply text>
 
-The reply can echo the request's event_id in its header ("event_id=<id>"), so
-brain_via_bridge() matches a reply to its request by identity (#19). When the field
-is absent — the producer does not stamp it yet — it falls back to positional
-correlation with a persistent cursor (ReplyCursor): each send reserves the next
-reply slot, and the turn reads the block at that slot. Voice turns are serialized,
-and a send reserves its slot even when it times out, so a late reply from a timed-out
-turn fills its own reserved slot and is skipped — it is not mis-read as the next
-turn's answer. The parser tolerates the optional event_id token whether or not a
-producer emits it, so the bridge can ship before the producer side.
+The reply echoes the request's event_id in its header ("event_id=<id>"), so
+brain_via_bridge() matches a reply to its request by identity (#19). When an older
+producer omits the field, the bridge falls back to positional correlation with a
+persistent cursor (ReplyCursor): each send reserves the next reply slot, and the
+turn reads the block at that slot. Voice turns are serialized, and a send reserves
+its slot even when it times out, so a late reply from a timed-out turn fills its own
+reserved slot and is skipped. Keeping event_id optional supports a rolling upgrade.
 
 Transport is injected so the same logic works in three settings:
   - persona on this host: cli_send + file_reply_reader
@@ -51,9 +49,8 @@ logger = logging.getLogger("computah.brain")
 # A FileOutbound block header line: "--- <ts> delivery_id=<id> ---", optionally
 # carrying the originating request's "event_id=<id>" so a reply can be matched to its
 # request by identity instead of file position (#19). The event_id token is optional:
-# a producer that does not stamp it yet (today's bot-spren) still parses, and the
-# bridge falls back to positional correlation for those blocks. The consumer tolerates
-# the token before any producer emits it, so the rollout needs no flag day.
+# a legacy producer still parses, and the bridge falls back to positional correlation
+# for those blocks.
 _DELIVERY_RE = re.compile(
     r"^--- .* delivery_id=(\S+)(?: event_id=(\S+))? ---$", re.MULTILINE
 )
@@ -108,11 +105,10 @@ class ReplyCursor:
     cursor by one — reserving that turn's reply slot even when the turn times out,
     which is what stops a late reply from shifting every following turn by one.
 
-    `misses` counts consecutive timeouts. A reply that lands resets it; once it
-    reaches _RESYNC_AFTER_MISSES while the cursor sits ahead of the file, the bridge
-    concludes a reply was dropped (not delayed) and resyncs to the live end, so a
-    dropped reply self-heals instead of wedging the loop. The robust fix is a real
-    correlation key linking request to reply; this is the bounded interim.
+    `misses` counts consecutive timeouts in the legacy positional fallback. A reply
+    that lands resets it; once it reaches _RESYNC_AFTER_MISSES while the cursor sits
+    ahead of the file, the bridge concludes a reply was dropped and resyncs to the
+    live end so a missing reply does not wedge the loop.
     """
 
     __slots__ = ("consumed", "misses")
@@ -137,11 +133,11 @@ def brain_via_bridge(
 ) -> str:
     """Send `text` to the persona and return its reply, or a spoken error string.
 
-    Correlates the reply by position using `cursor` (see ReplyCursor): the send
-    reserves the next slot and the turn returns the block at that slot. Pass a
-    cursor that persists across turns so timeouts and in-flight replies stay
-    aligned; with no cursor a fresh one is used, which is correct only for a
-    single isolated, backlog-free turn.
+    Matches a stamped reply by event_id. For an unstamped reply from a legacy
+    producer, `cursor` reserves the next positional slot and the turn returns the
+    block at that slot. Pass a cursor that persists across turns so fallback-mode
+    timeouts and in-flight replies stay aligned; with no cursor a fresh one is used,
+    which is correct only for a single isolated, backlog-free turn.
 
     When `confirm_landing` is given, the turn checks that the session's inbox grew
     after the send before waiting the full `landing_timeout_s`; a send that exits 0
@@ -221,8 +217,8 @@ def brain_via_bridge(
         blocks = _delivery_blocks(read_reply())
         # Identity match (#19): a reply that echoes this turn's event_id is ours
         # whatever its file position, so a dropped or reordered reply on another turn
-        # cannot shift it. Active only once the producer stamps event_id; until then
-        # no block carries one and this loop falls through to the positional branch.
+        # cannot shift it. An unstamped legacy reply falls through to the positional
+        # branch.
         for _did, eid, payload in blocks:
             if eid == event_id and payload:
                 # Identity match is cursor-independent and deliberately does NOT touch
@@ -232,13 +228,13 @@ def brain_via_bridge(
                 # — rewinding could let a late legacy reply be spoken as the next turn's
                 # answer (the invariant that a late reply fills its own reserved slot and
                 # is skipped). So coherence between a stamped match and a later unstamped
-                # fallback turn is deferred to the producer step (#59), where full
-                # stamping removes the unstamped fallback entirely.
+                # fallback turn remains a rollout gap (#59); a fully stamped producer
+                # removes the unstamped fallback entirely.
                 cursor.misses = 0
                 return payload
         # Positional fallback, for unstamped blocks only. A stamped block that is not
         # ours is left alone (never consumed by position), so a dropped stamped reply
-        # cannot make us read another turn's answer — the failure #48 hits today.
+        # cannot make us read another turn's answer.
         if len(blocks) > target:
             _did, eid, payload = blocks[target]
             if eid is None and payload:
@@ -326,8 +322,8 @@ def cli_send(
 
     bot-spren's --event-id option preserves the bridge's correlation id in the
     inbound event. An older CLI gets one safe positional-mode retry without the
-    unsupported option. FileOutbound does not echo the id yet, so replies remain
-    unstamped and positional until that producer step lands.
+    unsupported option; only replies from that compatibility path remain unstamped
+    and use positional matching.
     """
 
     def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:

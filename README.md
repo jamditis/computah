@@ -73,7 +73,7 @@ The bridge is the main design choice. computah does not need to create a fresh a
 - `ssh_cli_send` and `ssh_reply_reader` use the same file contract on another host.
 - `local_sim_send` and `sim_persona.py` let tests exercise bridge behavior without a live assistant.
 
-`brain_via_bridge` snapshots the latest reply block, sends one transcript, then polls until a newer block appears. Voice turns are serialized, so this simple positional contract is enough for the current prototype.
+`brain_via_bridge` gives each transcript an `event_id`. The local, SSH, and simulated transports preserve that ID, and a reply echoes it so the bridge matches each answer to its request. Replies from an older unstamped producer use a positional fallback during upgrades.
 
 A fresh clone uses `brain_backend: "cli"` so it can run without bridge setup. To use the persistent session path, copy `config.local.example.json` to `config.local.json`, set `brain_backend` to `bridge`, and keep deployment values there. `config.local.json` is gitignored and overrides `config.json` at runtime.
 
@@ -373,7 +373,7 @@ whether text-to-speech is still the largest cost.
 
 ## Known limitations
 
-The bridge correlates replies by position. It returns the next reply block after the transcript is sent. If one turn times out and its late reply arrives during the next turn, that reply can be misattributed. Voice turns are serialized, which lowers the risk, but the reply format needs an explicit correlation key before this is fully solved.
+The bridge uses positional matching only for replies from an older producer that does not stamp an `event_id`. In that compatibility mode, a slow or dropped reply can leave the cursor out of step. Update the producer to restore identity matching before relying on multi-turn requests.
 
 ## Contributing
 

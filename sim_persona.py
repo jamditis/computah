@@ -40,9 +40,11 @@ def canned_reply(text: str) -> str:
 def file_outbound_append(
     reply_path: Path, payload: str, delivery_id: str, event_id: str | None = None
 ) -> None:
-    """Append one block in FileOutbound's exact on-disk format. When event_id is
-    given, stamp it into the header so the bridge can match the reply to its request
-    by identity (#19) — models the future stamped producer."""
+    """Append one block in FileOutbound's exact on-disk format.
+
+    When event_id is given, stamp it into the header so the bridge can match the
+    reply to its request by identity.
+    """
     ts = datetime.now(timezone.utc).isoformat()
     reply_path.parent.mkdir(parents=True, exist_ok=True)
     header = f"--- {ts} delivery_id={delivery_id}"
@@ -62,15 +64,15 @@ class SimPersona:
         reply_path: str | Path,
         reply_fn: Callable[[str], str] = canned_reply,
         poll_s: float = 0.2,
-        echo_event_id: bool = False,
+        echo_event_id: bool = True,
     ) -> None:
         self.inbox = Path(inbox_path)
         self.reply = Path(reply_path)
         self.reply_fn = reply_fn
         self.poll_s = poll_s
-        # When set, echo each request's event_id into its reply block header so the
-        # bridge can identity-match (#19). Off by default keeps the legacy positional
-        # behavior the other tests exercise.
+        # Echo each request's event_id into its reply block header so the bridge can
+        # match by identity. Tests can turn this off to exercise the legacy positional
+        # fallback.
         self.echo_event_id = echo_event_id
         self._offset = 0
         self._stop = threading.Event()
