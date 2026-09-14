@@ -309,7 +309,7 @@ def run_turn(
     )
     if request_pcm.size == 0:
         empty_reason = getattr(request_pcm, "empty_reason", None)
-        if empty_reason != pipeline._EMPTY_NO_ONSET:
+        if empty_reason not in (pipeline._EMPTY_NO_ONSET, pipeline._EMPTY_ALL_SILENT):
             pipeline.WAKE_LOGGER.info(
                 "Turn ignored reason=%s total_s=%.3f",
                 empty_reason or "empty_capture",

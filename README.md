@@ -1,5 +1,7 @@
 # computah
 
+[Project and issue status](https://github.com/users/jamditis/projects/16)
+
 A local voice assistant for people who want the assistant they already use by text to answer by voice too.
 
 computah listens for a wake word, transcribes the request, sends the transcript to a persistent assistant session, and speaks the answer back. The speech path runs locally on CPU with openWakeWord, faster-whisper, and Piper. The brain can run on the same host or behind a small file bridge on another machine.

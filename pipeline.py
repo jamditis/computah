@@ -660,6 +660,7 @@ class _EmptyCapture(np.ndarray):
 
 _EMPTY_NO_ONSET = "no_speech_onset"
 _EMPTY_VAD_REJECTED = "vad_rejected"
+_EMPTY_ALL_SILENT = "all_silent_capture"
 
 
 def _empty_capture(reason: str) -> np.ndarray:
@@ -870,12 +871,15 @@ def capture_request(
     quiet = 0
     voiced_run = 0
     speech_seen = False
+    abandoned_wake = False
+    all_silent = True
     for frame in frames:
         captured.append(frame)
         if _frame_rms(frame) < _SILENCE_RMS:
             quiet += 1
             voiced_run = 0
         else:
+            all_silent = False
             quiet = 0
             voiced_run += 1
             if voiced_run >= _SPEECH_ONSET_FRAMES:
@@ -883,9 +887,19 @@ def capture_request(
         if speech_seen and quiet >= endpoint_frames:
             break
         if not speech_seen and quiet >= _NO_SPEECH_ONSET_FRAMES:
+            abandoned_wake = True
             break  # nothing said after the wake — abandon fast, don't wait the cap
         if len(captured) >= max_frames:
             break
+    if captured and all_silent and not abandoned_wake:
+        # A completed request differs from the normal no-onset timeout. Keep the
+        # latter quiet, and never transcribe absent capture audio. Detection history
+        # can still contain a consumed command, so callers keep that recovery.
+        WAKE_LOGGER.warning(
+            "Turn ignored reason=all_silent_capture: check the microphone mute "
+            "button and input device selection"
+        )
+        return _empty_capture(_EMPTY_ALL_SILENT)
     if not speech_seen:
         # No sustained speech after the wake fired (silence, or only a transient like a
         # click or cough). Never prepend the short pre-roll here: it always holds the wake
@@ -1158,14 +1172,8 @@ _FENCED_BLOCK_RE = re.compile(
 # delimiter is part of the name being spoken. A run that whitespace keeps from hugging
 # anything (5 * 6) opens nothing either, and \w on the outer edges keeps an underscore
 # inside a word (snake_case) from reading as a delimiter at all.
-# One pattern per delimiter, each barred from crossing its own character: an unpaired
-# run then gives up at the next candidate rather than rescanning the rest of the
-# reply, which keeps a long reply -- the case this whole stage exists for -- linear.
-_EMPHASIS_RES = (
-    re.compile(r"(?<!\w)(\*{1,3})(?!\s)([^*]+)(?<!\s)\1(?!\w)"),
-    re.compile(r"(?<!\w)(_{1,3})(?!\s)([^_]+)(?<!\s)\1(?!\w)"),
-    re.compile(r"(?<!\w)(~~)(?!\s)([^~]+)(?<!\s)\1(?!\w)"),
-)
+_UNDERSCORE_RUN_RE = re.compile(r"_+")
+_EMPHASIS_RUN_RE = re.compile(r"\*+|~+")
 
 
 def _tick_run_end(text: str, start: int) -> int:
@@ -1226,18 +1234,63 @@ def _iter_code_spans(text: str):
         i = candidates[k] + 1
 
 
+def _strip_delimiter_pairs(text: str, pattern: re.Pattern) -> str:
+    """Pair delimiter runs in one walk, retaining unmatched literal markers.
+
+    Each run enters and leaves its marker's stack at most once. Matched runs are
+    erased by index so deeply nested output never causes repeated text copies.
+    """
+    stacks = {"*": [], "_": [], "~": []}
+    removed = bytearray(len(text))
+    for match in pattern.finditer(text):
+        start, end = match.span()
+        marker = text[start]
+        before = text[start - 1] if start else ""
+        after = text[end] if end < len(text) else ""
+        can_open = bool(after and not after.isspace()) and not (
+            before and (before.isalnum() or before == "_")
+        )
+        can_close = bool(before and not before.isspace()) and not (
+            after and (after.isalnum() or after == "_")
+        )
+        stack = stacks[marker]
+        remaining = end - start
+        if can_close:
+            while stack and remaining:
+                opener, length, opener_can_close = stack[-1]
+                # A dual-purpose run cannot close a pair whose combined length
+                # is a multiple of three, unless both runs are multiples of three.
+                # This keeps inner markers from consuming an outer strong pair.
+                if (
+                    marker != "~"
+                    and (can_open or opener_can_close)
+                    and (length + remaining) % 3 == 0
+                    and (length % 3 != 0 or remaining % 3 != 0)
+                ):
+                    break
+                count = min(length, remaining)
+                if marker == "~":
+                    count -= count % 2
+                if not count:
+                    break
+                removed[opener + length - count : opener + length] = b"\1" * count
+                removed[start : start + count] = b"\1" * count
+                start += count
+                remaining -= count
+                if count == length:
+                    stack.pop()
+                else:
+                    stack[-1] = (opener, length - count, opener_can_close)
+        if can_open and remaining and (marker != "~" or remaining >= 2):
+            stack.append((start, remaining, can_close))
+    return "".join(char for i, char in enumerate(text) if not removed[i])
+
+
 def _strip_emphasis(text: str) -> str:
-    """Drop matched emphasis pairs, leaving unpaired delimiter runs as literal text."""
-    # Content cannot cross its own delimiter, so a pass takes the innermost pair and
-    # emphasis nested in emphasis needs another; each pass drops two runs, so this
-    # settles.
-    while True:
-        stripped = text
-        for pattern in _EMPHASIS_RES:
-            stripped = pattern.sub(r"\2", stripped)
-        if stripped == text:
-            return text
-        text = stripped
+    # Underscores count as word characters on other markers' outer edges. Remove
+    # their matched pairs first, so _**nested**_ exposes valid star boundaries.
+    text = _strip_delimiter_pairs(text, _UNDERSCORE_RUN_RE)
+    return _strip_delimiter_pairs(text, _EMPHASIS_RUN_RE)
 
 
 def _strip_links(text: str) -> str:
@@ -1752,7 +1805,7 @@ def run_turn(
         on_capture()
     if request_pcm.size == 0:
         empty_reason = getattr(request_pcm, "empty_reason", None)
-        if empty_reason != _EMPTY_NO_ONSET:
+        if empty_reason not in (_EMPTY_NO_ONSET, _EMPTY_ALL_SILENT):
             WAKE_LOGGER.info(
                 "Turn ignored reason=%s total_s=%.3f",
                 empty_reason or "empty_capture",
