@@ -9,9 +9,11 @@ and that a second turn does not return the first turn's stale reply.
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import brain_bridge
@@ -307,7 +309,7 @@ def main() -> int:
     }
 
     class _StampedSyl:
-        """Stamps each reply with the request's event_id (models the future producer).
+        """Stamps each reply with the request's event_id (models the reply producer).
         drop = 1-based turn numbers whose reply is never written (models #48)."""
 
         def __init__(self, drop=(), plain=()) -> None:
@@ -344,9 +346,8 @@ def main() -> int:
             return out
 
     # The parser tolerates the optional event_id token and extracts it; an unstamped
-    # header still parses with event_id None. (Against the pre-#19 regex the stamped
-    # block fails to match at all -- the reason the consumer must tolerate the token
-    # before any producer emits it.)
+    # header still parses with event_id None. Against the pre-#19 regex, the stamped
+    # block fails to match at all.
     parsed = brain_bridge._delivery_blocks(
         "\n--- t delivery_id=d1 event_id=e1 ---\nstamped\n"
         "\n--- t delivery_id=d2 ---\nunstamped\n"
@@ -448,9 +449,9 @@ def main() -> int:
     # the stamped match left the positional cursor ahead of the file and the consumer
     # cannot safely realign it — positional correlation can't tell a dropped reserved
     # slot from a late one, so rewinding could speak a late reply as the next answer. The
-    # producer step (#59) closes this by stamping every reply, removing the unstamped
-    # fallback. Sequence: stamped turn dropped, stamped turn answered at slot 0, then an
-    # unstamped turn answered at slot 1.
+    # full producer deployment (#59) closes this by stamping every reply, removing the
+    # unstamped fallback. Sequence: stamped turn dropped, stamped turn answered at slot
+    # 0, then an unstamped turn answered at slot 1.
     trans = _StampedSyl(drop={1}, plain={3})
     tcur = brain_bridge.ReplyCursor()
     tcommon = dict(
@@ -483,7 +484,7 @@ def main() -> int:
     # just the in-test stub.
     e2e_inbox = d / "e2e-inbox.jsonl"
     e2e_reply = d / "e2e-reply.txt"
-    e2e_sim = SimPersona(e2e_inbox, e2e_reply, poll_s=0.05, echo_event_id=True)
+    e2e_sim = SimPersona(e2e_inbox, e2e_reply, poll_s=0.05)
     e2e_sim.start()
     try:
         ecommon = dict(
@@ -500,6 +501,76 @@ def main() -> int:
         check(e2 == "The capital of France is Paris.", f"e2e identity turn 2: {e2!r}")
     finally:
         e2e_sim.stop()
+
+    # Late-reply regression through the real simulator: two short timeouts put the
+    # positional cursor ahead of the reply file. The third turn resyncs while the
+    # first answer is still delayed. Positional matching would take that stale answer
+    # from slot 0; identity matching waits for the third turn's stamped answer.
+    late_inbox = d / "late-inbox.jsonl"
+    late_reply = d / "late-reply.txt"
+    late_calls = {"count": 0}
+    late_answers = {
+        "first question": "late answer one",
+        "second question": "late answer two",
+        "third question": "current answer three",
+    }
+
+    def _delayed_first_reply(text: str) -> str:
+        late_calls["count"] += 1
+        if late_calls["count"] == 1:
+            time.sleep(0.3)
+        return late_answers[text.strip()]
+
+    late_sim = SimPersona(
+        late_inbox, late_reply, reply_fn=_delayed_first_reply, poll_s=0.01
+    )
+    late_sim.start()
+    try:
+        late_common = dict(
+            persona="syl",
+            send=brain_bridge.local_sim_send(late_inbox),
+            read_reply=brain_bridge.file_reply_reader(late_reply),
+            cursor=brain_bridge.ReplyCursor(),
+            poll_s=0.01,
+        )
+        late_first = brain_bridge.brain_via_bridge(
+            "first question", timeout_s=0.05, **late_common
+        )
+        late_second = brain_bridge.brain_via_bridge(
+            "second question", timeout_s=0.05, **late_common
+        )
+        late_third = brain_bridge.brain_via_bridge(
+            "third question", timeout_s=2, **late_common
+        )
+        check(
+            late_first.startswith("Sorry, the brain took too long"),
+            f"late first reply times out its own turn: {late_first!r}",
+        )
+        check(
+            late_second.startswith("Sorry, the brain took too long"),
+            f"second timeout triggers positional resync: {late_second!r}",
+        )
+        check(
+            late_third == "current answer three",
+            f"resynced turn skips stale replies by identity: {late_third!r}",
+        )
+
+        inbox_ids = [
+            json.loads(line)["event_id"]
+            for line in late_inbox.read_text(encoding="utf-8").splitlines()
+        ]
+        reply_ids = [
+            event_id
+            for _delivery_id, event_id, _payload in brain_bridge._delivery_blocks(
+                late_reply.read_text(encoding="utf-8")
+            )
+        ]
+        check(
+            reply_ids == inbox_ids,
+            "simulator reply headers preserve each inbox event id",
+        )
+    finally:
+        late_sim.stop()
 
     # --- #44 landing check: a non-landing send fails loudly, not as a slow brain ---
     # bot-spren send can exit 0 yet write to an inbox the session never reads, so the

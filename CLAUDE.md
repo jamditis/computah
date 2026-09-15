@@ -167,16 +167,13 @@ bug.
 
 ## Known limitations
 
-- Positional reply correlation in the bridge: the reply format carries no correlation
-  key, so `brain_via_bridge` correlates by position with a persistent cursor that
-  reserves one reply slot per send. A late reply from a timed-out turn fills its own
-  reserved slot and is skipped, so it is not mis-attributed to the next turn; a reply
-  dropped entirely (never written) would otherwise wedge the cursor one ahead, so after
-  a couple of consecutive timeouts it resyncs to the live end and recovers. Positional
-  correlation still cannot tell a slow reply from a dropped one, and a relaunch across
-  an in-flight prompt can re-seed a one-turn lag — drain the session to quiescence
-  before relaunching. The robust fix is a real correlation key: the reply echoing the
-  request's `event_id` so the match is by identity, not position.
+- Legacy positional reply correlation: `brain_via_bridge` and the transports preserve
+  an `event_id`, and a current reply producer echoes it so each answer is matched by
+  identity. An older producer can still return unstamped replies during an upgrade; the
+  bridge then reserves one reply slot per send and matches by position. That fallback
+  cannot distinguish a slow reply from a dropped one, and a relaunch across an in-flight
+  prompt can re-seed a one-turn lag. Drain the session to quiescence before relaunching
+  an unstamped producer.
 - `speak()` shells a fresh Piper process per call and reloads the voice model
   (~3.9 s). Keeping Piper resident is the planned fix.
 
