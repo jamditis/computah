@@ -25,19 +25,26 @@ from __future__ import annotations
 import argparse
 import itertools
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pipeline
 import chime
+from playback_abort import wait_or_abort
 
 _DRAIN_FRAMES = 25  # ~2 s discarded after a turn: clears stale/echo audio from the
 # pipe buffer so the spoken reply is not re-heard as the next wake
+
+
+class _AplayFailed(subprocess.CalledProcessError):
+    """An aplay child exited unsuccessfully, so the sudo retry is applicable."""
 
 
 def _resolve_output_pcm(cli_output_device: str | None, cfg: dict) -> str | None:
@@ -57,7 +64,89 @@ def _resolve_output_pcm(cli_output_device: str | None, cfg: dict) -> str | None:
     return cfg.get("live_output_pcm") or None
 
 
-def _play_wav(path: str, device: str | None) -> None:
+def _signal_playback_group(
+    process: subprocess.Popen, sig: signal.Signals, elevated: bool
+) -> None:
+    """Signal only the playback process group, including a root-owned fallback."""
+    if elevated:
+        result = subprocess.run(
+            ["sudo", "-n", "kill", f"-{sig.name}", "--", f"-{process.pid}"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # The process can finish after wait_or_abort's poll and before this kill.
+        # Its missing process group is then a successful cleanup, not a playback
+        # failure. A live process plus a failed privileged kill remains an error.
+        if result.returncode and process.poll() is None:
+            raise subprocess.CalledProcessError(result.returncode, result.args)
+        return
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _stop_playback_group(process: subprocess.Popen, elevated: bool) -> None:
+    """Stop an aplay process group without leaving a child behind."""
+    _signal_playback_group(process, signal.SIGTERM, elevated)
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        _signal_playback_group(process, signal.SIGKILL, elevated)
+        process.wait(timeout=1)
+
+
+def _play_once(
+    cmd: list[str],
+    *,
+    should_stop: Callable[[], bool] | None,
+    poll_ms: int,
+    elevated: bool,
+) -> bool:
+    """Run one aplay attempt. Return False only when playback was interrupted."""
+    if should_stop is None:
+        result = subprocess.run(
+            cmd, check=False, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        if result.returncode:
+            raise _AplayFailed(result.returncode, cmd)
+        return True
+
+    process = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        finished = wait_or_abort(
+            is_active=lambda: process.poll() is None,
+            should_stop=should_stop,
+            stop=lambda: _stop_playback_group(process, elevated),
+            sleep=lambda milliseconds: time.sleep(milliseconds / 1000),
+            poll_ms=poll_ms,
+        )
+    except BaseException:
+        # A detector error or Ctrl-C must not leave aplay speaking after the live
+        # loop has moved on or exited. BaseException is intentional for Ctrl-C.
+        if process.poll() is None:
+            _stop_playback_group(process, elevated)
+        raise
+    if not finished:
+        return False
+    return_code = process.wait()
+    if return_code:
+        raise _AplayFailed(return_code, cmd)
+    return True
+
+
+def _play_wav(
+    path: str,
+    device: str | None,
+    should_stop: Callable[[], bool] | None = None,
+    poll_ms: int = 50,
+) -> bool:
     """Play a WAV through ALSA's aplay — the Pi's native output, symmetric with the
     arecord capture side and dependency-free. (The sounddevice-based audio.play_wav
     is the cross-platform/dev path and is not installed in this venv.)
@@ -65,26 +154,36 @@ def _play_wav(path: str, device: str | None) -> None:
     Tries unelevated first, then retries under sudo: on this Pi /dev/snd needs root in
     a non-login launch context. Only the playback subprocess is elevated, never the
     whole driver — the brain stage shells `ssh officejawn`, which must run as the
-    launching user so it uses that user's ssh config and keys, not root's."""
+    launching user so it uses that user's ssh config and keys, not root's.
+
+    Without `should_stop`, playback keeps its blocking behavior. With a callback,
+    aplay runs in its own process group and returns False after an interruption.
+    The root fallback is stopped through the same non-interactive sudo boundary
+    used to start it, so the unelevated driver never tries to signal a root process
+    directly. The live wake detector that supplies this callback is tracked in
+    issue #100."""
     cmd = ["aplay", "-q"]
     if device:
         cmd += ["-D", device]
     cmd.append(path)
     try:
-        subprocess.run(
-            cmd, check=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        return _play_once(
+            cmd,
+            should_stop=should_stop,
+            poll_ms=poll_ms,
+            elevated=False,
         )
-    except subprocess.CalledProcessError:
+    except _AplayFailed:
         # Retry once under non-interactive sudo: /dev/snd needs root in some launch
         # contexts. -n so a missing or expired sudo timestamp fails fast instead of
         # prompting, and stdin from /dev/null so a prompt can never consume the raw
         # mic pipe that is this process's stdin. Playback then degrades to the logged
         # error in run_turn rather than wedging the loop.
-        subprocess.run(
+        return _play_once(
             ["sudo", "-n", *cmd],
-            check=True,
-            stdin=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            should_stop=should_stop,
+            poll_ms=poll_ms,
+            elevated=True,
         )
 
 

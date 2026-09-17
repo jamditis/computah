@@ -14,6 +14,8 @@ Exit code is 0 only if every check passes.
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
 import sys
 
 import numpy as np
@@ -291,6 +293,202 @@ def test_resolve_output_pcm() -> None:
     )
 
 
+class _FakePlaybackProcess:
+    def __init__(self, pid: int, return_code: int | None = None) -> None:
+        self.pid = pid
+        self.return_code = return_code
+        self.wait_timeouts: list[int | None] = []
+
+    def poll(self):
+        return self.return_code
+
+    def wait(self, timeout=None):
+        self.wait_timeouts.append(timeout)
+        return self.return_code
+
+
+def test_abortable_aplay() -> None:
+    """The live aplay path isolates and stops normal and root-owned playback."""
+    print("\n=== live_driver: abortable aplay uses a bounded process group ===")
+
+    first = _FakePlaybackProcess(101, return_code=1)
+    elevated = _FakePlaybackProcess(202)
+    processes = iter([first, elevated])
+    launched: list[tuple[list[str], bool]] = []
+    signals: list[tuple[int, signal.Signals, bool]] = []
+
+    real_popen = live_driver.subprocess.Popen
+    real_signal = live_driver._signal_playback_group
+
+    def fake_popen(cmd, **kwargs):
+        launched.append((cmd, kwargs.get("start_new_session", False)))
+        return next(processes)
+
+    def fake_signal(process, sig, is_elevated):
+        signals.append((process.pid, sig, is_elevated))
+        process.return_code = -int(sig)
+
+    live_driver.subprocess.Popen = fake_popen
+    live_driver._signal_playback_group = fake_signal
+    try:
+        finished = live_driver._play_wav(
+            "/tmp/reply.wav",
+            "plughw:CARD=PowerConf,DEV=0",
+            should_stop=lambda: True,
+            poll_ms=0,
+        )
+    finally:
+        live_driver.subprocess.Popen = real_popen
+        live_driver._signal_playback_group = real_signal
+
+    check(
+        "a failed user playback retries through non-interactive sudo",
+        launched
+        == [
+            (
+                [
+                    "aplay",
+                    "-q",
+                    "-D",
+                    "plughw:CARD=PowerConf,DEV=0",
+                    "/tmp/reply.wav",
+                ],
+                True,
+            ),
+            (
+                [
+                    "sudo",
+                    "-n",
+                    "aplay",
+                    "-q",
+                    "-D",
+                    "plughw:CARD=PowerConf,DEV=0",
+                    "/tmp/reply.wav",
+                ],
+                True,
+            ),
+        ],
+        f"launched={launched}",
+    )
+    check(
+        "barge-in stops the elevated playback group and reports interruption",
+        finished is False
+        and signals == [(202, signal.SIGTERM, True)]
+        and elevated.wait_timeouts == [1],
+        f"finished={finished} signals={signals} waits={elevated.wait_timeouts}",
+    )
+
+    real_process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        start_new_session=True,
+    )
+    live_driver._stop_playback_group(real_process, elevated=False)
+    check(
+        "normal playback termination signals the real isolated process group",
+        real_process.poll() is not None,
+        f"return_code={real_process.returncode}",
+    )
+
+    class _RunResult:
+        def __init__(self, returncode, args):
+            self.returncode = returncode
+            self.args = args
+
+    run_calls = []
+    real_run = live_driver.subprocess.run
+    elevated.return_code = None
+
+    def fake_run(cmd, **kwargs):
+        run_calls.append((cmd, kwargs))
+        return _RunResult(0, cmd)
+
+    live_driver.subprocess.run = fake_run
+    try:
+        live_driver._signal_playback_group(elevated, signal.SIGTERM, True)
+    finally:
+        live_driver.subprocess.run = real_run
+
+    check(
+        "root playback uses the exact non-interactive process-group signal",
+        len(run_calls) == 1
+        and run_calls[0][0] == ["sudo", "-n", "kill", "-SIGTERM", "--", "-202"]
+        and run_calls[0][1]["check"] is False,
+        f"calls={run_calls}",
+    )
+
+    class _StubbornProcess(_FakePlaybackProcess):
+        def wait(self, timeout=None):
+            self.wait_timeouts.append(timeout)
+            if len(self.wait_timeouts) == 1:
+                raise subprocess.TimeoutExpired("aplay", timeout)
+            return self.return_code
+
+    stubborn = _StubbornProcess(303)
+    signals = []
+
+    def signal_stubborn(process, sig, is_elevated):
+        signals.append((process.pid, sig, is_elevated))
+        process.return_code = -int(sig)
+
+    live_driver._signal_playback_group = signal_stubborn
+    try:
+        live_driver._stop_playback_group(stubborn, elevated=False)
+    finally:
+        live_driver._signal_playback_group = real_signal
+
+    check(
+        "a playback group that ignores TERM is killed after the bounded wait",
+        signals
+        == [
+            (303, signal.SIGTERM, False),
+            (303, signal.SIGKILL, False),
+        ]
+        and stubborn.wait_timeouts == [1, 1],
+        f"signals={signals} waits={stubborn.wait_timeouts}",
+    )
+
+    detector_error_process = _FakePlaybackProcess(404)
+    signals = []
+    detector_launches = []
+
+    def signal_detector_error(process, sig, is_elevated):
+        signals.append((process.pid, sig, is_elevated))
+        process.return_code = -int(sig)
+
+    def popen_detector_error(cmd, **_kwargs):
+        detector_launches.append(cmd)
+        return detector_error_process
+
+    live_driver.subprocess.Popen = popen_detector_error
+    live_driver._signal_playback_group = signal_detector_error
+    detector_error = None
+    try:
+        live_driver._play_wav(
+            "reply.wav",
+            None,
+            should_stop=lambda: (_ for _ in ()).throw(
+                subprocess.CalledProcessError(17, ["detector"])
+            ),
+            poll_ms=0,
+        )
+    except subprocess.CalledProcessError as error:
+        detector_error = error
+    finally:
+        live_driver.subprocess.Popen = real_popen
+        live_driver._signal_playback_group = real_signal
+
+    check(
+        "a detector error stops playback and cannot start a privileged retry",
+        isinstance(detector_error, subprocess.CalledProcessError)
+        and detector_error.cmd == ["detector"]
+        and detector_launches == [["aplay", "-q", "reply.wav"]]
+        and signals == [(404, signal.SIGTERM, False)]
+        and detector_error_process.wait_timeouts == [1],
+        f"error={detector_error!r} launches={detector_launches} signals={signals} "
+        f"waits={detector_error_process.wait_timeouts}",
+    )
+
+
 def _frames(*groups):
     """Build a frame list from (value, count) groups: _frames((4000, 6), (0, 15)) is
     6 loud frames then 15 of room tone."""
@@ -419,6 +617,7 @@ def test_cue_pause_gate() -> None:
 def main() -> int:
     test_stdin_mic()
     test_resolve_output_pcm()
+    test_abortable_aplay()
     test_cue_pause_gate()
     print("\n=== live_driver.run_turn: the hardware path honors the guard ===")
 
