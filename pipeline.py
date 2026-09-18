@@ -94,6 +94,13 @@ DEFAULTS = {
     "log_level": "INFO",
     "whisper_model": "tiny.en",
     "whisper_compute": "int8",
+    # CTranslate2 uses its own CPU default when cpu_threads is zero. Set a positive
+    # count in config.local.json to benchmark a fixed thread count on the target Pi.
+    "whisper_cpu_threads": 0,
+    # faster-whisper's transcription-time VAD is separate from the capture-time
+    # Silero gate below.
+    # Keep it off by default to preserve current output; enable it for Pi measurements.
+    "whisper_vad_filter": False,
     # Mishear guard: gate a transcript on faster-whisper's confidence before it
     # reaches the brain, so a garbled command never drives an action. avg_logprob is
     # the gate (it must stay at or above the floor); following faster-whisper's own
@@ -214,7 +221,7 @@ STT_REPROMPT = "Sorry, I didn't catch that. Please say that again."
 
 # Module-level caches so repeated calls in one process do not reload models.
 _oww_cache: dict[str, object] = {}
-_whisper_cache: dict[tuple[str, str], object] = {}
+_whisper_cache: dict[tuple[str, str, int], object] = {}
 _piper_cache: dict[str, object] = {}
 
 
@@ -319,6 +326,18 @@ def validate_config(cfg: dict) -> dict:
     for key in ("claude_timeout_s", "brain_timeout_s"):
         if key in cfg and not _is_positive_int(cfg[key]):
             fall_back(key, "must be a positive integer")
+
+    # CTranslate2 defines zero CPU threads as its automatic setting. Positive values
+    # pin a count for target-device measurements; negatives and booleans are invalid.
+    if "whisper_cpu_threads" in cfg and not (
+        isinstance(cfg["whisper_cpu_threads"], int)
+        and not isinstance(cfg["whisper_cpu_threads"], bool)
+        and cfg["whisper_cpu_threads"] >= 0
+    ):
+        fall_back("whisper_cpu_threads", "must be a non-negative integer")
+
+    if "whisper_vad_filter" in cfg and not isinstance(cfg["whisper_vad_filter"], bool):
+        fall_back("whisper_vad_filter", "must be true or false")
 
     if "log_level" in cfg:
         if not isinstance(cfg["log_level"], str):
@@ -908,8 +927,8 @@ def capture_request(
 # --------------------------------------------------------------------------- #
 # Stage 2: speech-to-text
 # --------------------------------------------------------------------------- #
-def _get_whisper(model: str, compute: str):
-    key = (model, compute)
+def _get_whisper(model: str, compute: str, cpu_threads: int):
+    key = (model, compute, cpu_threads)
     if key not in _whisper_cache:
         from faster_whisper import WhisperModel
 
@@ -917,6 +936,7 @@ def _get_whisper(model: str, compute: str):
             model,
             device="cpu",
             compute_type=compute,
+            cpu_threads=cpu_threads,
             download_root=str(WHISPER_DIR),
         )
     return _whisper_cache[key]
@@ -991,9 +1011,20 @@ def transcribe_detailed(
     transcribe() wraps this for callers that want only the text.
     """
     cfg = load_config()
-    model = _get_whisper(cfg["whisper_model"], cfg["whisper_compute"])
+    model = _get_whisper(
+        cfg["whisper_model"],
+        cfg["whisper_compute"],
+        cfg["whisper_cpu_threads"],
+    )
     segments, _info = model.transcribe(
-        _whisper_audio_input(audio), beam_size=1, language="en"
+        _whisper_audio_input(audio),
+        beam_size=1,
+        language="en",
+        vad_filter=cfg["whisper_vad_filter"],
+        # Each capture is one independent command. For audio that spans decoding
+        # windows, carrying one window's text into the next adds work and can
+        # reinforce an early mishearing without useful continuity for this use case.
+        condition_on_previous_text=False,
     )
     return _aggregate_segments(segments)
 
@@ -1878,7 +1909,11 @@ def warm_models(
         (
             "whisper",
             STT_LOGGER,
-            lambda: _get_whisper(cfg["whisper_model"], cfg["whisper_compute"]),
+            lambda: _get_whisper(
+                cfg["whisper_model"],
+                cfg["whisper_compute"],
+                cfg["whisper_cpu_threads"],
+            ),
         ),
         ("piper", TTS_LOGGER, lambda: _get_piper(str(voice_onnx))),
     ]

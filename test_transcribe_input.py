@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import faster_whisper
 import numpy as np
 
 import pipeline
@@ -22,27 +23,47 @@ def check(name: str, ok: bool, detail: str) -> None:
 class _FakeWhisper:
     def __init__(self) -> None:
         self.source = None
+        self.load_args = None
+        self.decode_args = None
 
-    def transcribe(self, source, *, beam_size, language):
+    def transcribe(
+        self,
+        source,
+        *,
+        beam_size,
+        language,
+        vad_filter,
+        condition_on_previous_text,
+    ):
         self.source = source
+        self.decode_args = (vad_filter, condition_on_previous_text)
         assert beam_size == 1
         assert language == "en"
         return [], object()
 
 
-def call(audio):
+def call(audio, config_overrides=None):
     fake = _FakeWhisper()
     real_config, real_whisper = pipeline.load_config, pipeline._get_whisper
-    pipeline.load_config = lambda: {
+    cfg = {
         "whisper_model": "tiny.en",
         "whisper_compute": "int8",
+        "whisper_cpu_threads": 0,
+        "whisper_vad_filter": False,
     }
-    pipeline._get_whisper = lambda *_: fake
+    cfg.update(config_overrides or {})
+    pipeline.load_config = lambda: cfg
+
+    def load(*args):
+        fake.load_args = args
+        return fake
+
+    pipeline._get_whisper = load
     try:
         result = pipeline.transcribe_detailed(audio)
     finally:
         pipeline.load_config, pipeline._get_whisper = real_config, real_whisper
-    return fake.source, result
+    return fake, result
 
 
 def raises(error, audio) -> bool:
@@ -53,9 +74,39 @@ def raises(error, audio) -> bool:
     return False
 
 
+def test_whisper_cache_keys_cpu_threads() -> None:
+    constructed: list[tuple] = []
+    real_model = faster_whisper.WhisperModel
+    real_cache = pipeline._whisper_cache
+
+    class _FakeModel:
+        def __init__(self, *args, **kwargs) -> None:
+            constructed.append((args, kwargs))
+
+    faster_whisper.WhisperModel = _FakeModel
+    pipeline._whisper_cache = {}
+    try:
+        first = pipeline._get_whisper("tiny.en", "int8", 2)
+        repeated = pipeline._get_whisper("tiny.en", "int8", 2)
+        changed = pipeline._get_whisper("tiny.en", "int8", 4)
+    finally:
+        faster_whisper.WhisperModel = real_model
+        pipeline._whisper_cache = real_cache
+
+    check(
+        "Whisper cache separates CPU thread counts",
+        first is repeated
+        and changed is not first
+        and [call[1]["cpu_threads"] for call in constructed] == [2, 4],
+        f"models={len(constructed)} threads={[call[1]['cpu_threads'] for call in constructed]}",
+    )
+
+
 def main() -> int:
+    test_whisper_cache_keys_cpu_threads()
     pcm = np.array([-32768, -1, 0, 1, 32767], dtype=np.int16)
-    source, result = call(pcm)
+    fake, result = call(pcm)
+    source = fake.source
     expected = pcm.astype(np.float32) / 32768.0
     check(
         "int16 PCM is normalized to mono float32 without a file hop",
@@ -72,7 +123,8 @@ def main() -> int:
     )
 
     normalized = np.array([-0.5, 0.0, 0.5], dtype=np.float64)
-    source, _ = call(normalized)
+    fake, _ = call(normalized)
+    source = fake.source
     check(
         "normalized floating-point audio is converted to float32",
         source.dtype == np.float32
@@ -81,11 +133,22 @@ def main() -> int:
     )
 
     wav = Path("request.wav")
-    source, _ = call(wav)
+    fake, _ = call(wav)
+    source = fake.source
     check(
         "file-based callers remain compatible",
         source == str(wav),
         f"source={source!r}",
+    )
+
+    fake, _ = call(
+        pcm,
+        {"whisper_cpu_threads": 3, "whisper_vad_filter": True},
+    )
+    check(
+        "Whisper tuning reaches model load and decode",
+        fake.load_args == ("tiny.en", "int8", 3) and fake.decode_args == (True, False),
+        f"load_args={fake.load_args!r} decode_args={fake.decode_args!r}",
     )
 
     check(
