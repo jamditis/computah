@@ -211,6 +211,42 @@ def test_whisper_compute_non_string_falls_back() -> None:
         )
 
 
+def test_whisper_cpu_threads_validation() -> None:
+    for good in (0, 1, 4):
+        cfg, err = validate({"whisper_cpu_threads": good})
+        check(
+            f"whisper_cpu_threads {good!r} kept",
+            cfg["whisper_cpu_threads"] == good and err == "",
+            f"got {cfg['whisper_cpu_threads']!r}, no warning: {err == ''}",
+        )
+    for bad in (-1, 1.5, True, "4"):
+        cfg, err = validate({"whisper_cpu_threads": bad})
+        check(
+            f"whisper_cpu_threads {bad!r} -> default",
+            cfg["whisper_cpu_threads"] == DEFAULTS["whisper_cpu_threads"]
+            and "whisper_cpu_threads" in err,
+            f"got {cfg['whisper_cpu_threads']!r}",
+        )
+
+
+def test_whisper_vad_filter_validation() -> None:
+    for good in (True, False):
+        cfg, err = validate({"whisper_vad_filter": good})
+        check(
+            f"whisper_vad_filter {good!r} kept",
+            cfg["whisper_vad_filter"] is good and err == "",
+            f"got {cfg['whisper_vad_filter']!r}, no warning: {err == ''}",
+        )
+    for bad in (0, 1, "true", None):
+        cfg, err = validate({"whisper_vad_filter": bad})
+        check(
+            f"whisper_vad_filter {bad!r} -> default",
+            cfg["whisper_vad_filter"] == DEFAULTS["whisper_vad_filter"]
+            and "whisper_vad_filter" in err,
+            f"got {cfg['whisper_vad_filter']!r}",
+        )
+
+
 # --- live_output_pcm (spliced into the aplay argv) --------------------------- #
 
 
@@ -331,6 +367,8 @@ def main() -> int:
         test_whisper_compute_valid_untouched()
         test_whisper_compute_unsupported_backend_type_falls_back()
         test_whisper_compute_non_string_falls_back()
+        test_whisper_cpu_threads_validation()
+        test_whisper_vad_filter_validation()
         test_live_output_pcm_non_string_falls_back()
         test_live_output_pcm_string_kept()
         test_wake_word_unknown_falls_back(monkeypatch_lib)

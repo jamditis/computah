@@ -35,6 +35,7 @@ CFG = {
     "wake_word": "hey_jarvis",
     "whisper_model": "base.en",
     "whisper_compute": "int8",
+    "whisper_cpu_threads": 4,
     "voice_model": "en_US-lessac-medium",
 }
 
@@ -53,9 +54,9 @@ def _stub_loaders(record: dict) -> tuple:
     )
     pipeline._resolve_wake_path = lambda name: f"/models/{name}.onnx"
     pipeline._get_oww_model = lambda path: record["wake"].append(path)
-    pipeline._get_whisper = lambda model, compute: record["whisper"].append(
-        (model, compute)
-    )
+    pipeline._get_whisper = lambda model, compute, cpu_threads: record[
+        "whisper"
+    ].append((model, compute, cpu_threads))
     pipeline._get_piper = lambda path: record["piper"].append(path)
     pipeline._get_vad = lambda: record["vad"].append("vad")
     return real
@@ -87,8 +88,8 @@ def test_warms_each_once() -> None:
     )
     check("capture-time VAD loaded once", record["vad"] == ["vad"], f"{record['vad']}")
     check(
-        "whisper loaded once with the configured model and compute",
-        record["whisper"] == [("base.en", "int8")],
+        "whisper loaded once with the configured model, compute type, and CPU thread count",
+        record["whisper"] == [("base.en", "int8", 4)],
         f"{record['whisper']}",
     )
     check(

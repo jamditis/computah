@@ -243,6 +243,8 @@ proof a Bluetooth link is fine. Prefer USB.
 | `log_level` | Live-loop log level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `whisper_model` | faster-whisper model size or path. |
 | `whisper_compute` | CTranslate2 compute type, usually `int8` on the target device. |
+| `whisper_cpu_threads` | CTranslate2 CPU thread count. `0` lets CTranslate2 choose; set a positive count in `config.local.json` when measuring the target host. |
+| `whisper_vad_filter` | Enable faster-whisper's transcription-time VAD filter. This is separate from the capture-time speech gate. |
 | `stt_confidence_guard` | When true, a live turn drops a low-confidence transcript before the brain and speaks a re-prompt. |
 | `stt_min_avg_logprob` | Floor for the transcript's mean per-token log-probability; below it the turn is rejected. This is the gate. |
 | `stt_max_no_speech_prob` | How silence-like the audio looked. Combined with a low `avg_logprob` it labels a reject as silence; following faster-whisper's own rule, a confident decode is never rejected for this alone. |

@@ -6,6 +6,8 @@
   "mic_device": "powerconf",
   "output_device": "desktop speakers",
   "live_output_pcm": "plughw:CARD=PowerConf,DEV=0",
+  "whisper_cpu_threads": 0,
+  "whisper_vad_filter": false,
   "brain_backend": "bridge",
   "brain_persona": "assistant",
   "brain_transport": "local",

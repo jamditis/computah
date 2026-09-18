@@ -5,6 +5,8 @@
   "wake_chime": false,
   "whisper_model": "tiny.en",
   "whisper_compute": "int8",
+  "whisper_cpu_threads": 0,
+  "whisper_vad_filter": false,
   "stt_confidence_guard": true,
   "stt_min_avg_logprob": -1.0,
   "stt_max_no_speech_prob": 0.6,
