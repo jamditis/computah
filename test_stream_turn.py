@@ -191,16 +191,39 @@ def main() -> int:
         f"roundtrip={len(roundtrip)}/{len(src)}",
     )
 
-    # The window is _SPEECH_ONSET_FRAMES + 1 on purpose: a single quiet leading frame
-    # (a breath before the command) must not defeat detection. This pins the +1 -- with
-    # _CUE_PEEK_FRAMES == _SPEECH_ONSET_FRAMES the sustained run can't complete after a
-    # quiet frame and the command would be misread as a pause and clipped.
+    # A single quiet leading frame (a breath before the command) must not defeat
+    # detection. The onset completes inside the _SPEECH_ONSET_FRAMES + 1 window, so the
+    # gate decides without reading past it.
     play, peeked = pipeline.peek_cue_gate(
         iter(silent(1) + loud(pipeline._SPEECH_ONSET_FRAMES) + silent(2))
     )
     check(
         "a single quiet leading frame still reads as a no-pause command (+1 window)",
         play is False and len(peeked) == pipeline._CUE_PEEK_FRAMES,
+        f"play={play} peeked={len(peeked)}",
+    )
+
+    # A command that starts in the last frame of the window has one voiced frame inside
+    # it. The gate must read that run to its end instead of deciding on the window, or
+    # it plays the cue and the cue bleed drops the command's first syllable (#106).
+    quiet_lead = pipeline._CUE_PEEK_FRAMES - 1
+    play, peeked = pipeline.peek_cue_gate(
+        iter(silent(quiet_lead) + loud(pipeline._SPEECH_ONSET_FRAMES + 2))
+    )
+    check(
+        "a command starting in the last window frame skips the cue (#106)",
+        play is False and len(peeked) == quiet_lead + pipeline._SPEECH_ONSET_FRAMES,
+        f"play={play} peeked={len(peeked)}",
+    )
+
+    # The extension stops at the first quiet frame, so a transient at the window edge
+    # still plays the cue, one frame later than a silent window.
+    play, peeked = pipeline.peek_cue_gate(
+        iter(silent(quiet_lead) + loud(1) + silent(5))
+    )
+    check(
+        "a transient at the window edge still plays the cue after one extra frame",
+        play is True and len(peeked) == pipeline._CUE_PEEK_FRAMES + 1,
         f"play={play} peeked={len(peeked)}",
     )
 

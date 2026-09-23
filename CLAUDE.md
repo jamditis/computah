@@ -61,8 +61,9 @@ Four stages, each independently swappable (`pipeline.py`):
    post-cue command. The chime is opt-in and default off pending PowerConf validation.
    On a half-duplex device the cue and capture cannot overlap, so `peek_cue_gate`
    checks the post-wake window with energy plus Silero VAD. It skips the cue for a
-   no-pause command and plays it after a pause. The remaining short-pause boundary is
-   tracked in issue #106.
+   no-pause command and plays it after a pause. A voiced run still open when the
+   window closes is read until it resolves, so a command that starts in the last frames of a
+   short pause is not clipped by the cue (#106).
 2. `transcribe` — faster-whisper (CTranslate2, int8). `transcribe_detailed` also
    returns the decoder's confidence (`avg_logprob`, `no_speech_prob`) and accepts
    either a WAV path or a normalized 16 kHz mono waveform. Both live paths pass captured
