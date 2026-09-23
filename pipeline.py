@@ -635,12 +635,12 @@ _WAKE_HISTORY_FRAMES = 40  # ~3.2 s retained only for empty-capture recovery (#5
 # needs enough context for transcription to distinguish "wake" from "wake + command."
 _CUE_PEEK_FRAMES = _SPEECH_ONSET_FRAMES + 1  # ~0.32 s window peeked after the wake
 # word to tell a no-pause command from a pause before the
-# acknowledgment cue plays (issue #55). Must be at least
-# _SPEECH_ONSET_FRAMES so a sustained voiced run can form
-# inside it; the +1 lets one quiet leading frame not defeat
-# detection. Larger tolerates more but delays the cue on the
-# paused case -- the cue plays only after this window is read,
-# at 80 ms/frame.
+# acknowledgment cue plays (issue #55). This is the shortest
+# silence that counts as a pause: a voiced run still open at
+# the window's end is read past it (#106), so a late onset is
+# not missed. Larger demands a longer pause and delays the cue
+# on the paused case -- the cue plays only after this window
+# is read, at 80 ms/frame.
 
 
 _FRAME_MS = FRAME_SIZE / 16000 * 1000  # 80.0 ms of audio per capture frame
@@ -789,7 +789,8 @@ def peek_cue_gate(frames, vad_threshold=None):
     a user waiting for the cue has room tone -- so the cue can be skipped when it would
     clip a command and played when it is safe.
 
-    Pulls up to _CUE_PEEK_FRAMES frames off `frames`, stopping the instant a sustained
+    Pulls _CUE_PEEK_FRAMES frames off `frames` (more while a voiced run is open at the
+    window's end, see below), stopping the instant a sustained
     voiced run appears (_SPEECH_ONSET_FRAMES in a row -- the same onset test
     capture_request uses, so a lone click or cough edge does not count as speech).
     When `vad_threshold` is given, the sustained-energy candidate must also pass the
@@ -802,21 +803,22 @@ def peek_cue_gate(frames, vad_threshold=None):
     of the stream on the no-pause branch, so peeking never drops command audio. On the
     silent branch `peeked` is pre-cue room tone the caller drops with the cue bleed.
 
-    Bounded residual edge: a command that starts in the last one or two frames of the
-    window (a very short pause) has fewer than _SPEECH_ONSET_FRAMES voiced frames here,
-    so the gate reads it as a pause, plays the cue, and drops that leading fragment with
-    the cue bleed. The clip is at most _SPEECH_ONSET_FRAMES - 1 frames (~160 ms) and cannot
-    be stitched back: on this half-duplex device the mic is flushed while the cue plays, so a
-    pre-cue fragment and the post-cue tail are separated by the flushed cue span. Dropping the
-    fragment (a clean, later start) beats prepending it across that gap (a corrupt one).
-    This is strictly better than the pre-#55 cue, which lost the whole command, and the
-    boundary is tuned by _CUE_PEEK_FRAMES / _SPEECH_ONSET_FRAMES in the PowerConf
-    hardware-validation pass #55 still calls for. Tracked as computah #106.
+    A voiced run still open when the window closes is read until it resolves (#106). A command
+    that starts in the last frame or two of a very short pause has fewer than
+    _SPEECH_ONSET_FRAMES voiced frames inside the window; deciding there would read it as
+    a pause, play the cue, and drop that leading fragment with the cue bleed. The fragment
+    cannot be stitched back, because the mic is flushed while the cue plays. So the peek
+    keeps reading until the run either completes an onset (skip the cue) or breaks on a
+    quiet frame (a transient; play it). The extension is at most _SPEECH_ONSET_FRAMES - 1
+    frames (~160 ms), it delays the cue only when the window ends on sound, and a silent
+    window still decides at _CUE_PEEK_FRAMES. Skipping the cue on any voiced frame would
+    also avoid the clip, but a click or cough at the edge would then suppress the cue;
+    resolving the run keeps that transient rejection for a bounded delay.
     """
     peeked: list[np.ndarray] = []
     voiced_run = 0
     speech = False
-    for _ in range(_CUE_PEEK_FRAMES):
+    while len(peeked) < _CUE_PEEK_FRAMES or voiced_run:
         frame = next(frames, None)
         if frame is None:
             break  # stream ended inside the peek; decide on what was seen
