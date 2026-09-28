@@ -55,19 +55,23 @@ _DELIVERY_RE = re.compile(
     r"^--- .* delivery_id=(\S+)(?: event_id=(\S+))? ---$", re.MULTILINE
 )
 
-# (persona, prompt, *, event_id=None) -> None, raises on failure. event_id is this
-# turn's correlation id (#19); the concrete transports pass it to bot-spren so the
-# reply producer can echo it. Test stand-ins may accept and ignore it.
-SendFn = Callable[..., None]
+# (persona, prompt, *, event_id=None) -> None or bool, raises on failure. event_id is
+# this turn's correlation id (#19); the concrete transports pass it to bot-spren so
+# the reply producer can echo it. Test stand-ins may accept and ignore it. A send
+# returns False when an older bot-spren made it drop the id (the landing probe then
+# has nothing to look up); None or True means the id reached the inbox.
+SendFn = Callable[..., "bool | None"]
 ReplyReader = Callable[[], str]  # () -> full reply-file text ("" if absent)
 
-# () -> current event count in the inbox the SESSION consumes, or None when the
-# inbox cannot be observed (a transport blip) so the caller skips the check rather
-# than false-alarming. It lets the bridge confirm a send landed before it waits on a
+# (event_id) -> True when an event carrying this turn's event_id is in the inbox the
+# SESSION consumes, False when it is not there yet, or None when the inbox cannot be
+# observed (a transport blip) so the caller skips the check rather than
+# false-alarming. It lets the bridge confirm a send landed before it waits on a
 # reply (#44): `bot-spren send` can exit 0 yet append to an inbox the session never
 # reads (a working-dir/inbox mismatch), which otherwise looks identical to a slow
-# brain, a full timeout with no diagnostic.
-LandingProbe = Callable[[], "int | None"]
+# brain, a full timeout with no diagnostic. Matching the exact event_id (#98) needs
+# no pre-send baseline, so the check adds no probe before the send.
+LandingProbe = Callable[[str], "bool | None"]
 
 
 def _delivery_blocks(reply_text: str) -> list[tuple[str, str | None, str]]:
@@ -139,11 +143,12 @@ def brain_via_bridge(
     timeouts and in-flight replies stay aligned; with no cursor a fresh one is used,
     which is correct only for a single isolated, backlog-free turn.
 
-    When `confirm_landing` is given, the turn checks that the session's inbox grew
-    after the send before waiting the full `landing_timeout_s`; a send that exits 0
-    but never reached the inbox (a dead-letter working-dir mismatch, #44) returns a
-    distinct, logged error instead of masquerading as a slow brain. With no probe, or
-    one that reports the inbox as unobservable, the check is skipped.
+    When `confirm_landing` is given, the turn checks that the session's inbox holds
+    this turn's event_id after the send, for up to `landing_timeout_s`. A send that
+    exits 0 but never reached the inbox (a dead-letter working-dir mismatch, #44)
+    returns a distinct, logged error instead of masquerading as a slow brain. With no
+    probe, a probe that reports the inbox as unobservable, or a legacy send that
+    dropped the event_id, the check is skipped.
 
     Never raises for an expected failure (timeout, send error, non-landing send): the
     caller is a voice loop, so a short spoken sentence is more useful than a traceback.
@@ -165,12 +170,8 @@ def brain_via_bridge(
 
     prompt = text if system_prompt is None else f"{system_prompt}\n\nUser: {text}"
     event_id = str(uuid.uuid4())  # this turn's correlation id (#19)
-    # Baseline the session's inbox BEFORE sending, so the landing check below can tell
-    # whether this send actually reached it (#44). None means the inbox cannot be
-    # observed, so the check is skipped rather than guessed.
-    inbox_before = confirm_landing() if confirm_landing is not None else None
     try:
-        send(persona, prompt, event_id=event_id)
+        stamped = send(persona, prompt, event_id=event_id)
     except Exception as e:  # transport failure (ssh down, CLI missing, ...)
         logger.warning("Brain send failed error=%s", type(e).__name__)
         return f"Sorry, I couldn't reach the brain ({type(e).__name__})."
@@ -178,26 +179,34 @@ def brain_via_bridge(
     # A send can exit 0 yet dead-letter to an inbox the session never reads (#44):
     # bot-spren resolves the inbox from its working dir, so a missing -d writes to a
     # file nobody tails. That looks identical to a slow brain, a full timeout with no
-    # diagnostic. When the inbox is observable, confirm it grew before waiting the whole
-    # reply timeout, and fail loudly and distinctly if it did not. A slow brain (the
-    # message landed, the reply is just late) still falls through to the timeout below.
-    # The signal is a count delta, so another producer writing the same inbox between
-    # the baseline and the poll can mask a real non-landing; that only degrades this
-    # turn to the ordinary timeout, never a false non-landing.
-    if inbox_before is not None:
+    # diagnostic. When a probe is configured, look for this turn's event_id in the
+    # inbox the session reads, and fail loudly and distinctly if it never appears. A
+    # slow brain (the message landed, the reply is just late) still falls through to
+    # the timeout below. The lookup runs only after a successful send (#98), so a down
+    # host costs one transport timeout, in the send, before the spoken send error.
+    if confirm_landing is not None and stamped is False:
+        # An older bot-spren rejected --event-id and the send was retried without it,
+        # so the inbox event carries bot-spren's own id. Looking up ours would report
+        # a false non-landing, so this turn skips the check.
+        logger.warning(
+            "brain bridge: send to persona %r used the legacy path without "
+            "--event-id; skipping the landing check. Upgrade bot-spren.",
+            persona,
+        )
+    elif confirm_landing is not None:
         landing_deadline = time.monotonic() + landing_timeout_s
         while True:
-            inbox_now = confirm_landing()
-            if inbox_now is None or inbox_now > inbox_before:
+            landed = confirm_landing(event_id)
+            if landed is None or landed:
                 break  # landed, or the inbox went unobservable, so do not false-alarm
             if time.monotonic() >= landing_deadline:
                 logger.error(
-                    "brain bridge: send to persona %r did not land; the session's "
-                    "inbox stayed at %d event(s) after %.1fs. Likely a working-dir "
+                    "brain bridge: send to persona %r did not land; event_id %s was "
+                    "not in the session's inbox after %.1fs. Likely a working-dir "
                     "mismatch. The send wrote to a dead-letter inbox the session does "
                     "not read (bot-spren -d). See computah #44.",
                     persona,
-                    inbox_before,
+                    event_id,
                     landing_timeout_s,
                 )
                 return (
@@ -287,8 +296,10 @@ _UNKNOWN_EVENT_ID_OPTION = "No such option: --event-id"
 
 def _run_send_command(
     command: list[str], *, legacy_command: list[str] | None, timeout_s: int
-) -> None:
+) -> bool:
     """Run a send, falling back only when an older CLI rejects --event-id.
+
+    Returns False when the legacy retry ran, so the event_id never reached the inbox.
 
     Click rejects an unknown option before it invokes bot-spren's send handler, so
     this exact failure cannot have appended an inbox event. Retrying without the
@@ -313,6 +324,8 @@ def _run_send_command(
             timeout=timeout_s,
             check=True,
         )
+        return False
+    return True
 
 
 def cli_send(
@@ -326,8 +339,8 @@ def cli_send(
     and use positional matching.
     """
 
-    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
-        _run_send_command(
+    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> bool:
+        return _run_send_command(
             _send_argv(bot_spren_bin, working_dir, persona, prompt, event_id),
             legacy_command=(
                 _send_argv(bot_spren_bin, working_dir, persona, prompt, None)
@@ -352,14 +365,14 @@ def ssh_cli_send(
     shell-metacharacter execution on the brain host.
     """
 
-    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
+    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> bool:
         argv = _send_argv(bot_spren_bin, working_dir, persona, prompt, event_id)
         remote = " ".join(shlex.quote(p) for p in argv)
         legacy_remote = None
         if event_id is not None:
             legacy_argv = _send_argv(bot_spren_bin, working_dir, persona, prompt, None)
             legacy_remote = " ".join(shlex.quote(p) for p in legacy_argv)
-        _run_send_command(
+        return _run_send_command(
             ["ssh", "-o", "ConnectTimeout=15", host, remote],
             legacy_command=(
                 ["ssh", "-o", "ConnectTimeout=15", host, legacy_remote]
@@ -421,41 +434,62 @@ def ssh_reply_reader(host: str, reply_path: str) -> ReplyReader:
 
 
 def file_inbox_probe(inbox_path: str | Path) -> LandingProbe:
-    """Count events in a local inbox file (persona on this host), for #44's landing check.
+    """Look up an event_id in a local inbox file (persona on this host), for #44/#98.
 
-    Returns the number of non-empty lines, since `bot-spren send` appends one JSON
-    event per line. A missing file is 0 (the session's inbox has received nothing
-    here yet, which is exactly the non-landing signal), while any other read error is
-    None so a transient failure skips the check instead of raising a false alarm.
+    `bot-spren send` appends one JSON event per line, carrying the caller's event_id.
+    A missing file is False (the session's inbox has received nothing here yet, which
+    is exactly the non-landing signal). A line that is not a JSON object is skipped.
+    Any other read error is None so a transient failure skips the check instead of
+    raising a false alarm.
     """
     inbox_path = Path(inbox_path)
 
-    def _count() -> int | None:
+    def _has(event_id: str) -> bool | None:
         try:
             with inbox_path.open("r", encoding="utf-8") as f:
-                return sum(1 for line in f if line.strip())
+                for line in f:
+                    try:
+                        entry = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(entry, dict) and entry.get("event_id") == event_id:
+                        return True
+            return False
         except FileNotFoundError:
-            return 0
+            return False
         except (OSError, UnicodeDecodeError):
             return None
 
-    return _count
+    return _has
 
 
 def ssh_inbox_probe(host: str, inbox_path: str) -> LandingProbe:
-    """Count events in a remote inbox over ssh (persona on another host), for #44.
+    """Look up an event_id in a remote inbox over ssh (persona on another host), #98.
 
-    Mirrors file_inbox_probe over ssh: a missing file counts as 0, and any ssh
-    failure (timeout, non-zero exit, transport error, unparseable output) returns
-    None so a flaky host skips the landing check rather than reporting a false
-    non-landing. `wc -l` matches the one-JSON-event-per-line `send` format.
+    Mirrors file_inbox_probe over ssh with one command per lookup: a missing file is
+    False, and any failure (ssh timeout or transport error, an unreadable inbox,
+    unexpected output) returns None so a flaky host skips the landing check rather
+    than reporting a false non-landing. The pattern is anchored to the `event_id`
+    key, like the local probe's field match, so the id quoted in another field of
+    some other event does not count. grep's own status separates a miss (1) from
+    a read error (2).
     """
-    remote = (
-        f"if [ -f {shlex.quote(inbox_path)} ]; "
-        f"then wc -l < {shlex.quote(inbox_path)}; else echo MISSING; fi"
-    )
 
-    def _count() -> int | None:
+    # Quote once here, so a malformed path fails when the brain is built, before any
+    # send, instead of raising mid-turn after the prompt is already on its way.
+    path = shlex.quote(inbox_path)
+
+    def _has(event_id: str) -> bool | None:
+        # The bridge's ids are uuid4s: hex and hyphens, literal inside an ERE. Any
+        # other id cannot be matched safely, so it is unobservable, not absent.
+        if not re.fullmatch(r"[0-9A-Za-z-]+", event_id):
+            return None
+        pattern = shlex.quote(f'"event_id" *: *"{event_id}"')
+        remote = (
+            f"if [ -f {path} ]; then grep -qE -- {pattern} {path}; "
+            f"case $? in 0) echo FOUND;; 1) echo ABSENT;; *) echo ERROR;; esac; "
+            f"else echo MISSING; fi"
+        )
         try:
             proc = subprocess.run(
                 ["ssh", "-o", "ConnectTimeout=15", host, remote],
@@ -468,14 +502,13 @@ def ssh_inbox_probe(host: str, inbox_path: str) -> LandingProbe:
         if proc.returncode != 0:
             return None
         out = proc.stdout.strip()
-        if out == "MISSING":
-            return 0
-        try:
-            return int(out.split()[0])
-        except (ValueError, IndexError):
-            return None
+        if out == "FOUND":
+            return True
+        if out in ("ABSENT", "MISSING"):
+            return False
+        return None
 
-    return _count
+    return _has
 
 
 # --------------------------------------------------------------------------- #

@@ -231,6 +231,28 @@ def test_a_failed_ssh_hop_is_not_a_timing() -> None:
         "a hop every 0.61 s" in text_ok and "ssh_reply_reader" in text_ok,
         "every reply poll opens its own connection, so transport scales with the answer",
     )
+    check(
+        "without a landing probe the floor is three hops",
+        "floor is three hops, 0.33 s here" in text_ok and "event_id" not in text_ok,
+        "the reply-file read, the send, and the first poll",
+    )
+    text_probe = "\n".join(
+        benchmark.report_lines(
+            collected,
+            {
+                "transport": "ssh",
+                "poll_s": 0.5,
+                "landing_probe": True,
+                "attempts": 5,
+                "samples": [0.10, 0.12, 0.11],
+            },
+        )
+    )
+    check(
+        "the landing probe adds one post-send lookup to the floor",
+        "floor is four hops, 0.44 s here" in text_probe and "event_id" in text_probe,
+        "#98 looks up the sent event_id once after the send and never before it",
+    )
     misconfigured = "\n".join(
         benchmark.report_lines(collected, {"transport": "missing-ssh-host"})
     )

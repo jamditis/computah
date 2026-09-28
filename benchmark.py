@@ -442,6 +442,19 @@ def _transport_lines(transport: dict | None) -> list[str]:
     hop_n = len(samples)
     hop = median(samples)
     poll_s = transport["poll_s"]
+    # The landing probe (#44) adds one post-send event_id lookup per turn (#98).
+    if transport.get("landing_probe"):
+        floor_n, floor_word = 4, "four"
+        floor_steps = (
+            "reads the reply file before sending, sends, looks up the sent event_id "
+            "in the session's inbox once, and then polls once immediately"
+        )
+    else:
+        floor_n, floor_word = 3, "three"
+        floor_steps = (
+            "reads the reply file before sending, sends, and then polls once "
+            "immediately"
+        )
     lines = ["", "Brain transport:", ""]
     # The hop is probed separately from the pipeline runs and failed probes are
     # dropped, so it carries its own n: enough pipeline runs to earn a p95 does not
@@ -461,9 +474,8 @@ def _transport_lines(transport: dict | None) -> list[str]:
         "",
         "That is one hop, not a turn's transport, and it excludes whatever the "
         "assistant session spends thinking: the probe is a no-op command. The floor "
-        f"is three hops, {3 * hop:.2f} s here, because brain_via_bridge reads the "
-        "reply file before sending, sends, and then polls once immediately, before "
-        "its first sleep. Every later poll adds another, since "
+        f"is {floor_word} hops, {floor_n * hop:.2f} s here, because brain_via_bridge "
+        f"{floor_steps}, before its first sleep. Every later poll adds another, since "
         "brain_bridge.ssh_reply_reader runs `ssh <host> cat` per read and nothing "
         f"multiplexes the connections. With brain_poll_s at {poll_s} s that is a hop "
         f"every {poll_s + hop:.2f} s for as long as the assistant takes to answer, so "
@@ -608,6 +620,8 @@ def main(argv: list[str] | None = None) -> int:
         transport = {
             "transport": "ssh",
             "poll_s": cfg.get("brain_poll_s"),
+            # build_brain wires the ssh landing probe (#44) only when this is set.
+            "landing_probe": bool(cfg.get("brain_inbox_path")),
             "attempts": args.runs,
             "samples": ssh_hop_samples(host, args.runs),
         }
