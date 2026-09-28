@@ -55,10 +55,12 @@ _DELIVERY_RE = re.compile(
     r"^--- .* delivery_id=(\S+)(?: event_id=(\S+))? ---$", re.MULTILINE
 )
 
-# (persona, prompt, *, event_id=None) -> None, raises on failure. event_id is this
-# turn's correlation id (#19); the concrete transports pass it to bot-spren so the
-# reply producer can echo it. Test stand-ins may accept and ignore it.
-SendFn = Callable[..., None]
+# (persona, prompt, *, event_id=None) -> None or bool, raises on failure. event_id is
+# this turn's correlation id (#19); the concrete transports pass it to bot-spren so
+# the reply producer can echo it. Test stand-ins may accept and ignore it. A send
+# returns False when an older bot-spren made it drop the id (the landing probe then
+# has nothing to look up); None or True means the id reached the inbox.
+SendFn = Callable[..., "bool | None"]
 ReplyReader = Callable[[], str]  # () -> full reply-file text ("" if absent)
 
 # (event_id) -> True when an event carrying this turn's event_id is in the inbox the
@@ -142,10 +144,11 @@ def brain_via_bridge(
     which is correct only for a single isolated, backlog-free turn.
 
     When `confirm_landing` is given, the turn checks that the session's inbox holds
-    this turn's event_id after the send, for up to `landing_timeout_s`; a send that exits 0
-    but never reached the inbox (a dead-letter working-dir mismatch, #44) returns a
-    distinct, logged error instead of masquerading as a slow brain. With no probe, or
-    one that reports the inbox as unobservable, the check is skipped.
+    this turn's event_id after the send, for up to `landing_timeout_s`. A send that
+    exits 0 but never reached the inbox (a dead-letter working-dir mismatch, #44)
+    returns a distinct, logged error instead of masquerading as a slow brain. With no
+    probe, a probe that reports the inbox as unobservable, or a legacy send that
+    dropped the event_id, the check is skipped.
 
     Never raises for an expected failure (timeout, send error, non-landing send): the
     caller is a voice loop, so a short spoken sentence is more useful than a traceback.
@@ -168,7 +171,7 @@ def brain_via_bridge(
     prompt = text if system_prompt is None else f"{system_prompt}\n\nUser: {text}"
     event_id = str(uuid.uuid4())  # this turn's correlation id (#19)
     try:
-        send(persona, prompt, event_id=event_id)
+        stamped = send(persona, prompt, event_id=event_id)
     except Exception as e:  # transport failure (ssh down, CLI missing, ...)
         logger.warning("Brain send failed error=%s", type(e).__name__)
         return f"Sorry, I couldn't reach the brain ({type(e).__name__})."
@@ -181,7 +184,16 @@ def brain_via_bridge(
     # slow brain (the message landed, the reply is just late) still falls through to
     # the timeout below. The lookup runs only after a successful send (#98), so a down
     # host costs one transport timeout, in the send, before the spoken send error.
-    if confirm_landing is not None:
+    if confirm_landing is not None and stamped is False:
+        # An older bot-spren rejected --event-id and the send was retried without it,
+        # so the inbox event carries bot-spren's own id. Looking up ours would report
+        # a false non-landing, so this turn skips the check.
+        logger.warning(
+            "brain bridge: send to persona %r used the legacy path without "
+            "--event-id; skipping the landing check. Upgrade bot-spren.",
+            persona,
+        )
+    elif confirm_landing is not None:
         landing_deadline = time.monotonic() + landing_timeout_s
         while True:
             landed = confirm_landing(event_id)
@@ -284,8 +296,10 @@ _UNKNOWN_EVENT_ID_OPTION = "No such option: --event-id"
 
 def _run_send_command(
     command: list[str], *, legacy_command: list[str] | None, timeout_s: int
-) -> None:
+) -> bool:
     """Run a send, falling back only when an older CLI rejects --event-id.
+
+    Returns False when the legacy retry ran, so the event_id never reached the inbox.
 
     Click rejects an unknown option before it invokes bot-spren's send handler, so
     this exact failure cannot have appended an inbox event. Retrying without the
@@ -310,6 +324,8 @@ def _run_send_command(
             timeout=timeout_s,
             check=True,
         )
+        return False
+    return True
 
 
 def cli_send(
@@ -323,8 +339,8 @@ def cli_send(
     and use positional matching.
     """
 
-    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
-        _run_send_command(
+    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> bool:
+        return _run_send_command(
             _send_argv(bot_spren_bin, working_dir, persona, prompt, event_id),
             legacy_command=(
                 _send_argv(bot_spren_bin, working_dir, persona, prompt, None)
@@ -349,14 +365,14 @@ def ssh_cli_send(
     shell-metacharacter execution on the brain host.
     """
 
-    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> None:
+    def _send(persona: str, prompt: str, *, event_id: str | None = None) -> bool:
         argv = _send_argv(bot_spren_bin, working_dir, persona, prompt, event_id)
         remote = " ".join(shlex.quote(p) for p in argv)
         legacy_remote = None
         if event_id is not None:
             legacy_argv = _send_argv(bot_spren_bin, working_dir, persona, prompt, None)
             legacy_remote = " ".join(shlex.quote(p) for p in legacy_argv)
-        _run_send_command(
+        return _run_send_command(
             ["ssh", "-o", "ConnectTimeout=15", host, remote],
             legacy_command=(
                 ["ssh", "-o", "ConnectTimeout=15", host, legacy_remote]

@@ -255,8 +255,12 @@ def main() -> int:
             return _FakeProc()
 
         brain_bridge.subprocess.run = _old_cli_run
-        brain_bridge.cli_send("bot-spren", working_dir="/x/syl")(
+        local_stamped = brain_bridge.cli_send("bot-spren", working_dir="/x/syl")(
             "syl", "hi", event_id="turn-789"
+        )
+        check(
+            local_stamped is False,
+            "the legacy local retry reports that the event id was dropped",
         )
         check(
             len(attempts) == 2
@@ -266,8 +270,12 @@ def main() -> int:
         )
 
         attempts.clear()
-        brain_bridge.ssh_cli_send("ofj", "bot-spren", working_dir="/x/syl")(
-            "syl", "hi", event_id="turn-987"
+        remote_stamped = brain_bridge.ssh_cli_send(
+            "ofj", "bot-spren", working_dir="/x/syl"
+        )("syl", "hi", event_id="turn-987")
+        check(
+            remote_stamped is False,
+            "the legacy remote retry reports that the event id was dropped",
         )
         check(
             len(attempts) == 2
@@ -697,6 +705,26 @@ def main() -> int:
         f"a down host returns the spoken send error: {out_down!r}",
     )
     check(probe_calls == [], f"a failed send runs no landing probe: {probe_calls!r}")
+
+    # A legacy send (older bot-spren, no --event-id) wrote bot-spren's own id, so a
+    # lookup of ours would be a false non-landing: the check is skipped and the turn
+    # reaches the ordinary reply wait instead.
+    legacy_probe_calls: list[str] = []
+    out_legacy = brain_bridge.brain_via_bridge(
+        "legacy send",
+        persona="syl",
+        send=lambda persona, prompt, *, event_id=None: False,
+        read_reply=lambda: "",
+        confirm_landing=lambda eid: legacy_probe_calls.append(eid) or False,
+        timeout_s=0.05,
+        landing_timeout_s=0.05,
+        poll_s=0.01,
+    )
+    check(
+        out_legacy.startswith("Sorry, the brain took too long")
+        and legacy_probe_calls == [],
+        f"a legacy send skips the landing check: {out_legacy!r}",
+    )
 
     # The probe runs only after the send, with the event_id the send carried.
     order: list[tuple[str, str]] = []
