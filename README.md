@@ -355,9 +355,11 @@ configuration answers locally and sends nothing, so it still runs without the fl
 It times the ssh hop to the brain host as its own row, and only when `brain_backend` is
 `bridge`: a `cli` backend answers locally, so a leftover `brain_transport: "ssh"` buys no
 hop. The brain stage is transport plus however long the assistant took to answer, and the
-transport half is not one hop per turn: the floor is three (the pre-send read, the send,
-and an immediate first poll), then `ssh_reply_reader` opens another connection for every
-later poll with nothing multiplexing them, so it grows with the answer. Warming Piper or
+transport half is not one hop per turn: the floor is three (the reply-file read before the
+send, the send, and an immediate first poll), or four when `brain_inbox_path` enables the
+landing probe, which adds one post-send lookup of the turn's `event_id`. Then
+`ssh_reply_reader` opens another connection for every later poll with nothing
+multiplexing them, so it grows with the answer. Warming Piper or
 whisper cannot reduce it.
 
 The 3.9 s text-to-speech figure predates the resident voice: `speak()` now synthesizes

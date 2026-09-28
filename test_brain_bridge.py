@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -581,8 +583,139 @@ def main() -> int:
     corrupt_inbox = d / "land-corrupt-inbox.jsonl"
     corrupt_inbox.write_bytes(b"\xff\n")
     check(
-        brain_bridge.file_inbox_probe(corrupt_inbox)() is None,
+        brain_bridge.file_inbox_probe(corrupt_inbox)("any-id") is None,
         "a non-UTF-8 inbox makes the local landing probe unobservable, not fatal",
+    )
+
+    # #98: the probe matches this turn's exact event_id, not a line count, so another
+    # producer's event or a malformed line in the same inbox cannot fake a landing.
+    local_probe_inbox = d / "land-local-probe.jsonl"
+    local_probe = brain_bridge.file_inbox_probe(local_probe_inbox)
+    check(
+        local_probe("id-a") is False,
+        "a missing local inbox is a definite non-landing (False)",
+    )
+    local_probe_inbox.write_text(
+        'not json\n[1, 2]\n{"event_id": "id-other"}\n', encoding="utf-8"
+    )
+    check(
+        local_probe("id-a") is False,
+        "other events and malformed lines do not count as this turn's landing",
+    )
+    with local_probe_inbox.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"event_id": "id-a", "payload": "hi"}) + "\n")
+    check(local_probe("id-a") is True, "the exact event_id in the inbox is a landing")
+
+    # The ssh probe runs one remote command per lookup and maps its answer; any
+    # transport failure is unobservable (None), never a false non-landing.
+    real_run = brain_bridge.subprocess.run
+    ssh_calls: list[list[str]] = []
+
+    def fake_ssh(result):
+        def _run(argv, **_kwargs):
+            ssh_calls.append(argv)
+            if isinstance(result, BaseException):
+                raise result
+            code, out = result
+            return subprocess.CompletedProcess(argv, code, stdout=out, stderr="")
+
+        return _run
+
+    ssh_probe = brain_bridge.ssh_inbox_probe("persona-host", "/srv/in box.jsonl")
+    try:
+        for result, want, label in [
+            ((0, "FOUND\n"), True, "FOUND is a landing"),
+            ((0, "ABSENT\n"), False, "ABSENT is a non-landing"),
+            ((0, "MISSING\n"), False, "a missing remote inbox is a non-landing"),
+            ((0, "7\n"), None, "unexpected output is unobservable"),
+            ((255, ""), None, "an ssh failure is unobservable"),
+            (subprocess.TimeoutExpired("ssh", 40), None, "a down host is unobservable"),
+        ]:
+            brain_bridge.subprocess.run = fake_ssh(result)
+            check(ssh_probe("id-ssh") is want, f"ssh probe: {label}")
+    finally:
+        brain_bridge.subprocess.run = real_run
+    remote_cmd = ssh_calls[0][-1]
+    check(
+        ssh_calls[0][:4] == ["ssh", "-o", "ConnectTimeout=15", "persona-host"]
+        and "'/srv/in box.jsonl'" in remote_cmd,
+        f"ssh probe quotes the inbox path: {remote_cmd!r}",
+    )
+
+    # Run the real remote command through a local shell in place of ssh, so the
+    # grep pattern, its exit-status mapping, and the quoting are exercised for real.
+    def shell_ssh(argv, **kwargs):
+        return real_run(["sh", "-c", argv[-1]], **kwargs)
+
+    sh_inbox = d / "ssh inbox.jsonl"
+    sh_probe = brain_bridge.ssh_inbox_probe("persona-host", str(sh_inbox))
+    brain_bridge.subprocess.run = shell_ssh
+    try:
+        check(sh_probe("abc-123") is False, "sh: a missing remote inbox is False")
+        sh_inbox.write_text(
+            json.dumps({"payload": "quoting abc-123", "event_id": "other"}) + "\n",
+            encoding="utf-8",
+        )
+        check(
+            sh_probe("abc-123") is False,
+            "sh: the id quoted in another field of another event is not a landing",
+        )
+        with sh_inbox.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"event_id": "abc-123"}) + "\n")
+        check(sh_probe("abc-123") is True, "sh: the exact event_id key is a landing")
+        check(
+            sh_probe("x'; echo FOUND; '") is None,
+            "sh: an id outside the uuid alphabet is unobservable, never run",
+        )
+        sh_inbox.chmod(0)
+        if not os.access(sh_inbox, os.R_OK):  # root reads through mode 000
+            check(
+                sh_probe("abc-123") is None,
+                "sh: an unreadable remote inbox is unobservable, not absent",
+            )
+        sh_inbox.chmod(0o600)
+    finally:
+        brain_bridge.subprocess.run = real_run
+
+    # A down host costs one transport timeout: the send fails first, and the landing
+    # probe never runs, before or after it (#98 removed the pre-send probe).
+    probe_calls: list[str] = []
+
+    def failing_send(persona, prompt, *, event_id=None):
+        raise subprocess.TimeoutExpired("ssh", 40)
+
+    out_down = brain_bridge.brain_via_bridge(
+        "anyone there?",
+        persona="syl",
+        send=failing_send,
+        read_reply=lambda: "",
+        confirm_landing=lambda eid: probe_calls.append(eid) or True,
+        timeout_s=30,
+    )
+    check(
+        out_down.startswith("Sorry, I couldn't reach the brain (TimeoutExpired)"),
+        f"a down host returns the spoken send error: {out_down!r}",
+    )
+    check(probe_calls == [], f"a failed send runs no landing probe: {probe_calls!r}")
+
+    # The probe runs only after the send, with the event_id the send carried.
+    order: list[tuple[str, str]] = []
+
+    def recording_send(persona, prompt, *, event_id=None):
+        order.append(("send", event_id))
+
+    brain_bridge.brain_via_bridge(
+        "order check",
+        persona="syl",
+        send=recording_send,
+        read_reply=lambda: "",
+        confirm_landing=lambda eid: order.append(("probe", eid)) or True,
+        timeout_s=0.05,
+        poll_s=0.01,
+    )
+    check(
+        [step for step, _ in order] == ["send", "probe"] and order[0][1] == order[1][1],
+        f"one post-send probe for the sent event_id, none before it: {order!r}",
     )
 
     log_records: list[logging.LogRecord] = []
@@ -596,9 +729,14 @@ def main() -> int:
     brain_bridge.logger.setLevel(logging.ERROR)
     try:
         # Non-landing: the send writes to inbox A, but the probe watches inbox B (the
-        # inbox the session actually reads), which never grows.
+        # inbox the session actually reads), which never gets this turn's event.
         sent_inbox = d / "land-sent.jsonl"
-        watched_inbox = d / "land-watched.jsonl"  # never written -> never grows
+        # The watched inbox already holds another producer's event and gets no new
+        # one from this send; a line count could not tell those apart (#98).
+        watched_inbox = d / "land-watched.jsonl"
+        watched_inbox.write_text(
+            json.dumps({"event_id": "someone-else"}) + "\n", encoding="utf-8"
+        )
         no_land_cursor = brain_bridge.ReplyCursor()
         out_noland = brain_bridge.brain_via_bridge(
             "did this land?",
@@ -663,7 +801,7 @@ def main() -> int:
             send=brain_bridge.local_sim_send(unobs_inbox),
             read_reply=brain_bridge.file_reply_reader(unobs_reply),
             cursor=brain_bridge.ReplyCursor(),
-            confirm_landing=lambda: None,  # inbox cannot be observed this turn
+            confirm_landing=lambda _eid: None,  # inbox cannot be observed this turn
             timeout_s=10,
             poll_s=0.05,
         )
