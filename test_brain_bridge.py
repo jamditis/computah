@@ -650,6 +650,15 @@ def main() -> int:
         f"ssh probe quotes the inbox path: {remote_cmd!r}",
     )
 
+    # A malformed path (say, a list from config.local.json) must fail when the probe
+    # is built, before any send, not mid-turn after the prompt went out.
+    try:
+        brain_bridge.ssh_inbox_probe("persona-host", ["/srv/inbox.jsonl"])
+        bad_path_fails_early = False
+    except TypeError:
+        bad_path_fails_early = True
+    check(bad_path_fails_early, "a non-string ssh inbox path fails at construction")
+
     # Run the real remote command through a local shell in place of ssh, so the
     # grep pattern, its exit-status mapping, and the quoting are exercised for real.
     def shell_ssh(argv, **kwargs):

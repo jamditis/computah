@@ -475,12 +475,15 @@ def ssh_inbox_probe(host: str, inbox_path: str) -> LandingProbe:
     a read error (2).
     """
 
+    # Quote once here, so a malformed path fails when the brain is built, before any
+    # send, instead of raising mid-turn after the prompt is already on its way.
+    path = shlex.quote(inbox_path)
+
     def _has(event_id: str) -> bool | None:
         # The bridge's ids are uuid4s: hex and hyphens, literal inside an ERE. Any
         # other id cannot be matched safely, so it is unobservable, not absent.
         if not re.fullmatch(r"[0-9A-Za-z-]+", event_id):
             return None
-        path = shlex.quote(inbox_path)
         pattern = shlex.quote(f'"event_id" *: *"{event_id}"')
         remote = (
             f"if [ -f {path} ]; then grep -qE -- {pattern} {path}; "
