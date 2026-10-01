@@ -320,6 +320,7 @@ def collect(
 
     per_stage: dict[str, list[float]] = {}
     misses = 0
+    brain_failures: dict[str, int] = {}
     best_miss_score: float | None = None
     for _ in range(runs):
         result = pipeline.run_pipeline(clip, wake_word=wake_word)
@@ -334,6 +335,10 @@ def collect(
             if best_miss_score is None or score > best_miss_score:
                 best_miss_score = score
             continue
+        if result.get("rejected") == "brain_failure":
+            reason = result["reject_reason"]
+            brain_failures[reason] = brain_failures.get(reason, 0) + 1
+            continue
         for key, value in result["timings_s"].items():
             per_stage.setdefault(key, []).append(value)
 
@@ -346,8 +351,9 @@ def collect(
         "warm_total_s": warm_elapsed,
         "per_stage": per_stage,
         "runs_requested": runs,
-        "runs_measured": runs - misses,
+        "runs_measured": runs - misses - sum(brain_failures.values()),
         "wake_misses": misses,
+        "brain_failures": brain_failures,
         "best_miss_score": best_miss_score,
         "wake_threshold": cfg["wake_threshold"],
     }
@@ -504,7 +510,26 @@ def report_lines(collected: dict, transport: dict | None) -> list[str]:
         "",
     ]
 
+    brain_failures = collected.get("brain_failures", {})
+    if brain_failures:
+        reasons = ", ".join(
+            f"{reason}={count}" for reason, count in sorted(brain_failures.items())
+        )
+        lines += [
+            f"{sum(brain_failures.values())} run(s) failed in the brain and are "
+            f"excluded ({reasons}). Check the brain configuration or service, then rerun.",
+            "",
+        ]
+
     if not per_stage:
+        if brain_failures:
+            lines.append("No stage timings: no run produced a brain answer.")
+            if collected["wake_misses"]:
+                lines.append(
+                    f"{collected['wake_misses']} run(s) also missed the wake word. "
+                    + _miss_hint(collected)
+                )
+            return lines
         # An empty table under a p95 caveat reads like a result. There isn't one.
         lines.append(
             f"No stage timings: none of the {collected['runs_requested']} run(s) "
@@ -637,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
                     "runs_requested": collected["runs_requested"],
                     "runs_measured": collected["runs_measured"],
                     "wake_misses": collected["wake_misses"],
+                    "brain_failures": collected.get("brain_failures", {}),
                     "best_miss_score": collected["best_miss_score"],
                     "wake_threshold": collected["wake_threshold"],
                     "per_stage_s": collected["per_stage"],
@@ -653,13 +679,18 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(report_lines(collected, transport)))
 
     if collected["runs_measured"] == 0:
-        print(
-            f"\nNo run produced timings: {collected['wav_path']} never fired the "
-            "wake word.",
-            file=sys.stderr,
-        )
+        if collected.get("brain_failures"):
+            print(
+                "\nNo run produced answer timings: the brain failed.", file=sys.stderr
+            )
+        else:
+            print(
+                f"\nNo run produced timings: {collected['wav_path']} never fired the "
+                "wake word.",
+                file=sys.stderr,
+            )
         return 1
-    return 0 if collected["wake_misses"] == 0 else 1
+    return 1 if collected["wake_misses"] or collected.get("brain_failures") else 0
 
 
 if __name__ == "__main__":
