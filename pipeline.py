@@ -1474,7 +1474,12 @@ def brain(text: str, model: str | None = None, timeout_s: int | None = None) -> 
         reply = _brain_bridge(text, cfg)
     else:
         reply = _brain_cli(text, cfg, model=model, timeout_s=timeout_s)
-    return sanitize_reply(reply)
+    spoken = sanitize_reply(reply, empty_fallback="")
+    if isinstance(reply, brain_bridge.BrainFailure):
+        return brain_bridge.BrainFailure(spoken or EMPTY_REPLY_FALLBACK, reply.reason)
+    if not spoken:
+        return brain_bridge.BrainFailure(EMPTY_REPLY_FALLBACK, "empty_reply")
+    return spoken
 
 
 # One reply cursor per reply file, kept for the life of the process so the
@@ -1535,14 +1540,20 @@ def _brain_cli(
             cwd=tempfile.gettempdir(),
         )
     except subprocess.TimeoutExpired:
-        return "Sorry, I timed out thinking about that."
+        return brain_bridge.BrainFailure(
+            "Sorry, I timed out thinking about that.", "cli_timeout"
+        )
     except (FileNotFoundError, OSError):
         # The claude binary is not installed / not on PATH. Speak, do not crash.
-        return "Sorry, the brain is not available right now."
+        return brain_bridge.BrainFailure(
+            "Sorry, the brain is not available right now.", "cli_unavailable"
+        )
     if result.returncode != 0:
         err = (result.stderr or "").strip().splitlines()
         tail = err[-1] if err else f"exit {result.returncode}"
-        return f"Sorry, the brain call failed: {tail}"
+        return brain_bridge.BrainFailure(
+            f"Sorry, the brain call failed: {tail}", "cli_exit"
+        )
     return result.stdout.strip()
 
 
@@ -1660,6 +1671,9 @@ def run_pipeline(
     reply = brain(heard.text)
     timings["brain"] = time.time() - t2
     result["reply"] = reply
+    if isinstance(reply, brain_bridge.BrainFailure):
+        result["rejected"] = "brain_failure"
+        result["reject_reason"] = reply.reason
 
     if out_wav_path is None:
         out_wav_path = str(PROJECT_DIR / "test_audio" / "reply.wav")

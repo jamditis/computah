@@ -46,6 +46,22 @@ from typing import Callable
 
 logger = logging.getLogger("computah.brain")
 
+
+class BrainFailure(str):
+    """Spoken error text with a stable reason for callers that measure answers.
+
+    It remains a string so the voice loops can speak it without an exception or
+    a separate error path. The reason comes from the failing backend, never prose.
+    """
+
+    reason: str
+
+    def __new__(cls, text: str, reason: str) -> BrainFailure:
+        reply = super().__new__(cls, text)
+        reply.reason = reason
+        return reply
+
+
 # A FileOutbound block header line: "--- <ts> delivery_id=<id> ---", optionally
 # carrying the originating request's "event_id=<id>" so a reply can be matched to its
 # request by identity instead of file position (#19). The event_id token is optional:
@@ -174,7 +190,9 @@ def brain_via_bridge(
         stamped = send(persona, prompt, event_id=event_id)
     except Exception as e:  # transport failure (ssh down, CLI missing, ...)
         logger.warning("Brain send failed error=%s", type(e).__name__)
-        return f"Sorry, I couldn't reach the brain ({type(e).__name__})."
+        return BrainFailure(
+            f"Sorry, I couldn't reach the brain ({type(e).__name__}).", "bridge_send"
+        )
 
     # A send can exit 0 yet dead-letter to an inbox the session never reads (#44):
     # bot-spren resolves the inbox from its working dir, so a missing -d writes to a
@@ -209,9 +227,10 @@ def brain_via_bridge(
                     event_id,
                     landing_timeout_s,
                 )
-                return (
+                return BrainFailure(
                     "Sorry, I sent that but it never reached the brain's inbox. "
-                    "The message may be going to the wrong place."
+                    "The message may be going to the wrong place.",
+                    "bridge_not_landed",
                 )
             time.sleep(poll_s)
 
@@ -257,7 +276,7 @@ def brain_via_bridge(
         timeout_s,
         cursor.misses,
     )
-    return "Sorry, the brain took too long to answer."
+    return BrainFailure("Sorry, the brain took too long to answer.", "bridge_timeout")
 
 
 # --------------------------------------------------------------------------- #
@@ -551,7 +570,9 @@ def build_brain(
     """
     reply_path = cfg.get("brain_reply_path") or ""
     if not reply_path:
-        return lambda _text: "Sorry, the brain reply path is not configured."
+        return lambda _text: BrainFailure(
+            "Sorry, the brain reply path is not configured.", "bridge_reply_path"
+        )
 
     persona = cfg.get("brain_persona") or "assistant"
     transport = cfg.get("brain_transport")
@@ -564,7 +585,9 @@ def build_brain(
     if transport == "ssh":
         host = cfg.get("brain_host") or ""
         if not host:
-            return lambda _text: "Sorry, the brain host is not configured."
+            return lambda _text: BrainFailure(
+                "Sorry, the brain host is not configured.", "bridge_host"
+            )
         send = ssh_cli_send(host, bot_spren_bin, working_dir=workdir)
         read_reply = ssh_reply_reader(host, reply_path)
         confirm_landing = ssh_inbox_probe(host, inbox_path) if inbox_path else None
@@ -574,14 +597,22 @@ def build_brain(
         confirm_landing = file_inbox_probe(inbox_path) if inbox_path else None
     elif transport == "sim":
         if not inbox_path:
-            return lambda _text: "Sorry, the brain inbox path is not configured."
+            return lambda _text: BrainFailure(
+                "Sorry, the brain inbox path is not configured.", "bridge_inbox_path"
+            )
         if not isinstance(inbox_path, (str, Path)):
-            return lambda _text: "Sorry, the brain inbox path is not a filesystem path."
+            return lambda _text: BrainFailure(
+                "Sorry, the brain inbox path is not a filesystem path.",
+                "bridge_inbox_path",
+            )
         send = local_sim_send(inbox_path)
         read_reply = file_reply_reader(reply_path)
         confirm_landing = file_inbox_probe(inbox_path)
     else:
-        return lambda _text: f"Sorry, brain transport {transport!r} is not supported."
+        return lambda _text: BrainFailure(
+            f"Sorry, brain transport {transport!r} is not supported.",
+            "bridge_transport",
+        )
 
     reply_cursor = cursor if cursor is not None else ReplyCursor()
 
