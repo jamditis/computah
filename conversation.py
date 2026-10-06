@@ -90,6 +90,7 @@ CANCEL_WORDS = frozenset(
         "abort",
         "quit",
         "dont",
+        "dontdoit",
         "never",
         "nevermind",
         "forget",
@@ -129,8 +130,18 @@ CONFIRM_WORDS = frozenset(
     }
 )
 
+# These can approve alone, but together can describe a correction ("go right").
+_CONTEXTUAL_CONFIRM_WORDS = frozenset({"go", "right", "continue", "proceed"})
+_NEGATABLE_ACTIONS = frozenset({"go", "proceed", "continue", "confirm", "approve"})
+_NEGATABLE_CANCEL_VERBS = frozenset(
+    {"stop", "cancel", "abort", "quit", "forget", "scratch"}
+)
+_NEGATIONS = frozenset({"dont", "never"})
+_PLAIN_CANCEL_WORDS = CANCEL_WORDS - _NEGATIONS - {"dontdoit"}
+
 # Words that carry no decision either way, so they neither confirm nor block a
 # confirmation. Politeness and hedges mostly: "yes please", "um, yeah", "just do it".
+# "now" is not filler: "right now" can change the time in the readback.
 FILLER_WORDS = frozenset(
     {
         "um",
@@ -146,9 +157,7 @@ FILLER_WORDS = frozenset(
         "and",
         "then",
         "just",
-        "now",
         "i",
-        "mean",
         "guess",
         "think",
         "would",
@@ -179,9 +188,8 @@ _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 # is otherwise unlisted and would leave the reply looking unfinished. Their first word
 # already decides on its own.
 #
-# The negated form comes first and the order is load-bearing, because these apply in
-# sequence: without it "don't do it" reaches the rule below, folds to "dont confirm",
-# and lands in revise, so the plainest spoken refusal there is fails to cancel.
+# The negated form comes first so "don't do it" remains a refusal. Its own token
+# keeps "don't do it now" distinct from "no now", since the former changes timing.
 #
 # "cancel that" and "stop it" fold for a third reason, and it is the whitelist tail
 # check that creates it. Their object pronoun is not a decision word, so the reply ends
@@ -192,7 +200,8 @@ _WORD_SPLIT = re.compile(r"[^a-z0-9]+")
 _PHRASES = (
     (r"\bnever\s+mind\b", "nevermind"),
     (r"\bcall\s+it\s+off\b", "cancel"),
-    (r"\b(?:dont|do\s+not)\s+do\s+(?:it|that)\b", "no"),
+    (r"\b(?:dont|do\s+not)\s+do\s+(?:it|that)\b", "dontdoit"),
+    (r"\bdo\s+not\b", "dont"),
     (r"\bdo\s+it\b", "confirm"),
     (r"\b(cancel|stop|forget|scratch)\s+(?:it|that)\b", r"\1"),
     (r"\bthats\s+(right|correct|it)\b", "confirm"),
@@ -210,7 +219,7 @@ _PHRASES = (
 # decision. So the bar for adding one is that it ends a spoken turn more often than it
 # opens a hedge. "well" was here and does the opposite ("yeah, well..." is someone
 # winding up to disagree), which confirmed the request they were about to change.
-_TERMINAL_FILLER = frozenset({"then", "now", "please", "thanks"})
+_TERMINAL_FILLER = frozenset({"then", "please", "thanks"})
 
 # What a finished decision is allowed to end on. Capture endpoints on silence
 # (endpoint_silence_ms), so "yes, and..." said with a pause to think arrives as exactly
@@ -265,10 +274,37 @@ def classify_confirmation(text: str | None) -> str:
     tokens = _tokens(text or "")
     if not tokens:
         return CANCEL
+    meaningful = [t for t in tokens if t not in FILLER_WORDS]
     tail = list(tokens)
     while tail and tail[-1] in _TERMINAL_FILLER:
         tail.pop()
-    if tail and tail[-1] not in _CAN_END_A_DECISION:
+    if tail and tail[-1] != "now" and tail[-1] not in _CAN_END_A_DECISION:
+        return REVISE
+    # "stop now" is a refusal; "right now" and "don't do it now" change timing.
+    if (
+        "now" in meaningful
+        and any(t in _PLAIN_CANCEL_WORDS for t in meaningful)
+        and all(t in _PLAIN_CANCEL_WORDS or t == "now" for t in meaningful)
+    ):
+        return CANCEL
+    if tail and tail[-1] == "now":
+        return REVISE
+    if any(t in _NEGATIONS for t in meaningful):
+        if any(
+            t in _NEGATIONS and meaningful[i + 1] in _NEGATABLE_CANCEL_VERBS
+            for i, t in enumerate(meaningful[:-1])
+        ):
+            return REVISE
+        if (
+            len(meaningful) == 2
+            and meaningful[0] in _NEGATIONS
+            and meaningful[1] in _NEGATABLE_ACTIONS
+        ):
+            return CANCEL
+        if all(t in CANCEL_WORDS for t in meaningful):
+            return CANCEL
+        return REVISE
+    if sum(t in _CONTEXTUAL_CONFIRM_WORDS for t in meaningful) > 1:
         return REVISE
     if any(t in CANCEL_WORDS for t in tokens):
         if all(t in CANCEL_WORDS or t in FILLER_WORDS for t in tokens):

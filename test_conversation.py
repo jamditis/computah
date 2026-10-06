@@ -87,6 +87,34 @@ class TestConfirmationMustBeOnlyConfirmation(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
 
+    def test_contextual_approval_words_can_form_a_correction(self):
+        for answer in [
+            "go right",
+            "right go",
+            "continue right",
+            "yes, go right",
+            "right now",
+        ]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+        self.assertEqual(c.classify_confirmation("right"), c.CONFIRM)
+        self.assertEqual(c.classify_confirmation("go ahead"), c.CONFIRM)
+
+    def test_now_changes_timing_instead_of_approving_the_readback(self):
+        for answer in [
+            "right now",
+            "yes now",
+            "go ahead now",
+            "do it now",
+        ]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+
+    def test_an_unfinished_cancellation_revises(self):
+        for answer in ["stop now and", "cancel now I mean"]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+
     def test_a_fragment_of_a_confirming_phrase_is_not_a_confirmation(self):
         # "do it" and "that's right" confirm; "do", "it", "that", and "ahead" are what
         # a clipped transcript leaves behind, and none of them is a word someone who
@@ -96,7 +124,7 @@ class TestConfirmationMustBeOnlyConfirmation(unittest.TestCase):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
 
     def test_a_reply_that_acknowledges_nothing(self):
-        # Filler only. Not a refusal, so not a cancel, but it approved nothing.
+        # None of these replies gives a finished decision.
         for answer in ["um", "please", "uh well", "i mean"]:
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
@@ -225,7 +253,26 @@ class TestCancel(unittest.TestCase):
         self.assertEqual(c.classify_confirmation("dont do it go ahead"), c.REVISE)
 
     def test_a_refusal_with_filler_still_ends_the_turn(self):
-        for answer in ["no thanks", "um, no", "no please stop", "never mind then"]:
+        for answer in [
+            "no thanks",
+            "um, no",
+            "no please stop",
+            "never mind then",
+            "no, don't",
+            "stop, don't",
+            "stop now",
+            "cancel it now",
+            "please stop now",
+            "stop now please",
+            "no, stop now",
+            "abort now",
+            "never mind now",
+            "don't, don't do it",
+            "no, no, don't",
+            "don't, don't",
+            "don't, no",
+            "never, nope",
+        ]:
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.CANCEL)
 
@@ -257,6 +304,29 @@ class TestNegationCarryingACorrection(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
 
+    def test_negation_composes_with_the_following_decision(self):
+        for answer in ["dont stop", "do not stop", "never stop", "dont go right"]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+        for answer in ["dont proceed", "do not continue", "don't go", "never proceed"]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.CANCEL)
+
+    def test_negation_cut_off_mid_reply_stays_a_revision(self):
+        for answer in [
+            "don't, I mean",
+            "don't proceed and",
+            "dont the",
+            "never i",
+            "dont do it now",
+            "do not do that now",
+            "don't, stop",
+            "no, don't, stop",
+            "I don't mean proceed",
+        ]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+
     def test_a_reply_carrying_both_a_yes_and_a_no(self):
         # Ambiguous. Reading it back is how an ambiguous answer gets resolved, and it
         # runs nothing in the meantime.
@@ -280,6 +350,9 @@ class TestNegationCarryingACorrection(unittest.TestCase):
 class TestHandshakeStep(unittest.TestCase):
     def test_approval_executes(self):
         self.assertEqual(c.handshake_step("yes"), (c.EXECUTE, None))
+
+    def test_direction_correction_cannot_execute(self):
+        self.assertEqual(c.handshake_step("go right"), (c.REPROMPT, None))
 
     def test_refusal_abandons_and_says_so(self):
         self.assertEqual(c.handshake_step("no"), (c.ABANDON, c.CANCELLED_REPLY))
