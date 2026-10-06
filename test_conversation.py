@@ -101,7 +101,17 @@ class TestConfirmationMustBeOnlyConfirmation(unittest.TestCase):
         self.assertEqual(c.classify_confirmation("go ahead"), c.CONFIRM)
 
     def test_now_changes_timing_instead_of_approving_the_readback(self):
-        for answer in ["right now", "yes now", "go ahead now", "do it now"]:
+        for answer in [
+            "right now",
+            "yes now",
+            "go ahead now",
+            "do it now",
+        ]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+
+    def test_an_unfinished_cancellation_revises(self):
+        for answer in ["stop now and", "cancel now I mean"]:
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
 
@@ -114,7 +124,7 @@ class TestConfirmationMustBeOnlyConfirmation(unittest.TestCase):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
 
     def test_a_reply_that_acknowledges_nothing(self):
-        # Filler only. Not a refusal, so not a cancel, but it approved nothing.
+        # None of these replies gives a finished decision.
         for answer in ["um", "please", "uh well", "i mean"]:
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
@@ -312,6 +322,7 @@ class TestNegationCarryingACorrection(unittest.TestCase):
             "do not do that now",
             "don't, stop",
             "no, don't, stop",
+            "I don't mean proceed",
         ]:
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)

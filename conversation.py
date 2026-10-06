@@ -158,7 +158,6 @@ FILLER_WORDS = frozenset(
         "then",
         "just",
         "i",
-        "mean",
         "guess",
         "think",
         "would",
@@ -276,6 +275,11 @@ def classify_confirmation(text: str | None) -> str:
     if not tokens:
         return CANCEL
     meaningful = [t for t in tokens if t not in FILLER_WORDS]
+    tail = list(tokens)
+    while tail and tail[-1] in _TERMINAL_FILLER:
+        tail.pop()
+    if tail and tail[-1] != "now" and tail[-1] not in _CAN_END_A_DECISION:
+        return REVISE
     # "stop now" is a refusal; "right now" and "don't do it now" change timing.
     if (
         "now" in meaningful
@@ -283,10 +287,7 @@ def classify_confirmation(text: str | None) -> str:
         and all(t in _PLAIN_CANCEL_WORDS or t == "now" for t in meaningful)
     ):
         return CANCEL
-    tail = list(tokens)
-    while tail and tail[-1] in _TERMINAL_FILLER:
-        tail.pop()
-    if tail and tail[-1] not in _CAN_END_A_DECISION:
+    if tail and tail[-1] == "now":
         return REVISE
     if any(t in _NEGATIONS for t in meaningful):
         if any(
