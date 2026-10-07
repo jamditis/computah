@@ -110,6 +110,16 @@ class TestConfirmationMustBeOnlyConfirmation(unittest.TestCase):
             with self.subTest(answer=answer):
                 self.assertEqual(c.classify_confirmation(answer), c.REVISE)
 
+    def test_now_after_bare_refusal_requests_another_readback(self):
+        for answer in [
+            "no now",
+            "nope now",
+            "nah now",
+            "negative now",
+        ]:
+            with self.subTest(answer=answer):
+                self.assertEqual(c.classify_confirmation(answer), c.REVISE)
+
     def test_an_unfinished_cancellation_revises(self):
         for answer in ["stop now and", "cancel now I mean"]:
             with self.subTest(answer=answer):
