@@ -138,6 +138,9 @@ _NEGATABLE_CANCEL_VERBS = frozenset(
 )
 _NEGATIONS = frozenset({"dont", "never"})
 _PLAIN_CANCEL_WORDS = CANCEL_WORDS - _NEGATIONS - {"dontdoit"}
+# A bare refusal plus "now" may correct timing; only an explicit command cancels.
+_BARE_REFUSALS = frozenset({"no", "nope", "nah", "negative"})
+_TIMED_CANCEL_COMMANDS = _PLAIN_CANCEL_WORDS - _BARE_REFUSALS
 
 # Words that carry no decision either way, so they neither confirm nor block a
 # confirmation. Politeness and hedges mostly: "yes please", "um, yeah", "just do it".
@@ -280,10 +283,10 @@ def classify_confirmation(text: str | None) -> str:
         tail.pop()
     if tail and tail[-1] != "now" and tail[-1] not in _CAN_END_A_DECISION:
         return REVISE
-    # "stop now" is a refusal; "right now" and "don't do it now" change timing.
+    # "stop now" is a refusal; "no now" can correct timing, so it needs a new readback.
     if (
         "now" in meaningful
-        and any(t in _PLAIN_CANCEL_WORDS for t in meaningful)
+        and any(t in _TIMED_CANCEL_COMMANDS for t in meaningful)
         and all(t in _PLAIN_CANCEL_WORDS or t == "now" for t in meaningful)
     ):
         return CANCEL
